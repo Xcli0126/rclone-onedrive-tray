@@ -40,7 +40,7 @@ MAX_DELETE="${MAX_DELETE:-100}"
 MAX_LOG_BYTES="${MAX_LOG_BYTES:-5242880}"
 RETRIES="${RETRIES:-3}"
 RETRY_DELAY="${RETRY_DELAY:-60}"
-BISYNC_ARGS="${BISYNC_ARGS:---resilient --recover --max-lock 2m --conflict-resolve none --conflict-loser num}"
+BISYNC_ARGS="${BISYNC_ARGS:---resilient --recover --max-lock 2m --conflict-resolve none --conflict-loser num --stats 2s}"
 LOCK_FILE="${TMPDIR:-/tmp}/onedrive-sync.lock"
 RCLONE_CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/rclone"
 

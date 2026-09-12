@@ -17,6 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `onedrive-watch.service`, a systemd user unit that keeps the watcher alive.
 - `install.sh` installs the watcher and enables its unit when `WATCH=1`.
 - New configuration keys: `WATCH`, `WATCH_DEBOUNCE`, `WATCH_SETTLE`, `WATCH_EXCLUDE`.
+- The tray menu reports account usage, read from `rclone about` on a background thread and
+  refreshed every 30 minutes.
+- Live sync progress in the tray status line: percentage, throughput and the file being
+  transferred, parsed from rclone's stats output. `BISYNC_ARGS` now defaults to `--stats 2s` so
+  the blocks arrive often enough to be useful. A block older than 30 seconds is ignored, so an
+  idle tray no longer reports the final numbers of the previous run.
 
 ## [1.0.0] - 2026-09-13
 

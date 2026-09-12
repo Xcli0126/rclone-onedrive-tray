@@ -35,7 +35,9 @@ MAX_DELETE="100"
 #   --max-lock 2m       treat a lock older than 2m as stale    (needs rclone >= 1.65)
 #   --conflict-loser num / --conflict-resolve none
 #                       keep BOTH versions of a conflicting file (no data loss)
-BISYNC_ARGS="--resilient --recover --max-lock 2m --conflict-resolve none --conflict-loser num"
+#   --stats 2s          emit progress blocks often enough for the tray to show
+#                       a live percentage while a sync is running
+BISYNC_ARGS="--resilient --recover --max-lock 2m --conflict-resolve none --conflict-loser num --stats 2s"
 
 # rclone filter rules, one per line (rclone --filters-file syntax).
 FILTERS_FILE="$HOME/.config/rclone-onedrive-tray/filters.txt"

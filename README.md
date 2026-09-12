@@ -43,6 +43,10 @@ folder, open the log, pause automatic syncing, start at login, or rebuild the ba
 sync raises a notification with a plain-language reason, such as "network or DNS temporarily
 unavailable" or "more than 100 files would be deleted".
 
+The menu also reports how much of the account is in use, read from `rclone about` and refreshed
+every 30 minutes on a background thread so it never stalls the UI. While a run is in flight the
+status line carries live progress: percentage, throughput, and the name of the file moving.
+
 Local edits sync in seconds rather than at the next timer tick. A watcher on the sync folder
 starts a run as soon as the changes stop arriving; a new file measured 26 seconds from write to
 cloud confirmation, most of which is the debounce plus one full bisync pass. Changes made on

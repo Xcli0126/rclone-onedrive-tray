@@ -18,12 +18,15 @@ Requires: python3-gi, gir1.2-ayatanaappindicator3-0.1 (or appindicator3),
 from __future__ import annotations
 
 import fcntl
+import json
 import math
 import os
 import re
+import shlex
 import subprocess
 import sys
 import threading
+import time
 
 import gi
 
@@ -129,6 +132,7 @@ STRINGS = {
         "⚠ Sync failed {when}": "⚠ 同步失败 {when}",
         "Last sync {when}": "上次同步 {when}",
         "No sync recorded yet": "尚无同步记录（等待首次同步）",
+        "{used} of {total} used ({pct}%)": "已用 {used} / {total}（{pct}%）",
         # Failure hints, keyed by the [tag] the sync wrapper writes to the log.
         "lock": "有同步锁未释放；若反复出现请删除 ~/.cache/rclone/bisync/*.lck",
         "maxdelete": "待删除文件超过 MAX_DELETE；若确属正常的大批量删除，请运行 onedrive-sync --resync",
@@ -347,6 +351,68 @@ def read_last_result(log_path: str):
     return kind, when, tag, raw
 
 
+# ---------------------------------------------------------------- quota
+def fmt_size(n) -> str:
+    n = float(n)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if abs(n) < 1024:
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} PiB"
+
+
+def read_quota(remote: str):
+    """Ask the remote how much of the account is used. Returns (used, total)."""
+    name = remote.split(":", 1)[0] + ":"
+    _, out, _ = sh(f"rclone about {shlex.quote(name)} --json", timeout=90)
+    try:
+        data = json.loads(out)
+        total = data.get("total")
+        if total:
+            return data.get("used") or 0, total
+    except (ValueError, TypeError):
+        pass
+    return None
+
+
+# ---------------------------------------------------------------- progress
+# rclone prints a stats block every --stats seconds. Only the last one matters.
+PROG_RE = re.compile(
+    r"Transferred:\s+([\d.]+\s*\S+)\s*/\s*([\d.]+\s*\S+),\s*(\d+)%,\s*([\d.]+\s*\S+/s)")
+BUSY_RE = re.compile(r"^\s*\*\s+(.+?):\s", re.M)
+STAMP_RE = re.compile(r"^(\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2})", re.M)
+
+
+def read_progress(log_path: str, max_age: int = 30):
+    """Summarise the most recent stats block.
+
+    Returns None when there is no block, or when the newest one is older than
+    max_age seconds. Without that age check an idle tray reports the final
+    numbers of the previous run as if a transfer were in flight.
+    """
+    text = tail_text(log_path)
+    last = None
+    for match in PROG_RE.finditer(text):
+        last = match
+    if last is None:
+        return None
+
+    stamps = STAMP_RE.findall(text[:last.start()])
+    if stamps:
+        try:
+            age = time.time() - time.mktime(
+                time.strptime(stamps[-1], "%Y/%m/%d %H:%M:%S"))
+            if age > max_age:
+                return None
+        except (ValueError, OverflowError):
+            pass
+
+    pct = int(last.group(3))
+    busy = BUSY_RE.findall(text)
+    return {"pct": pct, "speed": last.group(4), "done": last.group(1),
+            "total": last.group(2), "file": busy[-1].strip() if busy else ""}
+
+
 # ---------------------------------------------------------------- tray
 class Tray:
     def __init__(self, cfg: dict):
@@ -354,6 +420,7 @@ class Tray:
         self.unit = cfg["UNIT_NAME"]
         self.service = f"{self.unit}.service"
         self.timer = f"{self.unit}.timer"
+        self.remote = cfg["REMOTE"]
         self.local = cfg["LOCAL"]
         self.log = cfg["LOG"]
         self.open_cmd = cfg["OPEN_APP_CMD"]
@@ -368,6 +435,8 @@ class Tray:
         self.notified_error_at = None
         self.manual_requested = False
         self.busy = False
+        self.quota = None          # (used, total) once a query has succeeded
+        self.quota_busy = False
 
         Notify.init(APP_ID)
 
@@ -382,6 +451,24 @@ class Tray:
 
         GLib.timeout_add_seconds(3, self.poll)
         self.poll()
+        GLib.timeout_add_seconds(1800, self.refresh_quota)
+        self.refresh_quota()
+
+    def refresh_quota(self):
+        """Query the account quota off the main loop; never block the menu."""
+        if not self.quota_busy:
+            self.quota_busy = True
+
+            def worker():
+                try:
+                    result = read_quota(self.remote)
+                    if result:
+                        self.quota = result
+                finally:
+                    self.quota_busy = False
+
+            threading.Thread(target=worker, daemon=True).start()
+        return True
 
     # -------------------------------------------------- menu
     def _build_menu(self):
@@ -390,6 +477,12 @@ class Tray:
         self.item_status = Gtk.MenuItem(label=self.t("Reading status…"))
         self.item_status.set_sensitive(False)
         self.menu.append(self.item_status)
+
+        self.item_quota = Gtk.MenuItem(label="")
+        self.item_quota.set_sensitive(False)
+        self.item_quota.set_visible(False)
+        self.menu.append(self.item_quota)
+
         self.menu.append(Gtk.SeparatorMenuItem())
 
         self._add(self.t("Sync now"), self.on_sync_now)
@@ -565,7 +658,15 @@ class Tray:
         self.was_syncing = syncing
 
         if syncing:
-            text = self.t("Syncing…")
+            prog = read_progress(self.log)
+            if prog:
+                text = f"{self.t('Syncing…')} {prog['pct']}%"
+                if prog["speed"]:
+                    text += f" · {prog['speed']}"
+                if prog["file"]:
+                    text += f" · {prog['file'][:34]}"
+            else:
+                text = self.t("Syncing…")
         elif paused:
             text = self.t("Automatic sync paused · last {when}", when=when or "—")
         elif kind == "error":
@@ -578,6 +679,15 @@ class Tray:
             text = self.t("No sync recorded yet")
 
         self.item_status.set_label(text)
+
+        if self.quota:
+            used, total = self.quota
+            pct = int(used * 100 / total) if total else 0
+            self.item_quota.set_label(self.t(
+                "{used} of {total} used ({pct}%)",
+                used=fmt_size(used), total=fmt_size(total), pct=pct))
+            self.item_quota.set_visible(True)
+
         return True
 
 
