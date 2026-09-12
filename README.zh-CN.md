@@ -84,29 +84,34 @@ sudo apt install rclone python3-gi gir1.2-ayatanaappindicator3-0.1 libnotify-bin
 ```bash
 git clone https://github.com/Xcli0126/rclone-onedrive-tray.git
 cd rclone-onedrive-tray
-./install.sh
+./setup.sh
 ```
 
-所有东西都装进你的家目录，安装器不会调用 `sudo`。
+`setup.sh` 会依次问清四件真正要紧的事：用哪个远程、同步远程下的哪个目录、本地放在哪、排除什么。然后写好配置、装好单元，并询问是否立即建立基线。不想回答提问也行：
+
+```bash
+./setup.sh --remote onedrive:Notes --local ~/OneDrive --filters obsidian --yes
+```
+
+`--yes` **故意不触发首次同步**。那一步会把云端全部拉下来且不能中断，所以它应该由你决定，而不是"一路回车"的副作用。
+
+所有东西都装进你的家目录，两个脚本都不会调用 `sudo`。
 
 ```
-~/.local/bin/onedrive-sync, onedrive-tray
+~/.local/bin/onedrive-sync, onedrive-tray, onedrive-watch
 ~/.config/rclone-onedrive-tray/config, filters.txt
 ~/.config/systemd/user/onedrive-sync.{service,timer}
+~/.config/systemd/user/onedrive-sync-watch.service
 ~/.config/autostart/rclone-onedrive-tray.desktop
 ```
 
-然后：
+想手工配置就改用 `./install.sh`，然后自己编辑配置文件：
 
 ```bash
-# 1. 确认 rclone 远程已存在并已授权
 rclone config            # 创建/授权一个名为 onedrive 的远程
 rclone lsd onedrive:     # 应该能列出你的文件
-
-# 2. 建立一次同步基线，首次会把云端全部拉下来
-onedrive-sync --resync
-
-# 3. 托盘图标已在运行，以后每次登录也会自动启动
+./install.sh
+onedrive-sync --resync   # 建立基线，会把云端全部拉下来
 ```
 
 ---

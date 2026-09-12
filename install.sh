@@ -172,6 +172,8 @@ $(say "Installed")
 
 Next steps:
 
+  (./setup.sh walks through all of the below interactively.)
+
   1. Make sure the rclone remote in your config exists and is authorised:
 
          rclone config          # create/authorise e.g. "onedrive"

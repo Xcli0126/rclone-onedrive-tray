@@ -26,6 +26,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Timed pause in the tray: 30 minutes, 2 hours or 8 hours. Both the timer and the watcher stop,
   and a transient systemd timer (`systemd-run --user --on-active`) brings them back, so a pause
   ends even if the tray exits. The menu shows the resume time.
+- `setup.sh`, a first-run wizard: picks the remote, the remote folder, the local directory and the
+  filter set, writes the config, then hands over to `install.sh`. Non-interactive through
+  `--remote/--local/--filters/--unit-name/--yes`. It resolves `XDG_CONFIG_HOME` and
+  `XDG_CACHE_HOME` rather than assuming `~/.config` and `~/.cache`, and `--yes` deliberately does
+  not start the first sync, which is long and must not be interrupted.
 
 ## [1.0.0] - 2026-09-13
 

@@ -14,19 +14,20 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq shellcheck
-          shellcheck bin/onedrive-sync install.sh uninstall.sh
+          shellcheck setup.sh install.sh uninstall.sh bin/onedrive-sync bin/onedrive-watch
 
       - name: Shell syntax
         run: |
-          bash -n bin/onedrive-sync
-          bash -n install.sh
-          bash -n uninstall.sh
+          for f in setup.sh install.sh uninstall.sh bin/onedrive-sync bin/onedrive-watch; do
+            bash -n "$f"
+          done
 
       - name: Python syntax
         run: python3 -m py_compile bin/onedrive-tray
 
       - name: Templates contain their placeholders
         run: |
-          grep -q '%SYNC_SCRIPT%' systemd/onedrive-sync.service.in
+          grep -q '%SYNC_SCRIPT%'  systemd/onedrive-sync.service.in
           grep -q '%INTERVAL%'     systemd/onedrive-sync.timer.in
+          grep -q '%WATCH_SCRIPT%' systemd/onedrive-watch.service.in
           grep -q '%TRAY_SCRIPT%'  autostart/rclone-onedrive-tray.desktop.in

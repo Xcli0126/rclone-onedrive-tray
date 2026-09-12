@@ -113,29 +113,37 @@ sudo apt install rclone python3-gi gir1.2-ayatanaappindicator3-0.1 libnotify-bin
 ```bash
 git clone https://github.com/Xcli0126/rclone-onedrive-tray.git
 cd rclone-onedrive-tray
-./install.sh
+./setup.sh
 ```
 
-Everything lands in your home directory, and the installer never calls `sudo`.
+`setup.sh` walks through the four choices that matter: which remote, which remote folder, where
+to keep it locally, and what to exclude. It writes the config, installs the units, and offers to
+build the baseline. If you would rather not answer prompts:
+
+```bash
+./setup.sh --remote onedrive:Notes --local ~/OneDrive --filters obsidian --yes
+```
+
+`--yes` deliberately stops short of the first sync. That one downloads everything and must not be
+interrupted, so it stays a decision you make rather than a side effect of answering "yes".
+
+Everything lands in your home directory, and neither script calls `sudo`.
 
 ```
-~/.local/bin/onedrive-sync, onedrive-tray
+~/.local/bin/onedrive-sync, onedrive-tray, onedrive-watch
 ~/.config/rclone-onedrive-tray/config, filters.txt
 ~/.config/systemd/user/onedrive-sync.{service,timer}
+~/.config/systemd/user/onedrive-sync-watch.service
 ~/.config/autostart/rclone-onedrive-tray.desktop
 ```
 
-Then:
+To configure by hand instead, run `./install.sh` and edit the config yourself:
 
 ```bash
-# 1. make sure the rclone remote exists and is authorised
 rclone config            # create/authorise a remote named e.g. "onedrive"
 rclone lsd onedrive:     # should list your files
-
-# 2. build the baseline once (this first run downloads everything)
-onedrive-sync --resync
-
-# 3. the tray icon is already running; it will also start at every login
+./install.sh
+onedrive-sync --resync   # build the baseline; downloads everything
 ```
 
 ---
