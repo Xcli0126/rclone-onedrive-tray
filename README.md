@@ -179,17 +179,26 @@ Mostly you don't. Click the tray icon when you want to:
 
 ```
 Last sync 14:32
+426.0 GiB of 1.0 TiB used (40%)
 ────────────────────────────────
 Sync now
 Open sync folder
 View sync log
 ────────────────────────────────
-☐ Pause automatic sync
+Pause automatic sync ▸   30 minutes
+                         2 hours
+                         8 hours
+                         ────────
+                         Resume now
 ☑ Start tray at login
 ────────────────────────────────
 Rebuild sync baseline (resync)…
 Quit
 ```
+
+A timed pause stops both the timer and the watcher, then hands the restart to a transient
+systemd timer, so the pause ends on its own whether or not the tray is still running. The menu
+label shows when it comes back.
 
 From a terminal:
 

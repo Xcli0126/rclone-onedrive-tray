@@ -149,17 +149,24 @@ UI_LANG=""                    # 界面语言：en / zh，留空则跟随 $LANG
 
 ```
 上次同步 14:32
+已用 426.0 GiB / 1.0 TiB（40%）
 ────────────────────────────────
 Sync now
 Open sync folder
 View sync log
 ────────────────────────────────
-☐ Pause automatic sync
+Pause automatic sync ▸   30 minutes
+                         2 hours
+                         8 hours
+                         ────────
+                         Resume now
 ☑ Start tray at login
 ────────────────────────────────
 Rebuild sync baseline (resync)…
 Quit
 ```
+
+定时暂停会同时停掉定时器和监听器，然后把恢复交给一个 systemd 瞬时定时器，所以**不管托盘还在不在，暂停都会自己结束**。菜单标签会显示恢复时刻。
 
 命令行：
 

@@ -23,6 +23,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   transferred, parsed from rclone's stats output. `BISYNC_ARGS` now defaults to `--stats 2s` so
   the blocks arrive often enough to be useful. A block older than 30 seconds is ignored, so an
   idle tray no longer reports the final numbers of the previous run.
+- Timed pause in the tray: 30 minutes, 2 hours or 8 hours. Both the timer and the watcher stop,
+  and a transient systemd timer (`systemd-run --user --on-active`) brings them back, so a pause
+  ends even if the tray exits. The menu shows the resume time.
 
 ## [1.0.0] - 2026-09-13
 
