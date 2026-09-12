@@ -2,6 +2,9 @@
 
 [English](README.md) | **简体中文**
 
+[![lint](https://github.com/Xcli0126/rclone-onedrive-tray/actions/workflows/lint.yml/badge.svg)](https://github.com/Xcli0126/rclone-onedrive-tray/actions/workflows/lint.yml)
+[![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 一个仿 Windows OneDrive 客户端的 Linux 托盘图标，外加一套会自愈的同步循环，底层是 `rclone bisync`。
 
 Linux 上没有官方 OneDrive 客户端。`rclone bisync` 能承担同步，但 rclone 给它标了 experimental，它没有界面，而且在 1.65 之前的版本里，一次中断就够它罢工。合上笔记本盖子，下一次同步会停在「Must run --resync to recover」，然后在你不手动敲那条命令之前一直停着。

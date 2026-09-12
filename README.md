@@ -2,6 +2,9 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
+[![lint](https://github.com/Xcli0126/rclone-onedrive-tray/actions/workflows/lint.yml/badge.svg)](https://github.com/Xcli0126/rclone-onedrive-tray/actions/workflows/lint.yml)
+[![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 A OneDrive-style tray icon and a self-healing sync loop for Linux desktops, built on `rclone bisync`.
 
 Linux has no official OneDrive client. `rclone bisync` handles the syncing, but rclone labels it
