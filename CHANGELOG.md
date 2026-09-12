@@ -34,6 +34,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Optional NetworkManager dispatcher hook (`./install.sh --with-nm-dispatcher`) that starts a
   sync as soon as an interface comes up, so waking from suspend catches up in seconds instead of
   waiting for the timer. This is the only component that needs root.
+- Selective folder sync. Names in `$CONFIG_DIR/exclude-folders.txt`, one per line, become
+  `--exclude "/<name>/**"` on every run. A deselected folder is treated as absent on both sides,
+  so its local copies are removed to free the space while the cloud keeps everything. Measured on
+  rclone 1.75: toggling a folder neither requires `--resync` nor modifies the remote.
+  `setup.sh` lists the remote's top-level folders and writes the file from `--skip-folders`.
 
 ## [1.0.0] - 2026-09-13
 

@@ -36,6 +36,7 @@ die() { printf '%s: %s\n' "$APP" "$*" >&2; exit 1; }
 RCLONE="${RCLONE:-rclone}"
 LOG="${LOG:-$CACHE_DIR/sync.log}"
 FILTERS_FILE="${FILTERS_FILE:-$CONFIG_DIR/filters.txt}"
+EXCLUDE_FOLDERS_FILE="${EXCLUDE_FOLDERS_FILE:-$CONFIG_DIR/exclude-folders.txt}"
 MAX_DELETE="${MAX_DELETE:-100}"
 MAX_LOG_BYTES="${MAX_LOG_BYTES:-5242880}"
 RETRIES="${RETRIES:-3}"
@@ -85,6 +86,22 @@ ARGS+=("${BISYNC_OPTS[@]}")
 ARGS+=(--max-delete "$MAX_DELETE" --log-level INFO --log-file "$LOG")
 if [ -n "$FILTERS_FILE" ] && [ -f "$FILTERS_FILE" ]; then
     ARGS+=(--filters-file "$FILTERS_FILE")
+fi
+
+# ---------------------------------------------------------------- selected folders
+# Top-level folders the user chose not to keep on this machine, one name per
+# line, relative to REMOTE. bisync treats them as absent on both sides, so the
+# local copies are removed and the cloud is left alone. Measured behaviour on
+# rclone 1.75: toggling a folder neither needs --resync nor touches the remote.
+if [ -n "$EXCLUDE_FOLDERS_FILE" ] && [ -f "$EXCLUDE_FOLDERS_FILE" ]; then
+    excluded=0
+    while IFS= read -r folder || [ -n "$folder" ]; do
+        folder="${folder%%$'\r'}"                 # tolerate CRLF
+        case "$folder" in ''|'#'*) continue ;; esac
+        ARGS+=(--exclude "/${folder}/**")
+        excluded=$((excluded + 1))
+    done < "$EXCLUDE_FOLDERS_FILE"
+    [ "$excluded" -gt 0 ] && log_line "NOTICE: ${excluded} folder(s) deselected"
 fi
 
 if [ "${1:-}" = "--resync" ]; then

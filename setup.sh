@@ -18,6 +18,7 @@
 #   --interval MIN           minutes between timer runs (default 5)
 #   --watch yes|no           enable realtime sync (default yes)
 #   --unit-name NAME         systemd unit base name (default onedrive-sync)
+#   --skip-folders "A,B"     top-level folders to leave off this machine
 #   --yes                    do not prompt for anything but the baseline
 #   --no-install             write the config only, do not run install.sh
 #
@@ -35,6 +36,7 @@ FILTERS_CHOICE=""
 INTERVAL="5"
 WATCH="yes"
 UNIT_NAME="onedrive-sync"
+SKIP_FOLDERS=""
 ASSUME_YES=0
 DO_INSTALL=1
 
@@ -52,6 +54,7 @@ while [ $# -gt 0 ]; do
         --interval)   INTERVAL="${2:?}"; shift 2 ;;
         --watch)      WATCH="${2:?}"; shift 2 ;;
         --unit-name)  UNIT_NAME="${2:?}"; shift 2 ;;
+        --skip-folders) SKIP_FOLDERS="${2:?}"; shift 2 ;;
         --yes|-y)     ASSUME_YES=1; shift ;;
         --no-install) DO_INSTALL=0; shift ;;
         -h|--help)    usage; exit 0 ;;
@@ -147,6 +150,35 @@ fi
 
 mkdir -p "$CONFIG_DIR"
 
+# --------------------------------------------------------------- 4b. folders
+# Everything syncs by default; this is where you drop the folders you do not
+# want on this machine. The cloud keeps them either way.
+EXCLUDE_FOLDERS_FILE="$CONFIG_DIR/exclude-folders.txt"
+if [ -z "$SKIP_FOLDERS" ] && [ "$ASSUME_YES" -eq 0 ] && [ -t 0 ]; then
+    echo
+    say "Folders inside $REMOTE"
+    listing="$(rclone lsf --dirs-only --max-depth 1 "$REMOTE" 2>/dev/null | sed 's:/$::')"
+    if [ -n "$listing" ]; then
+        printf '%s\n' "$listing" | nl -w2 -s') ' | sed 's/^/  /'
+        echo "  Everything is synced unless you say otherwise here."
+        SKIP_FOLDERS="$(ask 'Folders to LEAVE OFF this machine (comma separated)' '')"
+    else
+        echo "  (none found, or the remote is empty)"
+    fi
+fi
+
+: > "$EXCLUDE_FOLDERS_FILE"
+if [ -n "$SKIP_FOLDERS" ]; then
+    printf '%s' "$SKIP_FOLDERS" | tr ',' '\n' |
+        sed 's/^[[:space:]]*//; s/[[:space:]]*$//' |
+        grep -v '^$' > "$EXCLUDE_FOLDERS_FILE" || true
+    while IFS= read -r name; do
+        if [ -n "${listing:-}" ] && ! printf '%s\n' "$listing" | grep -qxF "$name"; then
+            warn "no folder named '$name' at the top level of $REMOTE"
+        fi
+    done < "$EXCLUDE_FOLDERS_FILE"
+fi
+
 case "$FILTERS_CHOICE" in
     obsidian|default) cp -f "$SRC_DIR/config/filters.example" "$FILTERS_FILE" ;;
     none)             printf '# no exclusions\n' > "$FILTERS_FILE" ;;
@@ -162,6 +194,7 @@ INTERVAL_MIN="$INTERVAL"
 MAX_DELETE="100"
 BISYNC_ARGS="--resilient --recover --max-lock 2m --conflict-resolve none --conflict-loser num --stats 2s"
 FILTERS_FILE="$FILTERS_FILE"
+EXCLUDE_FOLDERS_FILE="$EXCLUDE_FOLDERS_FILE"
 
 LOG="$CACHE_DIR/sync.log"
 OPEN_APP_CMD=""

@@ -42,6 +42,15 @@ BISYNC_ARGS="--resilient --recover --max-lock 2m --conflict-resolve none --confl
 # rclone filter rules, one per line (rclone --filters-file syntax).
 FILTERS_FILE="$HOME/.config/rclone-onedrive-tray/filters.txt"
 
+# Names of top-level folders to leave off this machine, one per line, relative to
+# REMOTE. This is what the tray's "Folders to sync" menu edits and what setup.sh
+# writes when you deselect folders.
+#
+# A deselected folder is treated as absent on both sides, so the local copies go
+# away to free the space while the cloud keeps everything. Toggling one neither
+# needs --resync nor touches the remote. Empty or missing means sync all of it.
+EXCLUDE_FOLDERS_FILE="$HOME/.config/rclone-onedrive-tray/exclude-folders.txt"
+
 # ------------------------------------------------------------------ tray
 # Where the sync log is written. Also rotated by onedrive-sync at 5 MB.
 LOG="$HOME/.cache/rclone-onedrive-tray/sync.log"
