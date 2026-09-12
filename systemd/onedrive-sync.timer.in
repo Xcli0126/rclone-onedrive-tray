@@ -1,0 +1,13 @@
+[Unit]
+Description=Periodic rclone bisync
+
+[Timer]
+# Fire once shortly after login, then again INTERVAL after each run *finishes*.
+# OnUnitInactiveSec (not OnUnitActiveSec) is deliberate: it prevents two runs
+# from overlapping when a sync takes longer than the interval.
+OnActiveSec=2min
+OnUnitInactiveSec=%INTERVAL%min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

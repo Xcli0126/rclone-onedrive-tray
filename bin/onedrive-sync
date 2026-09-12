@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+#
+# onedrive-sync: a resilient wrapper around `rclone bisync`.
+#
+# Why this exists:
+#   * rclone bisync is marked EXPERIMENTAL and, on rclone < 1.65, *any*
+#     interrupted run (suspend, power loss, network drop) leaves it demanding a
+#     manual `--resync` forever. This wrapper enables the modern self-healing
+#     flags and adds a few safety nets of its own.
+#   * systemd's default TimeoutStartSec for Type=oneshot is 90s, which kills a
+#     long first-time sync half way through.
+#   * A sync interrupted by suspend leaves a lock file that blocks the next run.
+#
+# Usage:
+#   onedrive-sync              incremental sync (3 attempts, 60s apart)
+#   onedrive-sync --resync     rebuild the sync baseline
+#
+# Configuration: ~/.config/rclone-onedrive-tray/config  (see config.example)
+#
+set -uo pipefail
+
+APP="onedrive-sync"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/rclone-onedrive-tray"
+CONFIG_FILE="$CONFIG_DIR/config"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/rclone-onedrive-tray"
+
+die() { printf '%s: %s\n' "$APP" "$*" >&2; exit 1; }
+
+[ -f "$CONFIG_FILE" ] || die "config not found: $CONFIG_FILE (run install.sh first)"
+# shellcheck source=/dev/null
+. "$CONFIG_FILE"
+
+: "${REMOTE:?REMOTE is not set in $CONFIG_FILE}"
+: "${LOCAL:?LOCAL is not set in $CONFIG_FILE}"
+
+RCLONE="${RCLONE:-rclone}"
+LOG="${LOG:-$CACHE_DIR/sync.log}"
+FILTERS_FILE="${FILTERS_FILE:-$CONFIG_DIR/filters.txt}"
+MAX_DELETE="${MAX_DELETE:-100}"
+MAX_LOG_BYTES="${MAX_LOG_BYTES:-5242880}"
+RETRIES="${RETRIES:-3}"
+RETRY_DELAY="${RETRY_DELAY:-60}"
+BISYNC_ARGS="${BISYNC_ARGS:---resilient --recover --max-lock 2m --conflict-resolve none --conflict-loser num}"
+LOCK_FILE="${TMPDIR:-/tmp}/onedrive-sync.lock"
+RCLONE_CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/rclone"
+
+command -v "$RCLONE" >/dev/null 2>&1 || die "rclone not found in PATH"
+
+mkdir -p "$(dirname "$LOG")" "$LOCAL" 2>/dev/null
+
+log_line() { printf '%s %s\n' "$(date '+%Y/%m/%d %H:%M:%S')" "$*" >>"$LOG"; }
+
+# ---------------------------------------------------------------- mutual exclusion
+# A manual run racing the systemd timer corrupts bisync's .lst listings.
+exec 9>"$LOCK_FILE"
+if ! flock -w 120 9; then
+    echo "$APP: another sync is already running, skipping this run" >&2
+    log_line "NOTICE: another run holds the lock, skipping"
+    exit 0
+fi
+
+# ---------------------------------------------------------------- stale locks
+# bisync's lock file records the owner PID. After a suspend/power loss the lock
+# survives; if its owner is gone we can drop it immediately instead of waiting
+# for --max-lock to expire.
+for lck in "$RCLONE_CACHE"/bisync/*.lck; do
+    [ -e "$lck" ] || continue
+    held_pid=$(grep -o '"PID"[[:space:]]*:[[:space:]]*"[0-9]\+"' "$lck" 2>/dev/null |
+        grep -o '[0-9]\+' | head -1)
+    if [ -n "$held_pid" ] && ! kill -0 "$held_pid" 2>/dev/null; then
+        rm -f "$lck"
+        log_line "NOTICE: removed stale lock (owner pid $held_pid is gone): $(basename "$lck")"
+    fi
+done
+
+# ---------------------------------------------------------------- log rotation
+if [ -f "$LOG" ] && [ "$(stat -c%s "$LOG" 2>/dev/null || echo 0)" -gt "$MAX_LOG_BYTES" ]; then
+    mv -f "$LOG" "$LOG.1"
+fi
+
+# ---------------------------------------------------------------- build argv
+read -r -a BISYNC_OPTS <<<"$BISYNC_ARGS"
+ARGS=(bisync "$REMOTE" "$LOCAL")
+ARGS+=("${BISYNC_OPTS[@]}")
+ARGS+=(--max-delete "$MAX_DELETE" --log-level INFO --log-file "$LOG")
+if [ -n "$FILTERS_FILE" ] && [ -f "$FILTERS_FILE" ]; then
+    ARGS+=(--filters-file "$FILTERS_FILE")
+fi
+
+if [ "${1:-}" = "--resync" ]; then
+    ARGS+=(--resync)
+    log_line "NOTICE: --resync requested, rebuilding baseline"
+fi
+
+# ---------------------------------------------------------------- failure hints
+# Turn rclone's noise into one actionable sentence, prefixed with a stable tag.
+# The tag lets a UI localise the message without pattern-matching English text.
+hint_for() {
+    local t tag msg
+    t=$(tail -n 60 "$LOG" 2>/dev/null)
+
+    if grep -qiE 'prior lock file found' <<<"$t"; then
+        tag=lock
+        msg="a sync lock is still held; if this repeats, delete the *.lck files in ~/.cache/rclone/bisync"
+    elif grep -qiE 'max-delete|excessive deletes|deletion limit' <<<"$t"; then
+        tag=maxdelete
+        msg="more than MAX_DELETE=$MAX_DELETE files would be deleted; if that is intended run: onedrive-sync --resync"
+    elif grep -qiE 'lookup .*:53|dial tcp|no such host|Temporary failure in name resolution|server misbehaving' <<<"$t"; then
+        tag=network
+        msg="network or DNS temporarily unavailable; will retry"
+    elif grep -qiE 'must run --resync|resync required|prior listings|critical error' <<<"$t"; then
+        tag=resync
+        msg="sync baseline is invalid; run: onedrive-sync --resync"
+    elif grep -qiE 'invalid_grant|401 Unauthorized|403 Forbidden|token' <<<"$t"; then
+        tag=auth
+        msg="authorisation may have expired; re-authorise the rclone remote"
+    else
+        tag=other
+        msg="see log: $LOG"
+    fi
+
+    printf '[%s] %s' "$tag" "$msg"
+}
+
+# ---------------------------------------------------------------- main loop
+for i in $(seq 1 "$RETRIES"); do
+    "$RCLONE" "${ARGS[@]}"
+    rc=$?
+
+    if [ "$rc" -eq 0 ]; then
+        [ "$i" -gt 1 ] && echo "$APP: succeeded on attempt $i"
+        exit 0
+    fi
+
+    hint=$(hint_for)
+    printf '%s: attempt %d/%d failed (rc=%d) %s\n' "$APP" "$i" "$RETRIES" "$rc" "$hint" >&2
+    log_line "ERROR: attempt $i/$RETRIES failed (rc=$rc) $hint"
+
+    [ "$i" -lt "$RETRIES" ] && sleep "$RETRY_DELAY"
+done
+
+printf '%s: all %d attempts failed, giving up this round\n' "$APP" "$RETRIES" >&2
+exit 1

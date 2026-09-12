@@ -1,0 +1,62 @@
+# rclone-onedrive-tray configuration
+# ---------------------------------
+# Shell-style KEY="value" assignments. Read by both `onedrive-sync` (bash, via
+# `.`) and `onedrive-tray` (python, via a tiny parser). Variable expansion such
+# as $HOME works in both.
+#
+# After changing REMOTE, LOCAL, FILTERS_FILE or BISYNC_ARGS you must rebuild the
+# sync baseline once:   onedrive-sync --resync
+
+# ------------------------------------------------------------------ what to sync
+# An rclone remote, optionally with a sub-path. Create/verify it with:
+#     rclone config          # set up a remote named e.g. "onedrive"
+#     rclone lsd onedrive:   # list what rclone sees
+REMOTE="onedrive:"
+
+# The local directory to keep in sync. Created if missing.
+LOCAL="$HOME/OneDrive"
+
+# ------------------------------------------------------------------ scheduling
+# Base name of the systemd user units (installed as <UNIT_NAME>.service/.timer).
+UNIT_NAME="onedrive-sync"
+
+# Minutes between automatic syncs (measured from the end of the previous run).
+INTERVAL_MIN="5"
+
+# ------------------------------------------------------------------ safety
+# Abort a run if it would delete more than this many files. A guard against a
+# wiped-out folder propagating to the cloud. Raise it if you legitimately delete
+# large folders; see docs/TROUBLESHOOTING.md for how to recover from a trip.
+MAX_DELETE="100"
+
+# Extra arguments handed to `rclone bisync`.
+#   --resilient         retry after less-serious errors instead of demanding --resync
+#   --recover           auto-recover from an interrupted run  (needs rclone >= 1.65)
+#   --max-lock 2m       treat a lock older than 2m as stale    (needs rclone >= 1.65)
+#   --conflict-loser num / --conflict-resolve none
+#                       keep BOTH versions of a conflicting file (no data loss)
+BISYNC_ARGS="--resilient --recover --max-lock 2m --conflict-resolve none --conflict-loser num"
+
+# rclone filter rules, one per line (rclone --filters-file syntax).
+FILTERS_FILE="$HOME/.config/rclone-onedrive-tray/filters.txt"
+
+# ------------------------------------------------------------------ tray
+# Where the sync log is written. Also rotated by onedrive-sync at 5 MB.
+LOG="$HOME/.cache/rclone-onedrive-tray/sync.log"
+
+# Optional: an application the tray can launch from its menu, e.g. "obsidian".
+# Leave empty to hide the menu entry.
+OPEN_APP_CMD=""
+OPEN_APP_NAME="the app"
+
+# Tray language: "en" or "zh". Empty = follow the system locale (a zh_* locale
+# selects Chinese, anything else falls back to English).
+# Failure hints shown in the tray are localised too: onedrive-sync tags them in
+# the log ([network], [maxdelete], ...) and the tray renders the matching text.
+UI_LANG=""
+
+# ------------------------------------------------------------------ advanced
+# How many times to retry a failed sync before giving up for this round.
+RETRIES="3"
+# Seconds between retries.
+RETRY_DELAY="60"

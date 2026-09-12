@@ -1,0 +1,266 @@
+# rclone-onedrive-tray
+
+**English** | [简体中文](README.zh-CN.md)
+
+A OneDrive-style tray icon and a self-healing sync loop for Linux desktops, built on `rclone bisync`.
+
+Linux has no official OneDrive client. `rclone bisync` handles the syncing, but rclone labels it
+experimental, it ships without a user interface, and on versions older than 1.65 one interrupted
+run is enough to break it. Close the laptop lid mid-sync and the next run stops with "Must run
+--resync to recover", then keeps stopping until you run that command by hand.
+
+This wraps it into something closer to what Windows users get: an icon in the tray, a desktop
+notification when a sync fails, and a loop that recovers on its own.
+
+```
+   tray icon  ──────┐
+                    ├──> onedrive-sync ──> rclone bisync ──> your cloud
+ systemd timer ─────┘         │
+                              └── retries · stale-lock recovery · log rotation
+```
+
+---
+
+## Status icons
+
+| Icon | State | Meaning |
+|---|---|---|
+| ![synced](assets/icons/synced.png) | `synced` | Last run finished successfully |
+| ![syncing](assets/icons/syncing.png) | `syncing` | A sync is running right now |
+| ![error](assets/icons/error.png) | `error` | Last run failed. The tooltip says why |
+| ![paused](assets/icons/paused.png) | `paused` | Automatic sync is switched off |
+| ![unknown](assets/icons/unknown.png) | `unknown` | Nothing has run yet |
+
+---
+
+## What you get
+
+The tray icon carries one of those five states and opens a menu: sync now, open the synced
+folder, open the log, pause automatic syncing, start at login, or rebuild the baseline. A failed
+sync raises a notification with a plain-language reason, such as "network or DNS temporarily
+unavailable" or "more than 100 files would be deleted".
+
+The sync wrapper covers what `rclone bisync` leaves to you.
+
+An interrupted run heals by itself. The wrapper passes `--recover` and `--resilient`, so a
+suspend or a crash is followed by an ordinary sync instead of a demand for manual work. Killing
+a sync mid-transfer and re-running it recovers in about 18 seconds.
+
+Stale locks clear themselves too. bisync writes a lock file naming the process that holds it.
+After a suspend that process is gone but the file stays, and bisync refuses to run until the lock
+expires. The wrapper checks whether the PID still exists and drops the lock if it does not, which
+matters because a generous `--max-lock` turns one crash into an hour of downtime.
+
+Overlapping runs are impossible. The wrapper holds a `flock` for the duration of a run, so
+clicking "Sync now" while the timer fires waits instead of racing. Two bisync processes on the
+same file pair delete each other's listing files, and the recovery costs a full `--resync`.
+
+Deletions are capped at `MAX_DELETE` files per run. A wiped local folder aborts the sync rather
+than propagating to the cloud, though it does mean a deliberate bulk delete needs
+`onedrive-sync --resync` afterwards.
+
+Conflicts keep both copies. When a file changed on both sides, rclone renames both versions
+instead of picking a winner, so nothing is lost. The cost is that you merge them by hand.
+
+The log rotates at 5 MB, and the tray reads only the last 64 KB of it. A sync every five minutes
+writes roughly 240 KB a day, which is harmless for the disk but not for a `readlines()` call
+running every three seconds for a year.
+
+Nothing runs between syncs. A systemd user timer starts a `oneshot` service, and that is the
+entire process model. One shell-style config file drives everything, so no paths are hard-coded.
+
+---
+
+## Requirements
+
+| Component | Notes |
+|---|---|
+| Linux with systemd (user session) | Tested on Ubuntu 24.04 and 26.04, GNOME on Wayland |
+| [rclone](https://rclone.org/downloads/) 1.65 or newer | `--recover`, `--resilient` and `--conflict-resolve` need it. Distro packages are often older |
+| `python3-gi`, GTK 3 | Tray app |
+| `gir1.2-ayatanaappindicator3-0.1` | Tray icon. On GNOME you also need the AppIndicator shell extension, which Ubuntu ships |
+| `libnotify` | Desktop notifications |
+
+On Debian or Ubuntu:
+
+```bash
+sudo apt install rclone python3-gi gir1.2-ayatanaappindicator3-0.1 libnotify-bin
+```
+
+> The rclone version matters. The one in the Ubuntu archive can be years behind, so check
+> `rclone version` first. Below 1.65, download a current build and put the binary in
+> `/usr/local/bin`, which takes precedence over `/usr/bin`.
+
+---
+
+## Install
+
+```bash
+git clone https://github.com/Xcli0126/rclone-onedrive-tray.git
+cd rclone-onedrive-tray
+./install.sh
+```
+
+Everything lands in your home directory, and the installer never calls `sudo`.
+
+```
+~/.local/bin/onedrive-sync, onedrive-tray
+~/.config/rclone-onedrive-tray/config, filters.txt
+~/.config/systemd/user/onedrive-sync.{service,timer}
+~/.config/autostart/rclone-onedrive-tray.desktop
+```
+
+Then:
+
+```bash
+# 1. make sure the rclone remote exists and is authorised
+rclone config            # create/authorise a remote named e.g. "onedrive"
+rclone lsd onedrive:     # should list your files
+
+# 2. build the baseline once (this first run downloads everything)
+onedrive-sync --resync
+
+# 3. the tray icon is already running; it will also start at every login
+```
+
+---
+
+## Configuration
+
+`~/.config/rclone-onedrive-tray/config`, with the annotated list in
+[`config/config.example`](config/config.example).
+
+```sh
+REMOTE="onedrive:"            # rclone remote, optionally with a sub-path: "onedrive:Notes"
+LOCAL="$HOME/OneDrive"        # local directory to keep in sync
+INTERVAL_MIN="5"              # minutes between automatic syncs
+MAX_DELETE="100"              # abort if a run would delete more than this
+BISYNC_ARGS="--resilient --recover --max-lock 2m --conflict-resolve none --conflict-loser num"
+FILTERS_FILE="$HOME/.config/rclone-onedrive-tray/filters.txt"
+OPEN_APP_CMD=""               # optional: an app the tray can launch, e.g. "obsidian"
+UI_LANG=""                    # tray language: en / zh (empty = follow $LANG)
+```
+
+`~/.config/rclone-onedrive-tray/filters.txt` holds [rclone filter
+rules](https://rclone.org/filtering/), one per line. Caches that every machine regenerates, and
+per-machine UI state, are the usual things worth excluding. A starting point ships in
+[`config/filters.example`](config/filters.example):
+
+```
+- /.rag/**                          # machine-local vector index (can be hundreds of MB)
+- /.obsidian/workspace.json         # editor layout; flip-flops between machines
+- .DS_Store
+- '**/__pycache__/**'
+```
+
+> Changing `REMOTE`, `LOCAL`, `FILTERS_FILE` or `BISYNC_ARGS` invalidates the baseline. Run
+> `onedrive-sync --resync` once afterwards.
+
+---
+
+## Usage
+
+Mostly you don't. Click the tray icon when you want to:
+
+```
+Last sync 14:32
+────────────────────────────────
+Sync now
+Open sync folder
+View sync log
+────────────────────────────────
+☐ Pause automatic sync
+☑ Start tray at login
+────────────────────────────────
+Rebuild sync baseline (resync)…
+Quit
+```
+
+From a terminal:
+
+```bash
+onedrive-sync                 # one incremental sync (3 attempts)
+onedrive-sync --resync        # rebuild the baseline
+systemctl --user list-timers onedrive-sync.timer
+systemctl --user start onedrive-sync.service     # sync now
+journalctl --user -u onedrive-sync.service -f
+tail -f ~/.cache/rclone-onedrive-tray/sync.log
+```
+
+### Syncing while logged out
+
+User services start at login, so a machine sitting at the login screen syncs nothing. To change
+that:
+
+```bash
+sudo loginctl enable-linger "$USER"
+```
+
+---
+
+## Design notes
+
+These decisions are deliberate. Each one closes a failure mode that is easy to hit and annoying
+to diagnose.
+
+The timer uses `OnUnitInactiveSec`, not `OnUnitActiveSec`. It schedules the next run a fixed
+interval after the previous one finishes. Measuring from the start instead lets a slow sync
+overlap the next one, and overlapping runs corrupt bisync's state files.
+
+`TimeoutStartSec=1800` is there because systemd's default for `Type=oneshot` is 90 seconds. A
+first sync of a large folder runs far longer, and would be killed part way through.
+
+The `flock` exists because "Sync now" during a scheduled run is not a theoretical race. It
+happens the first time you get impatient, and the pair ends up needing `--resync`.
+
+Short `--max-lock` values are a trade-off. Two minutes means a crash costs two minutes of
+downtime, while a long value means the same crash blocks syncing for most of an hour. rclone
+renews the lock while a run is genuinely running, so a short value does not endanger long syncs.
+
+`systemctl is-active` returns `activating` for a `oneshot` service, never `active`. A tray that
+tests for `"active"` never sees a running sync and never sends a failure notification, which is
+the one moment the notification matters.
+
+---
+
+## Known limitations
+
+- `rclone bisync` is labelled experimental by rclone. Keep cloud-side version history or a
+  separate backup for anything irreplaceable.
+- Conflicts keep both files (`foo.txt` becomes `foo.txt.conflict1` and `.conflict2`). Nothing is
+  lost, but you have to merge them by hand.
+- Syncing a folder an application is actively writing to can produce conflicts. Excluding
+  volatile state files, as the example filters do, avoids most of it.
+- The tray icon needs an AppIndicator-compatible shell. Stock GNOME needs the AppIndicator
+  extension; KDE, Xfce and Cinnamon work out of the box.
+- Linux only.
+
+---
+
+## Troubleshooting
+
+Microsoft's deprecated `nativeclient` redirect, the `ObjectHandle is Invalid` drive-ID trap,
+bisync's lock and resync behaviour, and why an interrupted sync used to demand manual
+intervention are all written up in
+[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
+
+---
+
+## Uninstall
+
+```bash
+./uninstall.sh            # keeps your config
+./uninstall.sh --purge    # removes config too
+```
+
+Your synced folder and the rclone remote are never touched.
+
+---
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md).
+
+## License
+
+[MIT](LICENSE)

@@ -1,0 +1,65 @@
+# Changelog
+
+All notable changes to this project are documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+## [1.0.0] - 2026-09-13
+
+First public release.
+
+### Added
+
+- `onedrive-sync`, a wrapper around `rclone bisync` that makes an unattended
+  sync loop survivable:
+  - runs with `--resilient --recover` so a suspend, crash or power loss is
+    followed by a normal sync instead of a demand for a manual `--resync`
+    (requires rclone ≥ 1.65)
+  - clears stale bisync lock files whose owning PID is gone, rather than waiting
+    for the whole `--max-lock` window
+  - holds a `flock` for the duration of a run, so a manual sync and a scheduled
+    one can never race and corrupt bisync's listing files
+  - retries a failed run (`RETRIES`, `RETRY_DELAY`) and rotates its own log at
+    5 MB
+  - classifies the failure and tags it (`[network]`, `[maxdelete]`, `[resync]`,
+    `[lock]`, `[auth]`, `[other]`) so a UI can localise it and the log stays
+    greppable
+  - supports `onedrive-sync --resync` as the documented way out of an
+    inconsistent state
+- `onedrive-tray`, a GTK/AppIndicator status icon:
+  - five states (synced / syncing / failed / paused / no-record) with
+    procedurally drawn icons
+  - desktop notification on failure, carrying the localised reason
+  - menu: sync now, open the synced folder, view the log, pause automatic sync,
+    start at login, rebuild the baseline, quit
+  - English and Simplified Chinese UI, selected by `UI_LANG` or the locale
+  - single-instance lock; reads only the last 64 KB of the log
+- systemd user units, a `oneshot` service with `TimeoutStartSec=1800`
+  (systemd's 90 s default would kill a first full sync) and a timer using
+  `OnUnitInactiveSec` so runs cannot overlap.
+- `install.sh` / `uninstall.sh`, per-user install with dependency checks,
+  unit generation from templates, and no `sudo`.
+- Example configuration, `config/config.example` and
+  `config/filters.example`, covering caches and per-machine state that should not
+  be synced.
+- `docs/TROUBLESHOOTING.md`, the failure modes that cost the most time to
+  diagnose, including Microsoft deprecating the `nativeclient` redirect
+  (`/common/wrongplace`), the rclone `ObjectHandle is Invalid` drive-ID trap,
+  bisync lock and resync behaviour, and `oneshot` services reporting
+  `activating` rather than `active`.
+- GitHub Actions workflow running `shellcheck` and syntax checks.
+
+### Notes
+
+- Requires rclone ≥ 1.65 for automatic recovery from an interrupted run. Older
+  versions still work, but an interruption will require `--resync` by hand.
+- The tray icon needs an AppIndicator-compatible shell; on stock GNOME that means
+  the AppIndicator extension.
+- `rclone bisync` is marked experimental upstream. See the "Known limitations"
+  section of the README.
+
+[Unreleased]: https://github.com/Xcli0126/rclone-onedrive-tray/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/Xcli0126/rclone-onedrive-tray/releases/tag/v1.0.0

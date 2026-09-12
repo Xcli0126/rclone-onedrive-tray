@@ -1,0 +1,10 @@
+[Unit]
+Description=rclone bisync for rclone-onedrive-tray
+Documentation=https://rclone.org/bisync/
+
+[Service]
+Type=oneshot
+# systemd's default TimeoutStartSec for Type=oneshot is 90s, which would kill a
+# first full sync half way through. Give it room.
+TimeoutStartSec=1800
+ExecStart=%SYNC_SCRIPT%

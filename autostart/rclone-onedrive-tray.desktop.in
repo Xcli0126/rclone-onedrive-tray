@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=OneDrive status icon
+Comment=rclone bisync tray icon
+Exec=%TRAY_SCRIPT%
+Terminal=false
+X-GNOME-Autostart-enabled=true

@@ -1,0 +1,35 @@
+# rclone filter rules for the bisync pair, one per line.
+# Syntax: https://rclone.org/filtering/
+#   - pattern    exclude
+#   + pattern    include
+# A pattern starting with "/" is anchored to the sync root; otherwise it matches
+# at any depth.
+#
+# Everything listed here is ignored on BOTH sides, so those files simply stay as
+# they are locally and in the cloud.
+#
+# NOTE: changing this file requires a one-off baseline rebuild:
+#     onedrive-sync --resync
+
+# --- caches / indexes that are machine-specific and get regenerated -----------
+# (example: the .rag vector index of an Obsidian RAG plugin, often hundreds of MB)
+- /.rag/**
+
+# --- per-machine UI state ----------------------------------------------------
+# Workspace layout flip-flopping between two machines is pure noise.
+- /.obsidian/workspace.json
+- /.obsidian/workspace-mobile.json
+
+# --- OS junk -----------------------------------------------------------------
+- .DS_Store
+- Thumbs.db
+- desktop.ini
+- .Trash-*
+- '*~'
+- '*.swp'
+- '*.tmp'
+- '*.partial'
+
+# --- language caches ---------------------------------------------------------
+- '**/__pycache__/**'
+- '*.pyc'

@@ -1,0 +1,614 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""rclone-onedrive-tray: a OneDrive-style status icon for `rclone bisync`.
+
+A small GTK/AppIndicator tray app that shows the state of an rclone bisync pair
+and lets you drive it without a terminal:
+
+    * live status icon (synced / syncing / failed / paused / unknown)
+    * desktop notification when a sync fails
+    * "sync now", "open folder", "view log", "pause", "rebuild baseline"
+    * remembers whether the icon should start at login
+
+Everything is driven by ~/.config/rclone-onedrive-tray/config.
+
+Requires: python3-gi, gir1.2-ayatanaappindicator3-0.1 (or appindicator3),
+          a running AppIndicator-compatible shell extension on GNOME.
+"""
+from __future__ import annotations
+
+import fcntl
+import math
+import os
+import re
+import subprocess
+import sys
+import threading
+
+import gi
+
+gi.require_version("Gtk", "3.0")
+try:
+    gi.require_version("AyatanaAppIndicator3", "0.1")
+    from gi.repository import AyatanaAppIndicator3 as AppIndicator
+except ValueError:
+    gi.require_version("AppIndicator3", "0.1")
+    from gi.repository import AppIndicator3 as AppIndicator
+
+gi.require_version("Notify", "0.7")
+from gi.repository import GLib, Gtk, Notify  # noqa: E402
+
+try:
+    import cairo
+except ImportError:  # pragma: no cover - cairo ships with python3-gi
+    cairo = None
+
+APP_ID = "rclone-onedrive-tray"
+APP_NAME = "OneDrive"
+
+CONFIG_DIR = os.path.join(os.environ.get("XDG_CONFIG_HOME") or
+                          os.path.expanduser("~/.config"), "rclone-onedrive-tray")
+CONFIG_FILE = os.path.join(CONFIG_DIR, "config")
+CACHE_DIR = os.path.join(os.environ.get("XDG_CACHE_HOME") or
+                         os.path.expanduser("~/.cache"), "rclone-onedrive-tray")
+ICON_DIR = os.path.join(os.environ.get("XDG_DATA_HOME") or
+                        os.path.expanduser("~/.local/share"),
+                        "rclone-onedrive-tray", "icons")
+AUTOSTART = os.path.join(os.environ.get("XDG_CONFIG_HOME") or
+                         os.path.expanduser("~/.config"), "autostart",
+                         "rclone-onedrive-tray.desktop")
+LOCK_FILE = os.path.join(os.environ.get("TMPDIR") or "/tmp",
+                         "rclone-onedrive-tray.lock")
+
+STATES = ("synced", "syncing", "error", "paused", "unknown")
+CLOUD_COLOR = (0.20, 0.51, 0.89)
+BADGE_COLORS = {
+    "synced": (0.18, 0.66, 0.31),
+    "syncing": (0.95, 0.62, 0.11),
+    "error": (0.86, 0.21, 0.18),
+    "paused": (0.55, 0.56, 0.58),
+}
+
+
+# ---------------------------------------------------------------- configuration
+def load_config() -> dict:
+    """Parse the shell-style KEY="value" config (no shell execution)."""
+    cfg: dict[str, str] = {}
+    try:
+        with open(CONFIG_FILE, encoding="utf-8") as fh:
+            for raw in fh:
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, val = line.partition("=")
+                val = val.strip()
+                if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
+                    val = val[1:-1]
+                cfg[key.strip()] = os.path.expandvars(val)
+    except OSError:
+        pass
+
+    cfg.setdefault("LOCAL", os.path.expanduser("~/OneDrive"))
+    cfg.setdefault("UNIT_NAME", "onedrive-sync")
+    cfg.setdefault("LOG", os.path.join(CACHE_DIR, "sync.log"))
+    cfg.setdefault("OPEN_APP_CMD", "")
+    cfg.setdefault("OPEN_APP_NAME", "the app")
+    cfg.setdefault("UI_LANG", "")
+    return cfg
+
+
+# ---------------------------------------------------------------- localisation
+# English strings double as the lookup keys, so a language table only has to
+# list its differences.  "dlg_resync_body" is the one long string, which gets a
+# symbolic key to keep it readable.
+STRINGS = {
+    "zh": {
+        "Reading status…": "正在读取状态…",
+        "Sync now": "立即同步",
+        "Open {app}": "打开 {app}",
+        "Open sync folder": "打开同步文件夹",
+        "View sync log": "查看同步日志",
+        "Pause automatic sync": "暂停自动同步",
+        "Automatic sync paused (click to resume)": "已暂停（点击恢复）",
+        "Start tray at login": "开机自动启动图标",
+        "Rebuild sync baseline (resync)…": "重建同步基线（resync）…",
+        "Quit": "退出",
+        "Rebuild the sync baseline?": "重建同步基线？",
+        "dlg_resync_body": (
+            "仅在同步持续失败、或你确实批量删除了大量文件后使用。\n\n"
+            "重建会把两边的文件按当前状态重新对齐，过程中请勿关机。"),
+        "Syncing…": "正在同步…",
+        "Rebuilding sync baseline…": "正在重建同步基线…",
+        "Automatic sync paused": "已暂停自动同步",
+        "Automatic sync resumed": "已恢复自动同步",
+        "{app} sync failed": "{app} 同步失败",
+        "see the sync log": "请查看同步日志",
+        "Sync finished {when}": "同步完成 {when}",
+        "Path does not exist: {path}": "路径不存在：{path}",
+        "Automatic sync paused · last {when}": "已暂停自动同步 · 上次 {when}",
+        "⚠ Sync failed {when}": "⚠ 同步失败 {when}",
+        "Last sync {when}": "上次同步 {when}",
+        "No sync recorded yet": "尚无同步记录（等待首次同步）",
+        # Failure hints, keyed by the [tag] the sync wrapper writes to the log.
+        "lock": "有同步锁未释放；若反复出现请删除 ~/.cache/rclone/bisync/*.lck",
+        "maxdelete": "待删除文件超过 MAX_DELETE；若确属正常的大批量删除，请运行 onedrive-sync --resync",
+        "network": "网络或 DNS 暂时不可用，稍后自动重试",
+        "resync": "同步基线失效，请运行 onedrive-sync --resync",
+        "auth": "授权可能已过期，需要重新授权 rclone 远程",
+        "other": "详见同步日志",
+    },
+}
+DEFAULT_LANG = "en"
+
+
+def resolve_lang(cfg: dict) -> str:
+    """UI_LANG wins; otherwise follow the locale, defaulting to English."""
+    pref = (cfg.get("UI_LANG") or "").strip().lower()
+    if pref in STRINGS or pref == DEFAULT_LANG:
+        return pref
+    env = (os.environ.get("LC_ALL") or os.environ.get("LC_MESSAGES")
+           or os.environ.get("LANG") or "").lower()
+    if env.startswith("zh"):
+        return "zh"
+    return DEFAULT_LANG
+
+
+def make_translator(lang: str):
+    table = STRINGS.get(lang, {})
+
+    def t(text: str, **kw) -> str:
+        out = table.get(text, text)
+        if not kw:
+            return out
+        try:
+            return out.format(**kw)
+        except (KeyError, IndexError):
+            return out
+
+    return t
+
+
+def icon_dir_ok() -> bool:
+    try:
+        os.makedirs(ICON_DIR, exist_ok=True)
+        return True
+    except OSError:
+        return False
+
+
+# ---------------------------------------------------------------- icon drawing
+def _check(cr, cx, cy, s=1.0):
+    cr.set_line_width(3.4 * s)
+    cr.set_line_cap(cairo.LINE_CAP_ROUND)
+    cr.set_line_join(cairo.LINE_JOIN_ROUND)
+    cr.move_to(cx - 5.5 * s, cy + 0.5 * s)
+    cr.line_to(cx - 1.5 * s, cy + 4.5 * s)
+    cr.line_to(cx + 5.5 * s, cy - 4.0 * s)
+    cr.stroke()
+
+
+def _exclaim(cr, cx, cy, s=1.0):
+    cr.set_line_width(3.4 * s)
+    cr.set_line_cap(cairo.LINE_CAP_ROUND)
+    cr.move_to(cx, cy - 6.0 * s)
+    cr.line_to(cx, cy + 1.5 * s)
+    cr.stroke()
+    cr.arc(cx, cy + 5.0 * s, 1.9 * s, 0, 2 * math.pi)
+    cr.fill()
+
+
+def _pause(cr, cx, cy, s=1.0):
+    cr.rectangle(cx - 4.6 * s, cy - 5.0 * s, 3.2 * s, 10 * s)
+    cr.fill()
+    cr.rectangle(cx + 1.4 * s, cy - 5.0 * s, 3.2 * s, 10 * s)
+    cr.fill()
+
+
+def _spin(cr, cx, cy, s=1.0):
+    cr.set_line_width(3.2 * s)
+    cr.set_line_cap(cairo.LINE_CAP_ROUND)
+    cr.arc(cx, cy, 5.0 * s, math.radians(-40), math.radians(215))
+    cr.stroke()
+    a = math.radians(-40)
+    ax, ay = cx + 5.0 * s * math.cos(a), cy + 5.0 * s * math.sin(a)
+    cr.move_to(ax + 3.4 * s, ay - 0.4 * s)
+    cr.line_to(ax - 1.6 * s, ay - 3.4 * s)
+    cr.line_to(ax - 1.0 * s, ay + 2.6 * s)
+    cr.close_path()
+    cr.fill()
+
+
+def draw_icon(path: str, state: str) -> None:
+    """Render a 64x64 cloud with a status badge ('unknown' gets no badge)."""
+    if cairo is None:
+        return
+    size = 64
+    surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, size, size)
+    cr = cairo.Context(surf)
+    cr.set_source_rgba(0, 0, 0, 0)
+    cr.paint()
+
+    cr.set_source_rgb(*CLOUD_COLOR)
+    for x, y, r in ((25, 26, 11.5), (39, 28, 9.0), (31, 34, 10.5)):
+        cr.arc(x, y, r, 0, 2 * math.pi)
+        cr.fill()
+    cr.rectangle(19, 26, 21, 12)
+    cr.fill()
+    cr.rectangle(16, 31, 27, 8)
+    cr.fill()
+
+    if state == "unknown":
+        surf.write_to_png(path)
+        return
+
+    bx = by = 45.0
+    br = 15.0
+    cr.arc(bx, by, br + 2.6, 0, 2 * math.pi)
+    cr.set_source_rgb(1, 1, 1)
+    cr.fill()
+    cr.arc(bx, by, br, 0, 2 * math.pi)
+    cr.set_source_rgb(*BADGE_COLORS.get(state, BADGE_COLORS["synced"]))
+    cr.fill()
+
+    cr.set_source_rgb(1, 1, 1)
+    if state == "synced":
+        _check(cr, bx, by)
+    elif state == "error":
+        _exclaim(cr, bx, by)
+    elif state == "paused":
+        _pause(cr, bx, by)
+    else:
+        _spin(cr, bx, by)
+
+    surf.write_to_png(path)
+
+
+def ensure_icons() -> dict:
+    """Redraw every start so the icons always match the code."""
+    icons = {}
+    for state in STATES:
+        path = os.path.join(ICON_DIR, f"{state}.png")
+        try:
+            draw_icon(path, state)
+        except OSError:
+            pass
+        icons[state] = path
+    return icons
+
+
+# ---------------------------------------------------------------- helpers
+def sh(cmd: str, timeout: int = 30):
+    """Run a short command and capture its output (used for systemctl only)."""
+    try:
+        res = subprocess.run(cmd, shell=True, capture_output=True,
+                             text=True, timeout=timeout)
+        return res.returncode, res.stdout.strip(), res.stderr.strip()
+    except Exception as exc:  # noqa: BLE001
+        return 1, "", str(exc)
+
+
+def spawn(argv) -> bool:
+    """Launch a GUI program fully detached.
+
+    Never use subprocess.run() with capture_output for this: the child inherits
+    the pipes and run() blocks until every descendant closes them, freezing the
+    GTK main loop.
+    """
+    try:
+        subprocess.Popen(argv, stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True, close_fds=True)
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def tail_text(path: str, max_bytes: int = 64 * 1024) -> str:
+    """Read only the tail of a file that grows forever."""
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as fh:
+            if size > max_bytes:
+                fh.seek(size - max_bytes)
+                fh.readline()          # discard a possibly truncated line
+            return fh.read().decode("utf-8", "replace")
+    except OSError:
+        return ""
+
+
+TS_RE = re.compile(r"^(\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2})")
+HINT_RE = re.compile(r"\[(\w+)\]\s*(.*)$")
+
+
+def read_last_result(log_path: str):
+    """Return (state, 'HH:MM', tag, raw_hint) parsed from the sync log.
+
+    The sync wrapper prefixes its hint with a stable [tag] so the caller can
+    localise it without matching English text; raw_hint is the fallback.
+    """
+    kind, when, tag, raw = "unknown", "", "", ""
+    for line in tail_text(log_path).splitlines():
+        match = TS_RE.match(line)
+        if not match:
+            continue
+        ts = match.group(1)
+        if "Bisync successful" in line:
+            kind, when, tag, raw = "synced", ts, "", ""
+        elif ("ERROR" in line or "Failed to" in line
+              or "Bisync aborted" in line or "critical error" in line):
+            kind, when = "error", ts
+            found = HINT_RE.search(line)
+            if found:
+                tag, raw = found.group(1), found.group(2)
+            else:
+                tag, raw = "other", line
+    if " " in when:
+        when = when.split(" ")[1][:5]
+    return kind, when, tag, raw
+
+
+# ---------------------------------------------------------------- tray
+class Tray:
+    def __init__(self, cfg: dict):
+        self.cfg = cfg
+        self.unit = cfg["UNIT_NAME"]
+        self.service = f"{self.unit}.service"
+        self.timer = f"{self.unit}.timer"
+        self.local = cfg["LOCAL"]
+        self.log = cfg["LOG"]
+        self.open_cmd = cfg["OPEN_APP_CMD"]
+        self.open_name = cfg["OPEN_APP_NAME"]
+        self.sync_script = os.path.join(
+            os.path.dirname(os.path.realpath(__file__)), "onedrive-sync")
+        self.t = make_translator(resolve_lang(cfg))
+
+        self.icons = ensure_icons()
+        self.state = None
+        self.was_syncing = False
+        self.notified_error_at = None
+        self.manual_requested = False
+        self.busy = False
+
+        Notify.init(APP_ID)
+
+        self.ind = AppIndicator.Indicator.new(
+            APP_ID, self.icons["unknown"],
+            AppIndicator.IndicatorCategory.APPLICATION_STATUS)
+        self.ind.set_status(AppIndicator.IndicatorStatus.ACTIVE)
+        self.ind.set_icon_full(self.icons["unknown"], APP_NAME)
+
+        self._build_menu()
+        self.ind.set_menu(self.menu)
+
+        GLib.timeout_add_seconds(3, self.poll)
+        self.poll()
+
+    # -------------------------------------------------- menu
+    def _build_menu(self):
+        self.menu = Gtk.Menu()
+
+        self.item_status = Gtk.MenuItem(label=self.t("Reading status…"))
+        self.item_status.set_sensitive(False)
+        self.menu.append(self.item_status)
+        self.menu.append(Gtk.SeparatorMenuItem())
+
+        self._add(self.t("Sync now"), self.on_sync_now)
+        if self.open_cmd:
+            self._add(self.t("Open {app}", app=self.open_name), self.open_app)
+        self._add(self.t("Open sync folder"), lambda *_: self.open_path(self.local))
+        self._add(self.t("View sync log"), lambda *_: self.open_path(self.log))
+
+        self.menu.append(Gtk.SeparatorMenuItem())
+
+        self.item_pause = Gtk.CheckMenuItem(label=self.t("Pause automatic sync"))
+        self.item_pause.connect("activate", self.on_toggle_pause)
+        self.menu.append(self.item_pause)
+
+        self.item_boot = Gtk.CheckMenuItem(label=self.t("Start tray at login"))
+        self.item_boot.set_active(os.path.exists(AUTOSTART))
+        self.item_boot.connect("activate", self.on_toggle_boot)
+        self.menu.append(self.item_boot)
+
+        self.menu.append(Gtk.SeparatorMenuItem())
+        self._add(self.t("Rebuild sync baseline (resync)…"), self.on_resync)
+        self._add(self.t("Quit"), lambda *_: Gtk.main_quit())
+
+        self.menu.show_all()
+        self._refresh_checks()
+
+    def _add(self, label, handler):
+        item = Gtk.MenuItem(label=label)
+        item.connect("activate", handler)
+        self.menu.append(item)
+        return item
+
+    def _refresh_checks(self):
+        enabled = self.is_enabled(self.timer)
+        self.item_pause.set_active(not enabled)
+        self.item_pause.set_label(self.t("Pause automatic sync") if enabled
+                                  else self.t("Automatic sync paused (click to resume)"))
+
+    # -------------------------------------------------- actions
+    def on_sync_now(self, *_):
+        if self.busy:
+            return
+        self.busy = True
+        self.manual_requested = True
+        self.notify(APP_NAME, self.t("Syncing…"))
+        threading.Thread(target=self._run, args=("start",), daemon=True).start()
+
+    def _run(self, mode):
+        try:
+            if mode == "resync":
+                sh(f'"{self.sync_script}" --resync', timeout=3600)
+            else:
+                sh(f"systemctl --user start {self.service}", timeout=3600)
+        finally:
+            self.busy = False
+
+    def on_resync(self, *_):
+        dialog = Gtk.MessageDialog(
+            transient_for=None, flags=0, message_type=Gtk.MessageType.WARNING,
+            buttons=Gtk.ButtonsType.OK_CANCEL,
+            text=self.t("Rebuild the sync baseline?"))
+        dialog.format_secondary_text(self.t("dlg_resync_body"))
+        response = dialog.run()
+        dialog.destroy()
+        if response != Gtk.ResponseType.OK or self.busy:
+            return
+        self.busy = True
+        self.notify(APP_NAME, self.t("Rebuilding sync baseline…"))
+        threading.Thread(target=self._run, args=("resync",), daemon=True).start()
+
+    def on_toggle_pause(self, item):
+        if item.get_active():
+            sh(f"systemctl --user stop {self.timer}")
+            sh(f"systemctl --user disable {self.timer}")
+            self.notify(APP_NAME, self.t("Automatic sync paused"))
+        else:
+            sh(f"systemctl --user enable --now {self.timer}")
+            self.notify(APP_NAME, self.t("Automatic sync resumed"))
+        self._refresh_checks()
+
+    def on_toggle_boot(self, item):
+        if item.get_active():
+            try:
+                os.makedirs(os.path.dirname(AUTOSTART), exist_ok=True)
+                with open(AUTOSTART, "w", encoding="utf-8") as fh:
+                    fh.write(
+                        "[Desktop Entry]\n"
+                        "Type=Application\n"
+                        f"Name={APP_NAME} status icon\n"
+                        "Comment=rclone bisync tray icon\n"
+                        f"Exec={os.path.realpath(__file__)}\n"
+                        "Terminal=false\n"
+                        "X-GNOME-Autostart-enabled=true\n")
+                os.chmod(AUTOSTART, 0o644)
+            except OSError:
+                pass
+        elif os.path.exists(AUTOSTART):
+            try:
+                os.remove(AUTOSTART)
+            except OSError:
+                pass
+
+    def open_app(self, *_):
+        argv = self.open_cmd.split()
+        if argv:
+            spawn(argv)
+
+    def open_path(self, path):
+        if os.path.exists(path):
+            spawn(["xdg-open", path])
+        else:
+            self.notify(APP_NAME, self.t("Path does not exist: {path}", path=path))
+
+    def notify(self, title, body):
+        try:
+            note = Notify.Notification.new(title, body, self.icons.get("synced"))
+            note.set_urgency(Notify.Urgency.NORMAL)
+            note.show()
+        except Exception:  # noqa: BLE001
+            pass
+
+    # -------------------------------------------------- polling
+    @staticmethod
+    def is_enabled(unit):
+        return sh(f"systemctl --user is-enabled {unit}")[1] == "enabled"
+
+    def unit_states(self):
+        """One subprocess for both units.
+
+        Note: `systemctl is-active` reports "activating" (not "active") while a
+        Type=oneshot service runs, so both must be accepted.
+        """
+        _, out, _ = sh(f"systemctl --user is-active {self.service} {self.timer}; "
+                       f"systemctl --user is-enabled {self.timer}")
+        parts = out.splitlines()
+        svc = parts[0].strip() if len(parts) > 0 else ""
+        enabled = parts[2].strip() if len(parts) > 2 else ""
+        return svc in ("active", "activating"), enabled != "enabled"
+
+    def poll(self):
+        syncing, paused = self.unit_states()
+        kind, when, tag, raw = read_last_result(self.log)
+        hint = self.t(tag)
+        if hint == tag:            # this tag has no translation
+            hint = raw
+
+        if syncing:
+            state = "syncing"
+        elif paused:
+            state = "paused"
+        elif kind == "error":
+            state = "error"
+        elif kind == "synced":
+            state = "synced"
+        else:
+            state = "unknown"
+
+        if state != self.state:
+            self.state = state
+            self.ind.set_icon_full(self.icons[state], APP_NAME)
+
+        if self.was_syncing and not syncing:
+            if kind == "error":
+                if when != self.notified_error_at:
+                    self.notified_error_at = when
+                    self.notify(self.t("{app} sync failed", app=APP_NAME),
+                                hint or self.t("see the sync log"))
+            elif self.manual_requested:
+                self.notify(APP_NAME, self.t("Sync finished {when}", when=when))
+                self.manual_requested = False
+        if kind != "error":
+            self.notified_error_at = None
+        self.was_syncing = syncing
+
+        if syncing:
+            text = self.t("Syncing…")
+        elif paused:
+            text = self.t("Automatic sync paused · last {when}", when=when or "—")
+        elif kind == "error":
+            text = self.t("⚠ Sync failed {when}", when=when)
+            if hint:
+                text += f" · {hint[:40]}"
+        elif kind == "synced":
+            text = self.t("Last sync {when}", when=when)
+        else:
+            text = self.t("No sync recorded yet")
+
+        self.item_status.set_label(text)
+        return True
+
+
+def acquire_lock():
+    try:
+        handle = open(LOCK_FILE, "w")
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return handle
+    except OSError:
+        return None
+
+
+def main():
+    if acquire_lock() is None:
+        print("rclone-onedrive-tray is already running.", file=sys.stderr)
+        return 0
+
+    if not os.path.exists(CONFIG_FILE):
+        print(f"Config not found: {CONFIG_FILE}\nRun install.sh first.",
+              file=sys.stderr)
+        return 1
+
+    cfg = load_config()
+    if not icon_dir_ok():
+        print("Warning: cannot write icons, the tray icon may be blank.",
+              file=sys.stderr)
+
+    Tray(cfg)
+    Gtk.main()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,173 @@
+#!/usr/bin/env bash
+#
+# Installer for rclone-onedrive-tray (per-user, no root required).
+#
+#   ./install.sh                 install into ~/.local
+#   ./install.sh --prefix DIR    install elsewhere
+#   ./install.sh --no-start      do not launch the tray at the end
+#
+set -euo pipefail
+
+SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PREFIX="${PREFIX:-$HOME/.local}"
+START_TRAY=1
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --prefix)   PREFIX="$2"; shift 2 ;;
+        --no-start) START_TRAY=0; shift ;;
+        -h|--help)  sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *)          echo "unknown option: $1" >&2; exit 2 ;;
+    esac
+done
+
+BIN_DIR="$PREFIX/bin"
+XDG_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}"
+CONFIG_DIR="$XDG_CONFIG/rclone-onedrive-tray"
+UNIT_DIR="$XDG_CONFIG/systemd/user"
+AUTOSTART_DIR="$XDG_CONFIG/autostart"
+
+say()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*" >&2; }
+die()  { printf '\033[1;31m[x]\033[0m %s\n' "$*" >&2; exit 1; }
+
+# --------------------------------------------------------------- dependencies
+say "Checking dependencies"
+missing=()
+
+command -v rclone >/dev/null 2>&1 || missing+=("rclone")
+
+if ! python3 -c '
+import gi
+gi.require_version("Gtk", "3.0")
+try:
+    gi.require_version("AyatanaAppIndicator3", "0.1")
+except ValueError:
+    gi.require_version("AppIndicator3", "0.1")
+from gi.repository import Gtk  # noqa
+' >/dev/null 2>&1; then
+    missing+=("python3-gi gir1.2-ayatanaappindicator3-0.1 libnotify-bin")
+fi
+
+if [ "${#missing[@]}" -gt 0 ]; then
+    warn "Missing dependencies:"
+    printf '    - %s\n' "${missing[@]}" >&2
+    cat >&2 <<'EOF'
+
+On Debian/Ubuntu install them with:
+
+    sudo apt install rclone python3-gi gir1.2-ayatanaappindicator3-0.1 libnotify-bin
+
+The rclone shipped by distributions is often too old: --resilient/--recover
+(which let an interrupted sync heal itself instead of demanding a manual
+--resync) need rclone >= 1.65. Check with `rclone version`; if it is older, get
+a current build from https://rclone.org/downloads/ and put the binary in
+/usr/local/bin (which takes precedence over /usr/bin).
+EOF
+    exit 1
+fi
+
+RCLONE_VER="$(rclone version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+' | head -1 || true)"
+if [ -n "$RCLONE_VER" ]; then
+    major="${RCLONE_VER%%.*}"; minor="${RCLONE_VER##*.}"
+    if [ "$major" -eq 0 ] || { [ "$major" -eq 1 ] && [ "$minor" -lt 65 ]; }; then
+        warn "rclone $RCLONE_VER is older than 1.65: automatic recovery from an"
+        warn "interrupted sync (--recover) will not work. See docs/TROUBLESHOOTING.md."
+    fi
+else
+    warn "Could not determine the rclone version."
+fi
+
+# --------------------------------------------------------------- scripts
+say "Installing scripts into $BIN_DIR"
+mkdir -p "$BIN_DIR"
+install -m 0755 "$SRC_DIR/bin/onedrive-sync" "$BIN_DIR/onedrive-sync"
+install -m 0755 "$SRC_DIR/bin/onedrive-tray" "$BIN_DIR/onedrive-tray"
+
+# --------------------------------------------------------------- config
+say "Installing configuration into $CONFIG_DIR"
+mkdir -p "$CONFIG_DIR"
+if [ -f "$CONFIG_DIR/config" ]; then
+    warn "existing config kept: $CONFIG_DIR/config"
+else
+    install -m 0644 "$SRC_DIR/config/config.example" "$CONFIG_DIR/config"
+    cp -f "$CONFIG_DIR/config" "$CONFIG_DIR/config.example"
+fi
+if [ -f "$CONFIG_DIR/filters.txt" ]; then
+    warn "existing filters kept: $CONFIG_DIR/filters.txt"
+else
+    install -m 0644 "$SRC_DIR/config/filters.example" "$CONFIG_DIR/filters.txt"
+fi
+
+# --------------------------------------------------------------- systemd units
+say "Installing systemd user units into $UNIT_DIR"
+mkdir -p "$UNIT_DIR"
+UNIT_NAME="$(sed -n 's/^[[:space:]]*UNIT_NAME="\{0,1\}\([^"]*\)"\{0,1\}.*/\1/p' \
+             "$CONFIG_DIR/config" | tail -1)"
+UNIT_NAME="${UNIT_NAME:-onedrive-sync}"
+INTERVAL_MIN="$(sed -n 's/^[[:space:]]*INTERVAL_MIN="\{0,1\}\([0-9]*\)"\{0,1\}.*/\1/p' \
+                 "$CONFIG_DIR/config" | tail -1)"
+INTERVAL_MIN="${INTERVAL_MIN:-5}"
+
+sed -e "s|%SYNC_SCRIPT%|$BIN_DIR/onedrive-sync|g" \
+    "$SRC_DIR/systemd/onedrive-sync.service.in" > "$UNIT_DIR/$UNIT_NAME.service"
+sed -e "s|%INTERVAL%|$INTERVAL_MIN|g" \
+    "$SRC_DIR/systemd/onedrive-sync.timer.in" > "$UNIT_DIR/$UNIT_NAME.timer"
+chmod 0644 "$UNIT_DIR/$UNIT_NAME.service" "$UNIT_DIR/$UNIT_NAME.timer"
+
+# --------------------------------------------------------------- autostart
+say "Installing autostart entry"
+mkdir -p "$AUTOSTART_DIR"
+sed -e "s|%TRAY_SCRIPT%|$BIN_DIR/onedrive-tray|g" \
+    "$SRC_DIR/autostart/rclone-onedrive-tray.desktop.in" \
+    > "$AUTOSTART_DIR/rclone-onedrive-tray.desktop"
+chmod 0644 "$AUTOSTART_DIR/rclone-onedrive-tray.desktop"
+
+# --------------------------------------------------------------- enable
+if systemctl --user daemon-reload 2>/dev/null; then
+    systemctl --user enable --now "$UNIT_NAME.timer" 2>/dev/null || \
+        warn "could not enable $UNIT_NAME.timer (no user systemd session?)"
+    systemctl --user list-timers "$UNIT_NAME.timer" --no-pager 2>/dev/null | head -3 || true
+else
+    warn "systemctl --user is unavailable; enable the timer yourself after logging in:"
+    warn "    systemctl --user enable --now $UNIT_NAME.timer"
+fi
+
+# --------------------------------------------------------------- done
+cat <<EOF
+
+$(say "Installed")
+
+  scripts   $BIN_DIR/onedrive-sync, $BIN_DIR/onedrive-tray
+  config    $CONFIG_DIR/config
+  filters   $CONFIG_DIR/filters.txt
+  units     $UNIT_DIR/$UNIT_NAME.{service,timer}
+  autostart $AUTOSTART_DIR/rclone-onedrive-tray.desktop
+
+Next steps:
+
+  1. Make sure the rclone remote in your config exists and is authorised:
+
+         rclone config          # create/authorise e.g. "onedrive"
+         rclone lsd onedrive:   # should list your files
+
+  2. Build the sync baseline once (first run downloads everything):
+
+         onedrive-sync --resync
+
+  3. Start the tray icon (it will also start automatically at next login):
+
+         onedrive-tray &
+
+  Check the log any time with:
+
+      tail -f ~/.cache/rclone-onedrive-tray/sync.log
+
+  Full troubleshooting notes: docs/TROUBLESHOOTING.md
+
+EOF
+
+if [ "$START_TRAY" -eq 1 ]; then
+    say "Starting the tray icon (an already-running instance keeps running)"
+    setsid "$BIN_DIR/onedrive-tray" >/dev/null 2>&1 &
+fi

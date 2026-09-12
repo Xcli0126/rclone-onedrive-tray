@@ -1,0 +1,32 @@
+name: lint
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: ShellCheck
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+          shellcheck bin/onedrive-sync install.sh uninstall.sh
+
+      - name: Shell syntax
+        run: |
+          bash -n bin/onedrive-sync
+          bash -n install.sh
+          bash -n uninstall.sh
+
+      - name: Python syntax
+        run: python3 -m py_compile bin/onedrive-tray
+
+      - name: Templates contain their placeholders
+        run: |
+          grep -q '%SYNC_SCRIPT%' systemd/onedrive-sync.service.in
+          grep -q '%INTERVAL%'     systemd/onedrive-sync.timer.in
+          grep -q '%TRAY_SCRIPT%'  autostart/rclone-onedrive-tray.desktop.in
