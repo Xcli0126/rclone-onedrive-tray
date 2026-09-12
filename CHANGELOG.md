@@ -31,6 +31,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--remote/--local/--filters/--unit-name/--yes`. It resolves `XDG_CONFIG_HOME` and
   `XDG_CACHE_HOME` rather than assuming `~/.config` and `~/.cache`, and `--yes` deliberately does
   not start the first sync, which is long and must not be interrupted.
+- Optional NetworkManager dispatcher hook (`./install.sh --with-nm-dispatcher`) that starts a
+  sync as soon as an interface comes up, so waking from suspend catches up in seconds instead of
+  waiting for the timer. This is the only component that needs root.
 
 ## [1.0.0] - 2026-09-13
 

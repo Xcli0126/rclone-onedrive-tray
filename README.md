@@ -219,6 +219,19 @@ journalctl --user -u onedrive-sync.service -f
 tail -f ~/.cache/rclone-onedrive-tray/sync.log
 ```
 
+### Syncing sooner after the network comes back
+
+The watcher covers local edits and the timer covers periodic catch-up, but neither notices a
+connection reappearing. Waking a laptop from suspend therefore waits for the next timer tick.
+
+```bash
+./install.sh --with-nm-dispatcher
+```
+
+That installs one script into `/etc/NetworkManager/dispatcher.d/`, which asks for the sync to run
+as soon as an interface comes up. It is the only part of this project that needs root, and it is
+opt-in. `./uninstall.sh` removes it.
+
 ### Syncing while logged out
 
 User services start at login, so a machine sitting at the login screen syncs nothing. To change

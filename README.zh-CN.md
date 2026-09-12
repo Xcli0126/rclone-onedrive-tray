@@ -184,6 +184,16 @@ journalctl --user -u onedrive-sync.service -f
 tail -f ~/.cache/rclone-onedrive-tray/sync.log
 ```
 
+### 网络恢复后立刻补同步
+
+监听器管本地改动、定时器管周期性兜底，但两者都察觉不到「网络回来了」。所以笔记本合盖唤醒之后，还是得等下一次定时。
+
+```bash
+./install.sh --with-nm-dispatcher
+```
+
+这会往 `/etc/NetworkManager/dispatcher.d/` 放一个脚本，网卡一就绪就要求同步。**这是整个项目里唯一需要 root 的部分**，而且是可选的。`./uninstall.sh` 会把它删掉。
+
 ### 未登录时也同步
 
 用户级服务随登录启动，所以停在登录界面的机器什么也不同步。想改：

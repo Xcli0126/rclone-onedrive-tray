@@ -285,6 +285,26 @@ No, and it cannot. rclone has no server-side push or notification channel, so a 
 elsewhere is only found when the timer runs. Lower `INTERVAL_MIN` if that matters more than the
 extra polling.
 
+### The sync does not start when the network comes back
+
+```bash
+ls -l /etc/NetworkManager/dispatcher.d/90-rclone-onedrive-tray
+```
+
+Missing means the hook was never installed: `./install.sh --with-nm-dispatcher`.
+
+Present but doing nothing is usually a permission or overrun problem. NetworkManager runs
+dispatcher scripts as root with a minimal environment and kills anything that overruns, which is
+why the hook starts the unit with `--no-block` and exits straight away. Watch it run:
+
+```bash
+journalctl -u NetworkManager -f
+# then toggle wifi off and on
+```
+
+The hook only pokes accounts that actually have the unit file in `~/.config/systemd/user/`, so a
+second user on the same machine is left alone.
+
 ## 5. systemd
 
 ### The service is killed half way through

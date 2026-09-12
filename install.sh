@@ -5,18 +5,24 @@
 #   ./install.sh                 install into ~/.local
 #   ./install.sh --prefix DIR    install elsewhere
 #   ./install.sh --no-start      do not launch the tray at the end
+#   ./install.sh --with-nm-dispatcher
+#                                also install the NetworkManager hook that
+#                                syncs as soon as a connection comes up (needs
+#                                root; the default install never does)
 #
 set -euo pipefail
 
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PREFIX="${PREFIX:-$HOME/.local}"
 START_TRAY=1
+NM_DISPATCHER=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --prefix)   PREFIX="$2"; shift 2 ;;
         --no-start) START_TRAY=0; shift ;;
-        -h|--help)  sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --with-nm-dispatcher) NM_DISPATCHER=1; shift ;;
+        -h|--help)  sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *)          echo "unknown option: $1" >&2; exit 2 ;;
     esac
 done
@@ -143,6 +149,30 @@ sed -e "s|%TRAY_SCRIPT%|$BIN_DIR/onedrive-tray|g" \
     "$SRC_DIR/autostart/rclone-onedrive-tray.desktop.in" \
     > "$AUTOSTART_DIR/rclone-onedrive-tray.desktop"
 chmod 0644 "$AUTOSTART_DIR/rclone-onedrive-tray.desktop"
+
+# --------------------------------------------------------------- NM dispatcher
+if [ "$NM_DISPATCHER" -eq 1 ]; then
+    say "Installing the NetworkManager dispatcher hook"
+    NM_TARGET="/etc/NetworkManager/dispatcher.d/90-rclone-onedrive-tray"
+    NM_TMP="$(mktemp)"
+    sed -e "s|%UNIT_NAME%|$UNIT_NAME|g" \
+        "$SRC_DIR/extras/networkmanager-dispatcher.sh" > "$NM_TMP"
+    if [ -d /etc/NetworkManager/dispatcher.d ]; then
+        if sudo install -m 0755 -o root -g root "$NM_TMP" "$NM_TARGET"; then
+            say "installed $NM_TARGET"
+            say "a sync starts as soon as a connection comes up"
+        else
+            warn "could not install the hook. Run this yourself:"
+            warn "    sudo install -m 0755 $NM_TMP $NM_TARGET"
+            warn "the script has been left at $NM_TMP"
+            NM_TMP=""
+        fi
+    else
+        warn "no /etc/NetworkManager/dispatcher.d on this system; skipping."
+        warn "NetworkManager will re-sync on the next timer tick instead."
+    fi
+    [ -n "$NM_TMP" ] && rm -f "$NM_TMP"
+fi
 
 # --------------------------------------------------------------- enable
 if systemctl --user daemon-reload 2>/dev/null; then

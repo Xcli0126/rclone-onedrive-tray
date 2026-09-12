@@ -64,6 +64,14 @@ rm -f "$BIN_DIR/onedrive-sync" "$BIN_DIR/onedrive-tray" "$BIN_DIR/onedrive-watch
 systemctl --user daemon-reload 2>/dev/null || \
     warn "run 'systemctl --user daemon-reload' after your next login"
 
+NM_TARGET="/etc/NetworkManager/dispatcher.d/90-rclone-onedrive-tray"
+if [ -f "$NM_TARGET" ]; then
+    say "Removing the NetworkManager hook (needs root)"
+    if ! sudo rm -f "$NM_TARGET"; then
+        warn "could not remove it; run: sudo rm -f $NM_TARGET"
+    fi
+fi
+
 if [ "$PURGE" -eq 1 ]; then
     say "Removing configuration"
     rm -rf "$CONFIG_DIR"
