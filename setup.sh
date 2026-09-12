@@ -105,7 +105,9 @@ fi
 if [ -z "$REMOTE_IN" ]; then
     echo
     echo "Configured remotes:"
-    printf '  %s\n' $REMOTES
+    while IFS= read -r line; do
+        [ -n "$line" ] && printf '  %s\n' "$line"
+    done <<< "$REMOTES"
     REMOTE_IN="$(ask 'Which one should be synced?' "$(printf '%s' "$REMOTES" | head -1)")"
 fi
 
