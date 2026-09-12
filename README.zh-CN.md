@@ -36,6 +36,8 @@ Linux 上没有官方 OneDrive 客户端。`rclone bisync` 能承担同步，但
 
 托盘图标承载上面五种状态，点开是一个菜单：立即同步、打开同步目录、查看日志、暂停自动同步、开机自启、重建同步基线。同步失败时会弹通知，并附一句人能读懂的原因，例如「网络或 DNS 暂时不可用」或「本次待删除文件超过 100 个」。
 
+本地一改就同步，不用等下一次定时。监听器盯着同步目录，改动停下来就立刻拉起一轮同步。实测新建一个文件，从落盘到云端确认收到用了 26 秒，其中大部分是去抖等待加一次完整的 bisync 扫描。**在另一台机器上做的改动仍然要等定时器**，因为 rclone 没有服务端推送，本地无从感知。
+
 `rclone bisync` 留给使用者自己处理的部分，由同步包装器补上。
 
 被中断的同步会自己恢复。包装器传了 `--recover` 和 `--resilient`，所以休眠或崩溃之后接着跑的是普通同步，而不是一条要你手动执行的命令。实测把同步在传输中途 `kill -9`，再跑一次，18 秒恢复完成。
@@ -50,7 +52,7 @@ Linux 上没有官方 OneDrive 客户端。`rclone bisync` 能承担同步，但
 
 日志到 5 MB 轮转，托盘只读它末尾 64 KB。每五分钟一次同步大约每天写 240 KB，对磁盘无所谓，但每三秒调一次 `readlines()` 再跑上一年就不是了。
 
-同步之间没有任何进程在跑。systemd 用户级 timer 拉起一个 `oneshot` 服务，整个进程模型就这些。所有配置集中在一个 shell 风格的配置文件里，脚本内没有硬编码路径。
+进程模型保持很小：一个常驻监听器、一个 systemd 用户级 timer、一个 `oneshot` 同步服务。空闲时不持有你的文件、也不碰网络。所有配置集中在一个 shell 风格的配置文件里，脚本内没有硬编码路径。
 
 ---
 
@@ -63,11 +65,12 @@ Linux 上没有官方 OneDrive 客户端。`rclone bisync` 能承担同步，但
 | `python3-gi`、GTK 3 | 托盘程序 |
 | `gir1.2-ayatanaappindicator3-0.1` | 托盘图标。GNOME 下还需要 AppIndicator 扩展，Ubuntu 默认已装 |
 | `libnotify` | 桌面通知 |
+| `inotify-tools` | 实时同步。没装也能用，只是退回定时器节奏 |
 
 Debian 或 Ubuntu：
 
 ```bash
-sudo apt install rclone python3-gi gir1.2-ayatanaappindicator3-0.1 libnotify-bin
+sudo apt install rclone python3-gi gir1.2-ayatanaappindicator3-0.1 libnotify-bin inotify-tools
 ```
 
 > 注意 rclone 版本。Ubuntu 源里的那个可能落后好几年，先用 `rclone version` 确认。低于 1.65 就去官网下新版本，把二进制放进 `/usr/local/bin`，它的优先级高于 `/usr/bin`。

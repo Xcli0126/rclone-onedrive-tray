@@ -43,6 +43,12 @@ folder, open the log, pause automatic syncing, start at login, or rebuild the ba
 sync raises a notification with a plain-language reason, such as "network or DNS temporarily
 unavailable" or "more than 100 files would be deleted".
 
+Local edits sync in seconds rather than at the next timer tick. A watcher on the sync folder
+starts a run as soon as the changes stop arriving; a new file measured 26 seconds from write to
+cloud confirmation, most of which is the debounce plus one full bisync pass. Changes made on
+another machine still wait for the timer, because rclone has no server-side push and nothing
+local can notice them.
+
 The sync wrapper covers what `rclone bisync` leaves to you.
 
 An interrupted run heals by itself. The wrapper passes `--recover` and `--resilient`, so a
@@ -69,8 +75,9 @@ The log rotates at 5 MB, and the tray reads only the last 64 KB of it. A sync ev
 writes roughly 240 KB a day, which is harmless for the disk but not for a `readlines()` call
 running every three seconds for a year.
 
-Nothing runs between syncs. A systemd user timer starts a `oneshot` service, and that is the
-entire process model. One shell-style config file drives everything, so no paths are hard-coded.
+The process model stays small: one long-lived watcher, a systemd user timer, and a `oneshot` sync
+service. Nothing holds your files open or talks to the network while idle, and one shell-style
+config file drives all of it, so no paths are hard-coded.
 
 ---
 
@@ -83,11 +90,12 @@ entire process model. One shell-style config file drives everything, so no paths
 | `python3-gi`, GTK 3 | Tray app |
 | `gir1.2-ayatanaappindicator3-0.1` | Tray icon. On GNOME you also need the AppIndicator shell extension, which Ubuntu ships |
 | `libnotify` | Desktop notifications |
+| `inotify-tools` | Realtime sync. Without it the timer still syncs, just on its own schedule |
 
 On Debian or Ubuntu:
 
 ```bash
-sudo apt install rclone python3-gi gir1.2-ayatanaappindicator3-0.1 libnotify-bin
+sudo apt install rclone python3-gi gir1.2-ayatanaappindicator3-0.1 libnotify-bin inotify-tools
 ```
 
 > The rclone version matters. The one in the Ubuntu archive can be years behind, so check

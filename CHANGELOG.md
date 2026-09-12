@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Realtime sync. `onedrive-watch` watches the local folder with inotify and starts a run as soon
+  as edits stop arriving, so local changes no longer wait for the timer. Measured end to end, a
+  new file reached the cloud 26 seconds after it was written. The timer stays in place as the
+  trigger for changes made on another machine, which no local watcher can see. Needs the
+  `inotify-tools` package; the installer warns and carries on without it.
+- `onedrive-watch.service`, a systemd user unit that keeps the watcher alive.
+- `install.sh` installs the watcher and enables its unit when `WATCH=1`.
+- New configuration keys: `WATCH`, `WATCH_DEBOUNCE`, `WATCH_SETTLE`, `WATCH_EXCLUDE`.
+
 ## [1.0.0] - 2026-09-13
 
 First public release.

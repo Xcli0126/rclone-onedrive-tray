@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+#
+# onedrive-watch: start a sync as soon as local files change.
+#
+# rclone bisync has no watch mode, so this watches the local tree with inotify
+# and starts the sync service once the changes stop arriving. The systemd timer
+# stays in place as the fallback for changes made on another machine, which no
+# local watcher can see.
+#
+# The awkward part is that a sync writes into the tree being watched. Two things
+# keep that from feeding back into an endless loop:
+#
+#   * `attrib` is deliberately not watched. bisync rewrites directory mtimes on
+#     the local side ("Set directory modification time"), which raises IN_ATTRIB
+#     events and nothing else. Watching metadata would mean every run triggered
+#     the next one.
+#   * After each triggered run the event queue is drained until it has been
+#     quiet for WATCH_SETTLE seconds, so the echo of that run is discarded.
+#
+# Configuration: ~/.config/rclone-onedrive-tray/config
+#   WATCH_DEBOUNCE  seconds of quiet before a burst counts as finished (default 8)
+#   WATCH_SETTLE    seconds of quiet used when draining after a run (default 12)
+#   WATCH_EXCLUDE   optional regex of paths to ignore, passed to inotifywait
+#
+set -uo pipefail
+
+APP="onedrive-watch"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/rclone-onedrive-tray"
+CONFIG_FILE="$CONFIG_DIR/config"
+
+die() { printf '%s: %s\n' "$APP" "$*" >&2; exit 1; }
+
+[ -f "$CONFIG_FILE" ] || die "config not found: $CONFIG_FILE"
+# shellcheck source=/dev/null
+. "$CONFIG_FILE"
+
+: "${LOCAL:?LOCAL is not set in $CONFIG_FILE}"
+
+UNIT_NAME="${UNIT_NAME:-onedrive-sync}"
+SERVICE="$UNIT_NAME.service"
+DEBOUNCE="${WATCH_DEBOUNCE:-8}"
+SETTLE="${WATCH_SETTLE:-12}"
+EXCLUDE_RE="${WATCH_EXCLUDE:-}"
+EVENTS="modify,create,delete,move"
+
+command -v inotifywait >/dev/null 2>&1 ||
+    die "inotifywait not found; install the inotify-tools package"
+[ -d "$LOCAL" ] || die "sync directory not found: $LOCAL"
+
+ARGS=(-q -r -e "$EVENTS" --format '')
+if [ -n "$EXCLUDE_RE" ]; then
+    ARGS+=(--exclude "$EXCLUDE_RE")
+fi
+
+running() { systemctl --user is-active --quiet "$SERVICE"; }
+
+# Wait for one event. With a timeout of 0, block until something happens.
+wait_event() {
+    if [ "${1:-0}" = "0" ]; then
+        inotifywait "${ARGS[@]}" "$LOCAL" >/dev/null 2>&1
+    else
+        inotifywait -t "$1" "${ARGS[@]}" "$LOCAL" >/dev/null 2>&1
+    fi
+}
+
+# Consume events until the tree has been quiet for $1 seconds.
+drain() { while wait_event "$1"; do :; done; }
+
+printf '%s: watching %s (debounce %ss, settle %ss) -> %s\n' \
+    "$APP" "$LOCAL" "$DEBOUNCE" "$SETTLE" "$SERVICE" >&2
+
+drain "$SETTLE"     # ignore anything that happened before we started
+
+while true; do
+    if ! wait_event 0; then
+        sleep 5         # inotify failed (watch limit, vanished dir); retry
+        continue
+    fi
+
+    drain "$DEBOUNCE"   # wait for the burst of edits to stop
+
+    if running; then
+        while running; do sleep 2; done
+        sleep 2         # let bisync release its lock
+    fi
+
+    systemctl --user start "$SERVICE" 2>/dev/null || true
+
+    drain "$SETTLE"     # swallow whatever the run just wrote locally
+done

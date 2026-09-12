@@ -78,11 +78,22 @@ else
     warn "Could not determine the rclone version."
 fi
 
+# inotify-tools only powers the realtime watcher, so its absence is a warning
+# rather than a hard failure. Without it the timer still syncs everything.
+HAVE_INOTIFY=1
+command -v inotifywait >/dev/null 2>&1 || HAVE_INOTIFY=0
+if [ "$HAVE_INOTIFY" -eq 0 ]; then
+    warn "inotify-tools is missing, so realtime sync will not start."
+    warn "The timer still runs. To enable realtime sync later:"
+    warn "    sudo apt install inotify-tools"
+fi
+
 # --------------------------------------------------------------- scripts
 say "Installing scripts into $BIN_DIR"
 mkdir -p "$BIN_DIR"
 install -m 0755 "$SRC_DIR/bin/onedrive-sync" "$BIN_DIR/onedrive-sync"
 install -m 0755 "$SRC_DIR/bin/onedrive-tray" "$BIN_DIR/onedrive-tray"
+install -m 0755 "$SRC_DIR/bin/onedrive-watch" "$BIN_DIR/onedrive-watch"
 
 # --------------------------------------------------------------- config
 say "Installing configuration into $CONFIG_DIR"
@@ -115,6 +126,16 @@ sed -e "s|%INTERVAL%|$INTERVAL_MIN|g" \
     "$SRC_DIR/systemd/onedrive-sync.timer.in" > "$UNIT_DIR/$UNIT_NAME.timer"
 chmod 0644 "$UNIT_DIR/$UNIT_NAME.service" "$UNIT_DIR/$UNIT_NAME.timer"
 
+WATCH="$(sed -n 's/^[[:space:]]*WATCH="\{0,1\}\([^"]*\)"\{0,1\}.*/\1/p' \
+         "$CONFIG_DIR/config" | tail -1)"
+WATCH="${WATCH:-1}"
+if [ "$WATCH" = "1" ]; then
+    sed -e "s|%WATCH_SCRIPT%|$BIN_DIR/onedrive-watch|g" \
+        "$SRC_DIR/systemd/onedrive-watch.service.in" \
+        > "$UNIT_DIR/$UNIT_NAME-watch.service"
+    chmod 0644 "$UNIT_DIR/$UNIT_NAME-watch.service"
+fi
+
 # --------------------------------------------------------------- autostart
 say "Installing autostart entry"
 mkdir -p "$AUTOSTART_DIR"
@@ -128,6 +149,10 @@ if systemctl --user daemon-reload 2>/dev/null; then
     systemctl --user enable --now "$UNIT_NAME.timer" 2>/dev/null || \
         warn "could not enable $UNIT_NAME.timer (no user systemd session?)"
     systemctl --user list-timers "$UNIT_NAME.timer" --no-pager 2>/dev/null | head -3 || true
+    if [ "$WATCH" = "1" ] && [ "$HAVE_INOTIFY" -eq 1 ]; then
+        systemctl --user enable --now "$UNIT_NAME-watch.service" 2>/dev/null || \
+            warn "could not enable $UNIT_NAME-watch.service"
+    fi
 else
     warn "systemctl --user is unavailable; enable the timer yourself after logging in:"
     warn "    systemctl --user enable --now $UNIT_NAME.timer"
@@ -138,10 +163,11 @@ cat <<EOF
 
 $(say "Installed")
 
-  scripts   $BIN_DIR/onedrive-sync, $BIN_DIR/onedrive-tray
+  scripts   $BIN_DIR/onedrive-sync, $BIN_DIR/onedrive-tray, $BIN_DIR/onedrive-watch
   config    $CONFIG_DIR/config
   filters   $CONFIG_DIR/filters.txt
   units     $UNIT_DIR/$UNIT_NAME.{service,timer}
+            ${UNIT_DIR}/${UNIT_NAME}-watch.service (realtime, when WATCH=1)
   autostart $AUTOSTART_DIR/rclone-onedrive-tray.desktop
 
 Next steps:

@@ -1,0 +1,16 @@
+[Unit]
+Description=Watch the sync folder and start a sync on change
+Documentation=https://rclone.org/bisync/
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=%WATCH_SCRIPT%
+# inotifywait exits if the watch limit is hit or the directory disappears.
+# Bring it back rather than leaving the machine silently unwatched.
+Restart=always
+RestartSec=5
+Nice=10
+
+[Install]
+WantedBy=default.target

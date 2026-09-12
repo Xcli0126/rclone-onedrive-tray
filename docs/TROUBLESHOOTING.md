@@ -237,7 +237,55 @@ Excluded files are *left alone on both sides*; they are not deleted.
 
 ---
 
-## 4. systemd
+## 4. Realtime sync
+
+### Syncs fire back to back, forever
+
+**Symptom:** the log shows a successful run, then another one a few seconds later, then another.
+
+**Cause:** a sync writes into the very tree the watcher is watching. bisync rewrites directory
+modification times on the local side ("Set directory modification time"), and that raises
+`IN_ATTRIB` events.
+
+**Fix:** `onedrive-watch` deliberately does not subscribe to `attrib`, and drains the event queue
+for `WATCH_SETTLE` seconds after each run. If you still see repeats, raise `WATCH_SETTLE`.
+Subscribing to `attrib` would make the loop unavoidable.
+
+### `inotifywait: failed to watch ...: No space left on device`
+
+**Cause:** the kernel caps inotify watches per user, often at 8192, and one watch is consumed per
+directory.
+
+```bash
+cat /proc/sys/fs/inotify/max_user_watches
+sudo sysctl -w fs.inotify.max_user_watches=524288
+echo 'fs.inotify.max_user_watches=524288' | sudo tee /etc/sysctl.d/60-inotify.conf
+```
+
+A 700-file folder needs about 60 watches, so this only bites if you sync something like a
+`node_modules` tree.
+
+### Changes take minutes again
+
+```bash
+systemctl --user status onedrive-sync-watch.service
+journalctl --user -u onedrive-sync-watch.service -f
+```
+
+If `inotify-tools` was installed after this project, the unit was never enabled. Re-run
+`./install.sh`, or enable it directly:
+
+```bash
+systemctl --user enable --now onedrive-sync-watch.service
+```
+
+### Does the watcher see changes made on another machine?
+
+No, and it cannot. rclone has no server-side push or notification channel, so a change made
+elsewhere is only found when the timer runs. Lower `INTERVAL_MIN` if that matters more than the
+extra polling.
+
+## 5. systemd
 
 ### The service is killed half way through
 
@@ -299,7 +347,7 @@ next attempt.
 
 ---
 
-## 5. Tray icon
+## 6. Tray icon
 
 ### No icon in the GNOME top bar
 
@@ -379,7 +427,7 @@ produced a confusing `rc=127` that looked like a `PATH` problem but wasn't.)
 
 ---
 
-## 6. General diagnosis recipes
+## 7. General diagnosis recipes
 
 ```bash
 # what is the sync actually doing?

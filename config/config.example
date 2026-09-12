@@ -55,6 +55,23 @@ OPEN_APP_NAME="the app"
 # the log ([network], [maxdelete], ...) and the tray renders the matching text.
 UI_LANG=""
 
+# ------------------------------------------------------------------ realtime
+# Watch the local folder and start a sync as soon as files change, instead of
+# waiting for the timer. Requires the inotify-tools package.
+# Changes made on another machine still rely on the timer, since rclone has no
+# server-side push and nothing local can notice them.
+WATCH="1"
+
+# Seconds of quiet after the last change before a sync is triggered.
+WATCH_DEBOUNCE="8"
+
+# Seconds of quiet used to drain the events a sync raises by writing locally.
+# Raise this if you ever see two syncs fire back to back.
+WATCH_SETTLE="12"
+
+# Optional regex of path fragments for inotifywait to ignore.
+WATCH_EXCLUDE=""
+
 # ------------------------------------------------------------------ advanced
 # How many times to retry a failed sync before giving up for this round.
 RETRIES="3"

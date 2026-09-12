@@ -42,21 +42,24 @@ if [ -f "$CONFIG_DIR/config" ]; then
     fi
 fi
 
-say "Stopping tray icon"
+say "Stopping tray icon and watcher"
 # Match the exact interpreter+path so no unrelated process is ever signalled.
 pkill -x -f "python3 $BIN_DIR/onedrive-tray" 2>/dev/null || true
+pkill -x -f "bash $BIN_DIR/onedrive-watch" 2>/dev/null || true
 
 if systemctl --user show-environment >/dev/null 2>&1; then
-    say "Disabling $UNIT_NAME.timer"
+    say "Disabling $UNIT_NAME units"
     systemctl --user disable --now "$UNIT_NAME.timer" 2>/dev/null || true
+    systemctl --user disable --now "$UNIT_NAME-watch.service" 2>/dev/null || true
 else
-    warn "no user systemd session; skipping timer teardown"
+    warn "no user systemd session; skipping unit teardown"
 fi
 
 say "Removing files"
 rm -f "$UNIT_DIR/$UNIT_NAME.service" "$UNIT_DIR/$UNIT_NAME.timer"
+rm -f "$UNIT_DIR/$UNIT_NAME-watch.service"
 rm -f "$AUTOSTART"
-rm -f "$BIN_DIR/onedrive-sync" "$BIN_DIR/onedrive-tray"
+rm -f "$BIN_DIR/onedrive-sync" "$BIN_DIR/onedrive-tray" "$BIN_DIR/onedrive-watch"
 
 systemctl --user daemon-reload 2>/dev/null || \
     warn "run 'systemctl --user daemon-reload' after your next login"
