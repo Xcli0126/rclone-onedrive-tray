@@ -132,6 +132,11 @@ OPEN_APP_CMD=""               # 可选：托盘菜单里能启动的应用，例
 UI_LANG=""                    # 界面语言：en / zh，留空则跟随 $LANG
 ```
 
+`~/.config/rclone-onedrive-tray/exclude-folders.txt` 列出不保留在本机的顶层文件夹，一行一个名字。
+托盘的「同步的文件夹」菜单会编辑它，`setup.sh` 也能用 `--skip-folders "归档,临时"` 写入。文件为空
+表示全部同步。每个名字会变成 `--exclude "/<名字>/**"`，而且被排除的文件夹在两边都保持原样，直到你
+自己删除本地副本（或在托盘的询问里选「删除」）。
+
 `~/.config/rclone-onedrive-tray/filters.txt` 放 [rclone 过滤规则](https://rclone.org/filtering/)，
 一行一条。通常值得排除的是每台机器都会自己重建的缓存，以及各机器自己的界面状态。一个可用的
 起点见 [`config/filters.example`](config/filters.example)：
@@ -159,6 +164,11 @@ UI_LANG=""                    # 界面语言：en / zh，留空则跟随 $LANG
 Sync now
 Open sync folder
 View sync log
+Folders to sync ▸        01-投资     ☑
+                         02-工作     ☑
+                         …
+                         ────────
+                         .rag        ☐
 ────────────────────────────────
 Pause automatic sync ▸   30 minutes
                          2 hours
@@ -170,6 +180,8 @@ Pause automatic sync ▸   30 minutes
 Rebuild sync baseline (resync)…
 Quit
 ```
+
+勾上的文件夹会保留在本机。取消勾选会停止同步它，并且**两边都不动**，所以不会丢东西。但一个「本地还在、却不再同步」的文件夹是个陷阱——在里面改的东西哪儿也去不了——所以托盘接下来会问你是否删除本地副本。重新勾选会把文件下回来。点开头的隐藏目录排在分隔线下面，因为 `.rag` 之类的同样值得排除。
 
 定时暂停会同时停掉定时器和监听器，然后把恢复交给一个 systemd 瞬时定时器，所以**不管托盘还在不在，暂停都会自己结束**。菜单标签会显示恢复时刻。
 

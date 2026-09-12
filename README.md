@@ -164,6 +164,12 @@ OPEN_APP_CMD=""               # optional: an app the tray can launch, e.g. "obsi
 UI_LANG=""                    # tray language: en / zh (empty = follow $LANG)
 ```
 
+`~/.config/rclone-onedrive-tray/exclude-folders.txt` lists top-level folders to leave off this
+machine, one name per line. The tray's "Folders to sync" menu edits it, and `setup.sh` writes it
+from `--skip-folders "Archive,Scratch"`. An empty file syncs everything. Each name becomes
+`--exclude "/<name>/**"`, and a folder listed there keeps its copies on both sides until you
+delete the local one yourself (or answer yes to the tray's prompt).
+
 `~/.config/rclone-onedrive-tray/filters.txt` holds [rclone filter
 rules](https://rclone.org/filtering/), one per line. Caches that every machine regenerates, and
 per-machine UI state, are the usual things worth excluding. A starting point ships in
@@ -192,6 +198,11 @@ Last sync 14:32
 Sync now
 Open sync folder
 View sync log
+Folders to sync ▸        01-投资     ☑
+                         02-工作     ☑
+                         …
+                         ────────
+                         .rag        ☐
 ────────────────────────────────
 Pause automatic sync ▸   30 minutes
                          2 hours
@@ -203,6 +214,12 @@ Pause automatic sync ▸   30 minutes
 Rebuild sync baseline (resync)…
 Quit
 ```
+
+A ticked folder is kept on this machine. Unticking one stops syncing it and leaves both sides
+alone, so nothing is lost; because a folder that is present locally but no longer synced is a
+trap (edits in it go nowhere), the tray then offers to delete the local copy. Ticking it again
+downloads it back. Dot-directories sit below the separator, since `.rag` and friends are worth
+excluding too.
 
 A timed pause stops both the timer and the watcher, then hands the restart to a transient
 systemd timer, so the pause ends on its own whether or not the tray is still running. The menu

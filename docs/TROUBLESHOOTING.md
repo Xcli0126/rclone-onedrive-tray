@@ -305,7 +305,38 @@ journalctl -u NetworkManager -f
 The hook only pokes accounts that actually have the unit file in `~/.config/systemd/user/`, so a
 second user on the same machine is left alone.
 
-## 5. systemd
+## 5. Selecting which folders sync
+
+### I unticked a folder but it is still on disk
+
+That is intended, and it is the safe half of the trade-off. `--exclude` makes bisync ignore the
+folder on both sides; it deletes nothing. The tray asks separately whether to remove the local
+copy, and that prompt is the only thing that removes it.
+
+### The log says `File was deleted` but nothing was deleted
+
+bisync prints that during its diff phase, comparing the current listing against its previous one.
+A newly excluded folder looks deleted on both sides at once, which is not a conflict and triggers
+no action. File counts on both sides stay the same.
+
+### Unticking a folder deleted it from the cloud
+
+It should not, and a controlled run with before/after counts on both sides showed it does not. If
+you see it, the likelier cause is that something else deleted the folder locally and bisync
+propagated that, which is ordinary two-way behaviour rather than the folder list. Find the run:
+
+```bash
+grep -n 'Queue delete' ~/.cache/rclone-onedrive-tray/sync.log
+```
+
+OneDrive keeps a recycle bin for 30 days.
+
+### Can I list the folders to include instead?
+
+No. The list is an exclusion list, so ticking the folders you want has the same effect. There is
+no include-list mode.
+
+## 6. systemd
 
 ### The service is killed half way through
 
@@ -367,7 +398,7 @@ next attempt.
 
 ---
 
-## 6. Tray icon
+## 7. Tray icon
 
 ### No icon in the GNOME top bar
 
@@ -447,7 +478,7 @@ produced a confusing `rc=127` that looked like a `PATH` problem but wasn't.)
 
 ---
 
-## 7. General diagnosis recipes
+## 8. General diagnosis recipes
 
 ```bash
 # what is the sync actually doing?
