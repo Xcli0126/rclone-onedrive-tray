@@ -23,6 +23,7 @@ import math
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import threading
@@ -102,6 +103,7 @@ def load_config() -> dict:
     cfg.setdefault("OPEN_APP_CMD", "")
     cfg.setdefault("OPEN_APP_NAME", "the app")
     cfg.setdefault("UI_LANG", "")
+    cfg.setdefault("EXCLUDE_FOLDERS_FILE", os.path.join(CONFIG_DIR, "exclude-folders.txt"))
     return cfg
 
 
@@ -136,6 +138,20 @@ STRINGS = {
         "Paused until {when}": "已暂停，{when} 自动恢复",
         "Paused for {n}": "已暂停 {n}",
         "Could not schedule the resume": "无法安排自动恢复",
+        "Folders to sync": "同步的文件夹",
+        "Loading…": "加载中…",
+        "No sub-folders": "没有子文件夹",
+        "Could not read the folder list": "无法读取文件夹列表",
+        "{name} will sync": "「{name}」将同步到本地",
+        "{name} will not sync": "「{name}」不再同步，云端不受影响",
+        "Delete the local copy of {name}?": "要删除「{name}」的本地副本吗？",
+        "lcl_deselected_body": (
+            "这个文件夹已不再同步。它仍然完整保留在云端，重新勾选即可恢复。\n\n"
+            "本地副本留着会占空间，而且在里面改的东西不会同步到任何地方。"),
+        "Keep local copy": "保留本地副本",
+        "Delete local copy": "删除本地副本",
+        "Local copy deleted": "本地副本已删除",
+        "Could not delete the local copy": "无法删除本地副本",
         "{app} sync failed": "{app} 同步失败",
         "see the sync log": "请查看同步日志",
         "Sync finished {when}": "同步完成 {when}",
@@ -363,6 +379,39 @@ def read_last_result(log_path: str):
     return kind, when, tag, raw
 
 
+# ---------------------------------------------------------------- selected folders
+def remote_folders(remote: str):
+    """Top-level folder names under REMOTE, or None when the listing failed."""
+    rc, out, _ = sh(
+        f"rclone lsf --dirs-only --max-depth 1 {shlex.quote(remote)}", timeout=120)
+    if rc != 0:
+        return None
+    return [line.rstrip("/") for line in out.splitlines() if line.strip()]
+
+
+def read_excluded_folders(path: str):
+    """Folder names listed as not synced. Missing file means none."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return [line.strip() for line in fh
+                    if line.strip() and not line.startswith("#")]
+    except OSError:
+        return []
+
+
+def write_excluded_folders(path: str, names) -> bool:
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("# Folders not kept on this machine, one per line.\n")
+            fh.write("# Edited by the tray. The cloud keeps them either way.\n")
+            for name in sorted(names):
+                fh.write(f"{name}\n")
+        return True
+    except OSError:
+        return False
+
+
 # ---------------------------------------------------------------- quota
 def fmt_size(n) -> str:
     n = float(n)
@@ -436,6 +485,7 @@ class Tray:
         self.remote = cfg["REMOTE"]
         self.local = cfg["LOCAL"]
         self.log = cfg["LOG"]
+        self.exclude_file = cfg["EXCLUDE_FOLDERS_FILE"]
         self.open_cmd = cfg["OPEN_APP_CMD"]
         self.open_name = cfg["OPEN_APP_NAME"]
         self.sync_script = os.path.join(
@@ -451,6 +501,10 @@ class Tray:
         self.quota = None          # (used, total) once a query has succeeded
         self.quota_busy = False
         self.paused_seen = None
+        self.folders = None        # top-level names, None until the first listing
+        self.folders_busy = False
+        self.folders_seen = None
+        self.building_folders = False
 
         Notify.init(APP_ID)
 
@@ -467,6 +521,113 @@ class Tray:
         self.poll()
         GLib.timeout_add_seconds(1800, self.refresh_quota)
         self.refresh_quota()
+        GLib.timeout_add_seconds(1800, self.refresh_folders)
+        self.refresh_folders()
+
+    def refresh_folders(self):
+        """List the remote's top-level folders off the main loop."""
+        if not self.folders_busy:
+            self.folders_busy = True
+
+            def worker():
+                try:
+                    self.folders = remote_folders(self.remote)
+                finally:
+                    self.folders_busy = False
+
+            threading.Thread(target=worker, daemon=True).start()
+        return True
+
+    def _build_folder_menu(self):
+        """One check item per remote folder; checked means kept locally."""
+        self.building_folders = True
+        sub = Gtk.Menu()
+        if self.folders is None:
+            entry = Gtk.MenuItem(label=self.t("Loading…"))
+            entry.set_sensitive(False)
+            sub.append(entry)
+        elif not self.folders:
+            entry = Gtk.MenuItem(label=self.t("No sub-folders"))
+            entry.set_sensitive(False)
+            sub.append(entry)
+        else:
+            excluded = set(read_excluded_folders(self.exclude_file))
+
+            def add(name):
+                check = Gtk.CheckMenuItem(label=name)
+                check.set_active(name not in excluded)
+                check.connect("toggled", self.on_toggle_folder, name)
+                sub.append(check)
+
+            # Dot-directories are still worth offering (.rag alone can be
+            # hundreds of MB), but they belong below the user's own folders
+            # rather than mixed in alphabetically ahead of them.
+            visible = sorted(n for n in self.folders if not n.startswith("."))
+            hidden = sorted(n for n in self.folders if n.startswith("."))
+            for name in visible:
+                add(name)
+            if visible and hidden:
+                sub.append(Gtk.SeparatorMenuItem())
+            for name in hidden:
+                add(name)
+        sub.show_all()
+        self.item_folders.set_submenu(sub)
+        self.building_folders = False
+
+    def on_toggle_folder(self, item, name):
+        # set_active() during a rebuild also emits "toggled"; ignore those.
+        if self.building_folders:
+            return
+        excluded = set(read_excluded_folders(self.exclude_file))
+        if item.get_active():
+            excluded.discard(name)
+        else:
+            excluded.add(name)
+        if not write_excluded_folders(self.exclude_file, excluded):
+            self.notify(APP_NAME, self.t("Could not read the folder list"))
+            return
+        if item.get_active():
+            self.notify(APP_NAME, self.t("{name} will sync", name=name))
+        else:
+            self.notify(APP_NAME, self.t("{name} will not sync", name=name))
+            self._offer_local_delete(name)
+
+        # A filter change needs no --resync, so the next run can simply be asked
+        # to happen.
+        sh(f"systemctl --user start --no-block {self.service}")
+
+    def _offer_local_delete(self, name):
+        """Offer to reclaim the space a deselected folder occupies.
+
+        bisync leaves the local copy alone when a folder stops being synced,
+        which turns it into a trap: edits there go nowhere. Deleting it is
+        therefore useful, but it is a delete, so it only ever happens on an
+        explicit click here and the remote is never involved.
+        """
+        if not name or name.startswith("/") or ".." in name.split("/"):
+            return
+        target = os.path.join(self.local, name)
+        if not os.path.isdir(target):
+            return
+        if os.path.realpath(target) == os.path.realpath(self.local):
+            return
+
+        dialog = Gtk.MessageDialog(
+            transient_for=None, flags=0, message_type=Gtk.MessageType.QUESTION,
+            buttons=Gtk.ButtonsType.NONE,
+            text=self.t("Delete the local copy of {name}?", name=name))
+        dialog.format_secondary_text(self.t("lcl_deselected_body"))
+        dialog.add_button(self.t("Keep local copy"), Gtk.ResponseType.CANCEL)
+        dialog.add_button(self.t("Delete local copy"), Gtk.ResponseType.OK)
+        response = dialog.run()
+        dialog.destroy()
+        if response != Gtk.ResponseType.OK:
+            return
+        try:
+            shutil.rmtree(target)
+            self.notify(APP_NAME, self.t("Local copy deleted"))
+        except OSError:
+            self.notify(APP_NAME, self.t("Could not delete the local copy"))
 
     def refresh_quota(self):
         """Query the account quota off the main loop; never block the menu."""
@@ -504,6 +665,10 @@ class Tray:
             self._add(self.t("Open {app}", app=self.open_name), self.open_app)
         self._add(self.t("Open sync folder"), lambda *_: self.open_path(self.local))
         self._add(self.t("View sync log"), lambda *_: self.open_path(self.log))
+
+        self.item_folders = Gtk.MenuItem(label=self.t("Folders to sync"))
+        self._build_folder_menu()
+        self.menu.append(self.item_folders)
 
         self.menu.append(Gtk.SeparatorMenuItem())
 
@@ -774,6 +939,12 @@ class Tray:
                 "{used} of {total} used ({pct}%)",
                 used=fmt_size(used), total=fmt_size(total), pct=pct))
             self.item_quota.set_visible(True)
+
+        # Rebuild only when the listing actually changed. Rebuilding on every
+        # poll would fight with a menu the user has open.
+        if self.folders != self.folders_seen:
+            self.folders_seen = self.folders
+            self._build_folder_menu()
 
         return True
 

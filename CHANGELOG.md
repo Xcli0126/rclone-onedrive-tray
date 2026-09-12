@@ -35,10 +35,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sync as soon as an interface comes up, so waking from suspend catches up in seconds instead of
   waiting for the timer. This is the only component that needs root.
 - Selective folder sync. Names in `$CONFIG_DIR/exclude-folders.txt`, one per line, become
-  `--exclude "/<name>/**"` on every run. A deselected folder is treated as absent on both sides,
-  so its local copies are removed to free the space while the cloud keeps everything. Measured on
-  rclone 1.75: toggling a folder neither requires `--resync` nor modifies the remote.
-  `setup.sh` lists the remote's top-level folders and writes the file from `--skip-folders`.
+  `--exclude "/<name>/**"` on every run, and the tray grows a "Folders to sync" submenu that
+  edits that file. Two things were measured on rclone 1.75.1 before designing around them:
+  changing the filter set does not require `--resync`, and excluding a folder touches neither
+  side. The `File was deleted` lines that appear during bisync's diff phase are listing
+  bookkeeping, not actions; the file counts on both sides stay the same.
+  Since a folder that is present locally but no longer synced is a trap (edits in it go
+  nowhere), the tray asks whether to delete the local copy when you untick one.
 
 ## [1.0.0] - 2026-09-13
 
