@@ -48,8 +48,8 @@ already here.
 | Version history | Right-click in Explorer, or the web | no |
 | Recycle bin and restore | The web, and Explorer | no |
 | Bandwidth limiting | Fixed rates per direction, or automatic | no: `--bwlimit` can be added to `BISYNC_ARGS` by hand, but nothing surfaces it |
-| Pause on a metered network | Automatic, with a policy to override | no |
-| Pause on battery saver | Automatic, with a policy to override | no |
+| Pause on a metered network | Automatic, and documented as PC behaviour under Group Policy | no |
+| Pause on battery saver | Automatic, and documented as PC behaviour under Group Policy | no |
 | Mass-delete notification naming the files | Yes | partial: the run reports the cap it hit, not the files involved |
 | Free up space | Dehydrate files to online-only | partial: unticking a folder offers to delete the local copy, which is the disk space people are actually after. Per-file dehydration needs FUSE placeholders and fights bisync's two-way model |
 | Offer to adopt Documents and Pictures on first run | "Manage backup" toggles | no |
@@ -91,7 +91,7 @@ bugs in this project.
 | Limit | Value | What it means here |
 |---|---|---|
 | Cloud path | Under 400 characters including the file name | Longer paths fail at upload. Nothing warns first |
-| Total sync path | 520 characters, of which the local root may be 120 | Microsoft's own client errors and pauses. Here bisync retries |
+| Total sync path | 520 characters, of which the local root may be 120 | Microsoft's own client raises a sync error. Here bisync retries |
 | File name | 255 characters | Same |
 | Largest file | 250 GB | Larger files cannot be uploaded at all |
 | Recommended item count | 300,000 per account | Above it, performance degrades even for items that are not synced |
