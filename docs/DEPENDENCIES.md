@@ -66,3 +66,10 @@ ships 1.60 gives you a working program that breaks the first time a laptop
 suspends mid-sync, and the failure looks like a bug in this project rather than
 a version problem. `install.sh` warns when it sees a version below 1.65, and
 `docs/TROUBLESHOOTING.md` explains the recovery.
+
+## Checking this page
+
+`tests/dependency-matrix.sh` hides one dependency at a time and checks that the
+"If it is missing" column above is still true. It needs no rclone remote and
+leaves a working install alone. The versions it has been run against, and the
+environments nobody has tried yet, are in [COMPATIBILITY.md](COMPATIBILITY.md).
