@@ -14,13 +14,18 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq shellcheck
-          shellcheck setup.sh install.sh uninstall.sh bin/onedrive-sync bin/onedrive-watch
+          shellcheck setup.sh install.sh uninstall.sh \
+                     bin/onedrive-sync bin/onedrive-watch \
+                     extras/networkmanager-dispatcher.sh \
+                     extras/watch-issues.sh extras/install-issue-watch.sh
 
       - name: Shell syntax
         run: |
-          for f in setup.sh install.sh uninstall.sh bin/onedrive-sync bin/onedrive-watch; do
+          for f in setup.sh install.sh uninstall.sh bin/onedrive-sync bin/onedrive-watch \
+                   extras/watch-issues.sh extras/install-issue-watch.sh; do
             bash -n "$f"
           done
+          sh -n extras/networkmanager-dispatcher.sh
 
       - name: Python syntax
         run: python3 -m py_compile bin/onedrive-tray

@@ -273,6 +273,22 @@ resync 行为，以及为什么被打断的同步以前必须人工干预，都�
 
 ---
 
+## 给维护者
+
+`extras/watch-issues.sh` 会向 GitHub API 拉取未关闭的 issue，与已报告过的对比，有新内容就弹桌面通知。想让它每 12 小时跑一次：
+
+```bash
+extras/install-issue-watch.sh
+```
+
+它会把自己发现的内容写进 `~/.cache/rclone-onedrive-tray/issues.log`，并跳过 pull request，只把真正的
+问题报告送给你。依赖 `curl` 和 `notify-send`；后者来自 `libnotify-bin`，托盘本身并不需要它。
+
+```bash
+watch-issues.sh --list      # 列出当前未关闭的 issue
+watch-issues.sh --forget    # 清空记录，下次全部重报
+```
+
 ## 更新记录
 
 见 [CHANGELOG.md](CHANGELOG.md)。

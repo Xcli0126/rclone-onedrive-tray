@@ -326,6 +326,24 @@ Your synced folder and the rclone remote are never touched.
 
 ---
 
+## For maintainers
+
+`extras/watch-issues.sh` asks the GitHub API for open issues, compares them with the ones it has
+already reported, and raises a desktop notification for anything new. To have it run twice a day:
+
+```bash
+extras/install-issue-watch.sh
+```
+
+It writes what it found to `~/.cache/rclone-onedrive-tray/issues.log` and skips pull requests, so
+only actual reports reach you. It needs `curl` and `notify-send`; the latter comes from
+`libnotify-bin`, which the tray itself does not need.
+
+```bash
+watch-issues.sh --list      # print the open issues
+watch-issues.sh --forget    # report everything again next time
+```
+
 ## Changelog
 
 See [CHANGELOG.md](CHANGELOG.md).

@@ -35,6 +35,8 @@ some distributions is too old to sync safely.
 | Notification bindings | `gir1.2-notify-0.7` | Desktop notifications, including the reason a sync failed | The tray prints one line at startup and runs without notifications |
 | NetworkManager | `network-manager` | The optional dispatcher hook, so waking from suspend catches up immediately | The next timer tick handles it instead |
 | `sudo` | `sudo` | `install.sh --with-nm-dispatcher`, and `uninstall.sh` removing the hook | Everything else installs and runs without root |
+| `curl` | `curl` | `extras/watch-issues.sh`, the maintainer issue poller | That tool reports that it cannot run. Sync is unaffected |
+| `notify-send` | `libnotify-bin` | The issue poller's notification | It still logs what it found, just silently |
 
 ## Not a package
 

@@ -57,6 +57,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The requirements listed `libnotify-bin`, which provides the `notify-send` command line tool. The
   tray needs the Python binding, which is `gir1.2-notify-0.7`.
 
+### Added
+
+- `extras/watch-issues.sh` and its timer installer, for maintainers: polls the GitHub API twice a
+  day, ignores pull requests, notifies on anything not seen before, and appends to
+  `~/.cache/rclone-onedrive-tray/issues.log`. It is not part of the syncing and needs `curl` and
+  `notify-send`.
+
 ## [1.0.0] - 2026-09-13
 
 First public release.
