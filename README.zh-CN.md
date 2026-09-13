@@ -82,7 +82,8 @@ sudo apt install rclone python3-gi python3-cairo gir1.2-gtk-3.0 \
 
 完整依赖清单（含可选项，以及每项缺失时的确切表现）见
 [docs/DEPENDENCIES.md](docs/DEPENDENCIES.md)。托盘和同步包装器在缺少依赖时会打印安装命令并退出，
-而不是抛一堆 traceback。
+而不是抛一堆 traceback。哪些环境真的测过、哪些没测过，见
+[docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)。
 
 ---
 
@@ -188,7 +189,7 @@ Rebuild sync baseline (resync)…
 Quit
 ```
 
-勾上的文件夹会保留在本机。取消勾选会停止同步它，并且**两边都不动**，所以不会丢东西。但一个「本地还在、却不再同步」的文件夹是个陷阱——在里面改的东西哪儿也去不了——所以托盘接下来会问你是否删除本地副本。重新勾选会把文件下回来。点开头的隐藏目录排在分隔线下面，因为 `.rag` 之类的同样值得排除。
+勾上的文件夹会保留在本机。取消勾选会停止同步它，并且**两边都不动**，所以不会丢东西。但一个「本地还在、却不再同步」的文件夹是个陷阱：在里面改的东西哪儿也去不了，所以托盘接下来会问你是否删除本地副本。重新勾选会把文件下回来。点开头的隐藏目录排在分隔线下面，因为 `.rag` 之类的同样值得排除。
 
 定时暂停会同时停掉定时器和监听器，然后把恢复交给一个 systemd 瞬时定时器，所以**不管托盘还在不在，暂停都会自己结束**。菜单标签会显示恢复时刻。
 
@@ -288,6 +289,21 @@ extras/install-issue-watch.sh
 watch-issues.sh --list      # 列出当前未关闭的 issue
 watch-issues.sh --forget    # 清空记录，下次全部重报
 ```
+
+### 测试
+
+两个测试脚本都不需要真的 rclone 远程：
+
+```bash
+tests/dependency-matrix.sh      # 每次只藏起来一个依赖
+tests/install-flow.sh           # 在沙箱里走一遍文档里的安装流程
+```
+
+两者都会把 `HOME` 和各个 XDG 目录指向临时目录，用替身脚本顶掉 rclone 和 systemctl，并使用专门的
+单元名，所以跑测试不会打扰正在工作的那套安装。加 `--verbose` 可以看到每条命令及其输出。CI 会在
+`ubuntu-latest` 上跑一遍，那台机器的发行版、systemd 和 rclone 都跟开发机不同。
+[docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) 记录了它们覆盖了什么、在哪些版本上真的跑过，以及
+还有哪些环境没人试过。
 
 ## 更新记录
 

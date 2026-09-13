@@ -202,6 +202,7 @@ STRINGS = {
         "maxdelete": "待删除文件超过 MAX_DELETE；若确属正常的大批量删除，请运行 onedrive-sync --resync",
         "network": "网络或 DNS 暂时不可用，稍后自动重试",
         "resync": "同步基线失效，请运行 onedrive-sync --resync",
+        "oldrclone": "rclone 版本过旧，不认识 BISYNC_ARGS 里的参数；--resilient/--recover 需要 1.65 或更新版本",
         "auth": "授权可能已过期，需要重新授权 rclone 远程",
         "other": "详见同步日志",
     },

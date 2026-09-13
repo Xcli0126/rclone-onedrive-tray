@@ -111,7 +111,8 @@ sudo apt install rclone python3-gi python3-cairo gir1.2-gtk-3.0 \
 
 Every dependency, including the optional ones and the exact failure each absence causes, is
 listed in [docs/DEPENDENCIES.md](docs/DEPENDENCIES.md). Both the tray and the sync wrapper exit
-with the install command rather than a traceback when something they need is absent.
+with the install command rather than a traceback when something they need is absent. What has
+actually been tested, and what has not, is in [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md).
 
 ---
 
@@ -343,6 +344,22 @@ only actual reports reach you. It needs `curl` and `notify-send`; the latter com
 watch-issues.sh --list      # print the open issues
 watch-issues.sh --forget    # report everything again next time
 ```
+
+### Tests
+
+Two suites, neither of which needs an rclone remote:
+
+```bash
+tests/dependency-matrix.sh      # hides one dependency at a time
+tests/install-flow.sh           # the documented install path, in a sandbox
+```
+
+Both point `HOME` and the XDG directories at a temporary tree, replace rclone and systemctl
+with stubs, and use a probe unit name, so running them cannot disturb a working install.
+`--verbose` shows every command and its output. CI runs both on `ubuntu-latest`, which is a
+different distribution, systemd and rclone from the machine they were written on.
+[docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) records what they cover, the versions they have
+been run against, and what nobody has tried yet.
 
 ## Changelog
 

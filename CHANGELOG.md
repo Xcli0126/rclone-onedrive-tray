@@ -42,8 +42,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bookkeeping, not actions; the file counts on both sides stay the same.
   Since a folder that is present locally but no longer synced is a trap (edits in it go
   nowhere), the tray asks whether to delete the local copy when you untick one.
+- Two test suites, runnable with no OneDrive account and no risk to a working setup.
+  `tests/dependency-matrix.sh` hides one dependency at a time and checks that the behaviour matches
+  what `docs/DEPENDENCIES.md` promises. `tests/install-flow.sh` runs the documented install path,
+  uninstall included, inside a sandbox and checks the files and the rclone command line it
+  produces. Both are wired into CI.
+- `docs/COMPATIBILITY.md`: the versions this was developed against, the behaviour measured on a
+  real account, and an explicit list of what has never been tried.
 
 ### Fixed
+
+- An rclone older than the flags in `BISYNC_ARGS` rejected them before opening its log file, so
+  `onedrive-sync` reported `[other] see log` and pointed at a log with nothing in it. It now copies
+  rclone's stderr into its own log and reports `[oldrclone]` naming the version requirement.
+- The lock file moved from a fixed `/tmp/onedrive-sync.lock` to `$CACHE_DIR/sync.lck`. A shared
+  name serialised every configuration on the machine against each other, and `/tmp` is
+  world-writable, so any local user could have held the lock and stalled the timer.
 
 - A missing `flock` made `onedrive-sync` print "another sync is already running" and exit 0 without
   ever invoking rclone. Every run looked normal in the log while nothing synced. It now refuses to

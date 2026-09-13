@@ -16,19 +16,24 @@ jobs:
           sudo apt-get install -y -qq shellcheck
           shellcheck setup.sh install.sh uninstall.sh \
                      bin/onedrive-sync bin/onedrive-watch \
+                     tests/dependency-matrix.sh tests/install-flow.sh \
+                     tests/lib/harness.sh \
                      extras/networkmanager-dispatcher.sh \
                      extras/watch-issues.sh extras/install-issue-watch.sh
 
       - name: Shell syntax
         run: |
           for f in setup.sh install.sh uninstall.sh bin/onedrive-sync bin/onedrive-watch \
+                   tests/dependency-matrix.sh tests/install-flow.sh tests/lib/harness.sh \
                    extras/watch-issues.sh extras/install-issue-watch.sh; do
             bash -n "$f"
           done
           sh -n extras/networkmanager-dispatcher.sh
 
       - name: Python syntax
-        run: python3 -m py_compile bin/onedrive-tray
+        run: |
+          python3 -m py_compile bin/onedrive-tray
+          python3 -m py_compile tests/lib/load_module.py tests/lib/pyshim/sitecustomize.py
 
       - name: Templates contain their placeholders
         run: |
@@ -36,3 +41,32 @@ jobs:
           grep -q '%INTERVAL%'     systemd/onedrive-sync.timer.in
           grep -q '%WATCH_SCRIPT%' systemd/onedrive-watch.service.in
           grep -q '%TRAY_SCRIPT%'  autostart/rclone-onedrive-tray.desktop.in
+
+  tests:
+    # Second environment on purpose: this runner's distribution, systemd, bash and
+    # rclone are all older than the machine the project was written on, so a green
+    # job is a data point rather than a repeat of the same run.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the dependencies the suites probe for
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq rclone inotify-tools python3-gi python3-cairo \
+            gir1.2-gtk-3.0 gir1.2-ayatanaappindicator3-0.1 gir1.2-notify-0.7
+
+      - name: Report the environment under test
+        run: |
+          . /etc/os-release; echo "os:      $PRETTY_NAME"
+          echo "kernel:  $(uname -r)"
+          echo "systemd: $(systemctl --version | head -1)"
+          echo "bash:    $BASH_VERSION"
+          echo "python3: $(python3 --version)"
+          echo "rclone:  $(rclone version | head -1)"
+
+      - name: Dependency matrix
+        run: tests/dependency-matrix.sh --verbose
+
+      - name: Install flow
+        run: tests/install-flow.sh --verbose

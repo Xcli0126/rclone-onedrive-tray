@@ -42,7 +42,10 @@ MAX_LOG_BYTES="${MAX_LOG_BYTES:-5242880}"
 RETRIES="${RETRIES:-3}"
 RETRY_DELAY="${RETRY_DELAY:-60}"
 BISYNC_ARGS="${BISYNC_ARGS:---resilient --recover --max-lock 2m --conflict-resolve none --conflict-loser num --stats 2s}"
-LOCK_FILE="${TMPDIR:-/tmp}/onedrive-sync.lock"
+# The lock lives beside the state it protects, not in /tmp: a fixed /tmp name
+# would serialise every configuration on the machine against each other, and
+# /tmp is world-writable, so any local user could hold it and stall the timer.
+LOCK_FILE="$CACHE_DIR/sync.lck"
 RCLONE_CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/rclone"
 
 command -v "$RCLONE" >/dev/null 2>&1 || die "rclone not found in PATH"
@@ -54,13 +57,14 @@ command -v "$RCLONE" >/dev/null 2>&1 || die "rclone not found in PATH"
 command -v flock >/dev/null 2>&1 ||
     die "flock not found (it ships with util-linux); refusing to run without the lock"
 
-mkdir -p "$(dirname "$LOG")" "$LOCAL" 2>/dev/null
+mkdir -p "$(dirname "$LOG")" "$LOCAL" "$CACHE_DIR" 2>/dev/null
 
 log_line() { printf '%s %s\n' "$(date '+%Y/%m/%d %H:%M:%S')" "$*" >>"$LOG"; }
 
 # ---------------------------------------------------------------- mutual exclusion
 # A manual run racing the systemd timer corrupts bisync's .lst listings.
-exec 9>"$LOCK_FILE"
+exec 9>"$LOCK_FILE" ||
+    die "cannot open the lock file $LOCK_FILE (is $CACHE_DIR writable?)"
 if ! flock -w 120 9; then
     echo "$APP: another sync is already running, skipping this run" >&2
     log_line "NOTICE: another run holds the lock, skipping"
@@ -132,6 +136,9 @@ hint_for() {
     elif grep -qiE 'lookup .*:53|dial tcp|no such host|Temporary failure in name resolution|server misbehaving' <<<"$t"; then
         tag=network
         msg="network or DNS temporarily unavailable; will retry"
+    elif grep -qiE 'unknown flag|flag provided but not defined|unknown shorthand flag' <<<"$t"; then
+        tag=oldrclone
+        msg="this rclone does not know the flags in BISYNC_ARGS; --resilient/--recover need rclone >= 1.65 (check: rclone version)"
     elif grep -qiE 'must run --resync|resync required|prior listings|critical error' <<<"$t"; then
         tag=resync
         msg="sync baseline is invalid; run: onedrive-sync --resync"
@@ -147,9 +154,22 @@ hint_for() {
 }
 
 # ---------------------------------------------------------------- main loop
+# rclone only writes to --log-file once it has parsed its flags, so a bad flag
+# (an rclone older than the arguments this config passes) would leave nothing
+# behind but a journal line. Catch stderr here, copy it into the log, and let
+# the journal keep it too.
+ERRS="$(mktemp)"
+trap 'rm -f "$ERRS"' EXIT
+
 for i in $(seq 1 "$RETRIES"); do
-    "$RCLONE" "${ARGS[@]}"
+    : >"$ERRS"
+    "$RCLONE" "${ARGS[@]}" 2>"$ERRS"
     rc=$?
+
+    if [ -s "$ERRS" ]; then
+        cat "$ERRS" >>"$LOG"
+        cat "$ERRS" >&2
+    fi
 
     if [ "$rc" -eq 0 ]; then
         [ "$i" -gt 1 ] && echo "$APP: succeeded on attempt $i"
