@@ -14,10 +14,11 @@ set -euo pipefail
 PREFIX="${PREFIX:-$HOME/.local}"
 XDG_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}"
 PURGE=0
+PREFIX_GIVEN=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --prefix)   PREFIX="${2:?--prefix needs a directory}"; shift 2 ;;
+        --prefix)   PREFIX="${2:?--prefix needs a directory}"; PREFIX_GIVEN=1; shift 2 ;;
         --purge)    PURGE=1; shift ;;
         -h|--help)  sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *)          echo "unknown option: $1" >&2; exit 2 ;;
@@ -66,10 +67,20 @@ systemctl --user daemon-reload 2>/dev/null || \
     warn "run 'systemctl --user daemon-reload' after your next login"
 
 NM_TARGET="/etc/NetworkManager/dispatcher.d/90-rclone-onedrive-tray"
+# The hook is one file for the whole machine and it names a unit, so it is only
+# this install's to remove when the install is the normal one and the hook names
+# the unit being uninstalled. Without those checks, removing a test install from
+# a scratch prefix would delete the working install's hook.
 if [ -f "$NM_TARGET" ]; then
-    say "Removing the NetworkManager hook (needs root)"
-    if ! sudo rm -f "$NM_TARGET"; then
-        warn "could not remove it; run: sudo rm -f $NM_TARGET"
+    if [ "$PREFIX_GIVEN" -eq 1 ] && [ "$PREFIX" != "$HOME/.local" ]; then
+        say "Leaving $NM_TARGET alone: this uninstall is for $PREFIX"
+    elif ! grep -q "$UNIT_NAME" "$NM_TARGET" 2>/dev/null; then
+        say "Leaving $NM_TARGET alone: it does not mention $UNIT_NAME"
+    else
+        say "Removing the NetworkManager hook (needs root)"
+        if ! sudo rm -f "$NM_TARGET"; then
+            warn "could not remove it; run: sudo rm -f $NM_TARGET"
+        fi
     fi
 fi
 

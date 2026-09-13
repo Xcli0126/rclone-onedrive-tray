@@ -175,6 +175,11 @@ chmod 0644 "$AUTOSTART_DIR/rclone-onedrive-tray.desktop"
 # --------------------------------------------------------------- NM dispatcher
 if [ "$NM_DISPATCHER" -eq 1 ]; then
     say "Installing the NetworkManager dispatcher hook"
+    if [ "$PREFIX" != "$HOME/.local" ]; then
+        warn "this hook is machine-wide and will start $UNIT_NAME.timer,"
+        warn "which lives outside $HOME/.local. Install the units normally if that is"
+        warn "not what you meant."
+    fi
     NM_TARGET="/etc/NetworkManager/dispatcher.d/90-rclone-onedrive-tray"
     NM_TMP="$(mktemp)"
     sed -e "s|%UNIT_NAME%|$UNIT_NAME|g" \
@@ -198,12 +203,25 @@ fi
 
 # --------------------------------------------------------------- enable
 if systemctl --user daemon-reload 2>/dev/null; then
-    systemctl --user enable --now "$UNIT_NAME.timer" 2>/dev/null || \
-        warn "could not enable $UNIT_NAME.timer (no user systemd session?)"
-    systemctl --user list-timers "$UNIT_NAME.timer" --no-pager 2>/dev/null | head -3 || true
-    if [ "$WATCH" = "1" ] && [ "$HAVE_INOTIFY" -eq 1 ]; then
-        systemctl --user enable --now "$UNIT_NAME-watch.service" 2>/dev/null || \
-            warn "could not enable $UNIT_NAME-watch.service"
+    # The running manager reads its own unit search path, which is not always
+    # $UNIT_DIR. Redirect XDG_CONFIG_HOME and the units land somewhere it never
+    # looks, while a same-named unit from another install is still visible: an
+    # unconditional `enable --now` would then start that one. Ask where the unit
+    # actually is before touching it.
+    seen="$(systemctl --user show -p FragmentPath --value "$UNIT_NAME.timer" 2>/dev/null || true)"
+    if [ "$seen" != "$UNIT_DIR/$UNIT_NAME.timer" ]; then
+        warn "the user systemd manager does not read $UNIT_DIR, so nothing was enabled"
+        warn "  it reports: ${seen:-no $UNIT_NAME.timer at all}"
+        warn "activate them yourself once the units are in its search path:"
+        warn "    systemctl --user daemon-reload && systemctl --user enable --now $UNIT_NAME.timer"
+    else
+        systemctl --user enable --now "$UNIT_NAME.timer" 2>/dev/null || \
+            warn "could not enable $UNIT_NAME.timer (no user systemd session?)"
+        systemctl --user list-timers "$UNIT_NAME.timer" --no-pager 2>/dev/null | head -3 || true
+        if [ "$WATCH" = "1" ] && [ "$HAVE_INOTIFY" -eq 1 ]; then
+            systemctl --user enable --now "$UNIT_NAME-watch.service" 2>/dev/null || \
+                warn "could not enable $UNIT_NAME-watch.service"
+        fi
     fi
 else
     warn "systemctl --user is unavailable; enable the timer yourself after logging in:"

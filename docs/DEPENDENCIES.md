@@ -26,6 +26,7 @@ some distributions is too old to sync safely.
 | pycairo | `python3-cairo` | draws the five status icons | Same. The icons are drawn at startup, so without it there would be an invisible tray entry with no explanation |
 | xdg-utils | `xdg-utils` | "Open sync folder", "View sync log" | Those two menu items do nothing |
 | An AppIndicator-capable shell | `gnome-shell-extension-appindicator` on stock GNOME | icon visibility | The tray runs and logs normally, but nothing appears in the panel |
+| A graphical session | any desktop | `onedrive-tray` | The tray exits with a message and status 1. Without `DISPLAY` or `WAYLAND_DISPLAY`, GTK aborts the process with a core dump, so the tray checks first. On a server, use `onedrive-sync` and the timer |
 
 ## Optional
 

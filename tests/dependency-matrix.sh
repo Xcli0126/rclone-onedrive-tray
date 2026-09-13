@@ -78,6 +78,15 @@ run "no pycairo: exits and names pycairo" 1 "pycairo" \
     env PYTHONPATH="$SHIM" HIDE_MODULE=cairo python3 "$LOADER" "$SRC_DIR/bin/onedrive-tray"
 run "no Notify typelib: still loads, notifications off" 0 "LOADED" \
     env PYTHONPATH="$SHIM" HIDE_TYPELIB=Notify python3 "$LOADER" "$SRC_DIR/bin/onedrive-tray"
+# GTK aborts with a core dump when there is no display, so the tray has to say
+# what it is before it gets that far.
+run "no display: exits and says it needs a session" 1 "graphical session" \
+    env -u DISPLAY -u WAYLAND_DISPLAY python3 "$LOADER" "$SRC_DIR/bin/onedrive-tray"
+# A display has to be set to get past the guard above, but the lock is taken
+# before GTK connects to it, so nothing here opens a window.
+run "unusable TMPDIR: says so instead of already running" 1 "Could not create the lock file" \
+    env DISPLAY=:0 TMPDIR="$WORK/does-not-exist" \
+        python3 "$SRC_DIR/bin/onedrive-tray"
 
 # ---------------------------------------------------------------- the wrapper
 title "onedrive-sync"
@@ -193,6 +202,15 @@ build_reduced_path rclone
 run "no rclone: the wizard says so first" 1 "rclone is not installed" \
     env -i PATH="$REDUCED" HOME="$HOME" XDG_CONFIG_HOME="$WORK/s1" \
         XDG_CACHE_HOME="$WORK/s1c" bash "$SRC_DIR/setup.sh" --yes --no-install
+
+# With no remote and no terminal, the wizard used to start rclone's browser
+# sign-in and block forever. --yes means "do not ask me", so it has to stop.
+mkdir -p "$WORK/noremote"
+printf '#!/bin/bash\nexit 0\n' > "$WORK/noremote/rclone"
+chmod +x "$WORK/noremote/rclone"
+run "no remote and no terminal: refuses instead of hanging" 1 "no rclone remote" \
+    env -i PATH="$WORK/noremote:$REDUCED" HOME="$HOME" XDG_CONFIG_HOME="$WORK/s2" \
+        XDG_CACHE_HOME="$WORK/s2c" bash "$SRC_DIR/setup.sh" --yes --no-install
 
 # ---------------------------------------------------------------- summary
 summary

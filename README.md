@@ -139,10 +139,11 @@ Everything lands in your home directory, and neither script calls `sudo`.
 
 ```
 ~/.local/bin/onedrive-sync, onedrive-tray, onedrive-watch, onedrive-check
-~/.config/rclone-onedrive-tray/config, filters.txt
+~/.config/rclone-onedrive-tray/config, filters.txt, exclude-folders.txt
 ~/.config/systemd/user/onedrive-sync.{service,timer}
 ~/.config/systemd/user/onedrive-sync-watch.service
 ~/.config/autostart/rclone-onedrive-tray.desktop
+~/.local/share/rclone-onedrive-tray/icons/          drawn at first start
 ```
 
 To configure by hand instead, run `./install.sh` and edit the config yourself:
@@ -157,7 +158,38 @@ onedrive-sync --resync   # build the baseline; downloads everything
 Signing in is the one step this project does not wrap, because rclone owns it and
 rclone has to own it. [docs/SIGNING-IN.md](docs/SIGNING-IN.md) walks through what
 the browser flow asks, what a work account needs, and what to do on a machine
-with no browser.
+with no browser. It also has the way to try the whole loop before signing in, with
+a remote that points at a plain directory and needs no account at all.
+
+### Trying it alongside an existing install
+
+Installing over a working setup is how you end up debugging two of them at once,
+so point everything at a scratch tree and give the units their own name:
+
+```bash
+export HOME=/tmp/trial/home
+export XDG_CONFIG_HOME=/tmp/trial/config XDG_CACHE_HOME=/tmp/trial/cache
+export XDG_DATA_HOME=/tmp/trial/data XDG_STATE_HOME=/tmp/trial/state
+export XDG_RUNTIME_DIR=/tmp/trial/run        # systemd finds its socket here
+export TMPDIR=/tmp/trial/tmp
+mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_DATA_HOME" \
+         "$XDG_STATE_HOME" "$TMPDIR"; chmod 700 "$XDG_RUNTIME_DIR" 2>/dev/null
+
+./install.sh --prefix /tmp/trial/prefix --no-start
+./setup.sh --remote trial: --local /tmp/trial/local --unit-name trial-sync --yes
+```
+
+Two things make the difference. `--unit-name` keeps the trial units away from the
+real ones: systemd unit names are global to your session, and two installs cannot
+both own `onedrive-sync.timer`. And `XDG_RUNTIME_DIR` must point somewhere, or
+`systemctl --user` either reaches your real session or fails outright.
+
+`install.sh` checks where systemd actually reads the unit from before enabling
+anything. If the manager cannot see the directory the units were written into, it
+says so and stops instead of enabling a same-named unit belonging to something
+else. When you remove the trial, `uninstall.sh` leaves the NetworkManager hook in
+`/etc` alone unless it names the unit being removed, because that file is
+machine-wide and belongs to whichever install put it there.
 
 ---
 
@@ -269,9 +301,9 @@ onedrive-check: /home/you/OneDrive/Vault against onedrive:Vault
     cloud path 412 chars: Notes/very/deep/...
 ```
 
-It exits non-zero when something will actually fail, so it can go in a script. `onedrive-sync
---resync` runs it first and logs the report, because that is the run that uploads everything. The
-tray has it as a menu item. The limits and how they were measured are in
+It exits 0 when the tree is fine, 1 when something will actually fail, and 2 on a usage error, so
+a script can tell "bad names" from "I called it wrong". `onedrive-sync --resync` runs it first and
+logs the report, because that is the run that uploads everything. The tray has it as a menu item. The limits and how they were measured are in
 [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
 
 ### Syncing sooner after the network comes back
@@ -386,7 +418,7 @@ watch-issues.sh --forget    # report everything again next time
 
 ### Tests
 
-Two suites, neither of which needs an rclone remote:
+Four suites, none of which needs an rclone remote:
 
 ```bash
 tests/dependency-matrix.sh      # hides one dependency at a time
@@ -395,8 +427,9 @@ tests/filters.sh                # the default filters still filter
 tests/docs.sh                   # internal links, writing rules, promised files
 ```
 
-Both point `HOME` and the XDG directories at a temporary tree, replace rclone and systemctl
-with stubs, and use a probe unit name, so running them cannot disturb a working install.
+The first two point `HOME` and the XDG directories at a temporary tree, replace rclone, systemctl
+and sudo with stubs, and use a probe unit name. `filters.sh` runs the real rclone over a fixture
+directory, and `docs.sh` only reads the repository. None of them can disturb a working install.
 `--verbose` shows every command and its output. CI runs both on `ubuntu-latest`, which is a
 different distribution, systemd and rclone from the machine they were written on.
 [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) records what they cover, the versions they have

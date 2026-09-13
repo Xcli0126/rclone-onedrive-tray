@@ -101,9 +101,11 @@ fi
 
 # ---------------------------------------------------------------- selected folders
 # Top-level folders the user chose not to keep on this machine, one name per
-# line, relative to REMOTE. bisync treats them as absent on both sides, so the
-# local copies are removed and the cloud is left alone. Measured behaviour on
-# rclone 1.75: toggling a folder neither needs --resync nor touches the remote.
+# line, relative to REMOTE. Measured behaviour on rclone 1.75: excluding a folder
+# touches neither side, so the local copy stays where it is and the cloud is left
+# alone, and toggling one neither needs --resync nor touches the remote. The tray
+# offers to delete the local copy separately, because leaving it there turns the
+# folder into a trap.
 if [ -n "$EXCLUDE_FOLDERS_FILE" ] && [ -f "$EXCLUDE_FOLDERS_FILE" ]; then
     excluded=0
     while IFS= read -r folder || [ -n "$folder" ]; do

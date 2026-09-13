@@ -97,6 +97,15 @@ if [ -z "$REMOTES" ]; then
     echo "    Creating one needs a browser to authorise your Microsoft account."
     echo "    Step by step, including work accounts and machines without a browser:"
     echo "        docs/SIGNING-IN.md"
+    if [ "$ASSUME_YES" -eq 1 ] || [ ! -t 0 ]; then
+        # The sign-in is interactive: it opens a browser and waits. Starting it
+        # from a non-interactive run would block forever with nothing written.
+        die "no rclone remote, and this run cannot open a browser for you.
+    Create one first:      rclone config create onedrive onedrive
+    Or for a trial with no account at all:
+                          rclone config create trial alias remote /tmp/onedrive-trial
+    Then re-run this script."
+    fi
     name="$(ask 'Name for the new remote' 'onedrive')"
     say "Running: rclone config create $name onedrive"
     echo "    (rclone will open your browser; complete the sign-in there)"

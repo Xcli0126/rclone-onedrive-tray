@@ -44,6 +44,14 @@ def _die(problem, fix):
 APT = ("sudo apt install python3-gi python3-cairo gir1.2-gtk-3.0 "
        "gir1.2-ayatanaappindicator3-0.1 gir1.2-notify-0.7")
 
+# GTK does not fail politely without a display: it aborts the process and leaves
+# a core dump, which on a server looks like a crash rather than a missing desktop.
+if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+    _die("this is the tray icon, and it needs a graphical session.",
+         "There is no DISPLAY or WAYLAND_DISPLAY here.\n"
+         "On a server or over SSH, use onedrive-sync and the systemd timer:\n"
+         "    onedrive-sync --resync && systemctl --user enable --now onedrive-sync.timer")
+
 try:
     import gi
 except ImportError:
@@ -1060,16 +1068,31 @@ class Tray:
 
 
 def acquire_lock():
+    """Take the single-instance lock.
+
+    Returns the file object, or raises OSError. Callers need to tell "another
+    tray has it" apart from "the lock file cannot be created at all": both used
+    to print the same sentence, so an unwritable TMPDIR looked like a running
+    tray and exited 0.
+    """
+    handle = open(LOCK_FILE, "w")
     try:
-        handle = open(LOCK_FILE, "w")
         fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        return handle
     except OSError:
+        handle.close()
         return None
+    return handle
 
 
 def main():
-    if acquire_lock() is None:
+    try:
+        lock = acquire_lock()
+    except OSError as exc:
+        print(f"Could not create the lock file {LOCK_FILE}: {exc}\n"
+              f"Check that TMPDIR points at a directory that exists and is "
+              f"writable.", file=sys.stderr)
+        return 1
+    if lock is None:
         print("rclone-onedrive-tray is already running.", file=sys.stderr)
         return 0
 

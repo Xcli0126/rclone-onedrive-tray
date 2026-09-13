@@ -7,13 +7,13 @@ and a guess is not something you can plan an install around.
 
 ## The test suites
 
-Two scripts, both safe to run on a working setup:
+Four scripts, none of which needs an rclone remote and all safe on a working setup:
 
 ```bash
-tests/dependency-matrix.sh      # 21 cases: one missing dependency at a time
-tests/install-flow.sh           # 53 cases: the documented install path, end to end
+tests/dependency-matrix.sh      # 24 cases: one missing dependency at a time
+tests/install-flow.sh           # 57 cases: the documented install path, end to end
 tests/filters.sh                # 19 cases: the default filters still filter
-tests/docs.sh                   # 23 cases: the links and rules the docs depend on
+tests/docs.sh                   # 25 cases: the links and rules the docs depend on
 ```
 
 Add `--verbose` to any of them to see each command and its output.
@@ -43,7 +43,9 @@ start a sync after a local edit.
 
 None of them touch a live installation. They point `HOME` and the XDG
 directories at a temporary tree, use a probe unit name instead of
-`onedrive-sync`, and remove that tree on exit.
+`onedrive-sync`, stub rclone, systemctl and sudo, and remove that tree on exit.
+The machine-wide NetworkManager hook in `/etc` is deliberately out of reach: the
+tests assert that `sudo` was never called.
 
 ## Verified on this machine
 
@@ -105,6 +107,23 @@ warns about that version, which is one of the cases the matrix checks. The sync
 itself is stubbed in both suites, so nothing here proves that 1.60.1 syncs. It
 does not, and `docs/DEPENDENCIES.md` explains what fails and why.
 
+## An independent acceptance run
+
+The documented path has also been walked end to end by someone with no prior
+knowledge of the project, working only from the README and the pages it links,
+against a fresh clone of an earlier commit. They built their own sandbox with a
+redirected `HOME`, every `XDG_*` variable and `TMPDIR`, used a remote of type
+`alias` pointing at a local directory because no Microsoft account was available,
+and ran the install, the sync in both directions, deletions, a conflict, the
+filters, the folder selection, the name checker, the tray as far as a headless
+session allows, uninstall, and these suites.
+
+That run is why the changelog above has entries about `install.sh` enabling a
+unit it does not own, `uninstall.sh` reaching into `/etc`, `setup.sh --yes`
+blocking on a browser sign-in, and the tray aborting without a display. Each of
+those now has a regression case in `tests/`, and the two places where they did
+not match the documentation were corrected rather than explained away.
+
 ## Not verified
 
 Everything below is untested. It may well work. Nobody has watched it work, so
@@ -134,6 +153,16 @@ treat it as unknown rather than supported.
 - Suspend and resume. The dispatcher hook covers the reconnect, but hibernate
   with a sync in flight has not been reproduced.
 - More than one account or more than one config at a time.
+- The tray's panel icon, its menu, its notifications and the timed pause. A
+  desktop session is needed to click any of it, and the suites only go as far as
+  loading the module, drawing the five icons and parsing the log.
+- Activating the systemd units inside a sandbox. A sandbox has no user manager of
+  its own, so the suites write the units and run `systemd-analyze verify`; whether
+  systemd loads and schedules them was measured on the development machine, where
+  the timer has been running at a five minute interval.
+- Installing the NetworkManager hook into `/etc`, which needs root. The generated
+  hook text is checked; the install itself and the hook firing were exercised by
+  hand on one machine.
 - Work and school accounts, and installing on a machine with no browser. Only a
   personal account on a desktop has been authorised here. The other routes in
   [SIGNING-IN.md](SIGNING-IN.md) are rclone's documented ones, not ones this

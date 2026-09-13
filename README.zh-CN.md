@@ -107,7 +107,7 @@ cd rclone-onedrive-tray
 
 ```
 ~/.local/bin/onedrive-sync, onedrive-tray, onedrive-watch, onedrive-check
-~/.config/rclone-onedrive-tray/config, filters.txt
+~/.config/rclone-onedrive-tray/config, filters.txt, exclude-folders.txt
 ~/.config/systemd/user/onedrive-sync.{service,timer}
 ~/.config/systemd/user/onedrive-sync-watch.service
 ~/.config/autostart/rclone-onedrive-tray.desktop
@@ -124,7 +124,35 @@ onedrive-sync --resync   # 建立基线，会把云端全部拉下来
 
 登录这一步本项目没有包进来。账号归 rclone 管，也只能由 rclone 管，所以先用 rclone 登进去，
 再回来跑安装。[docs/SIGNING-IN.md](docs/SIGNING-IN.md) 写了浏览器授权会依次问什么、工作或学校
-账号需要额外准备什么、以及机器上没有浏览器时怎么办。
+账号需要额外准备什么、以及机器上没有浏览器时怎么办。里面还有一条不需要任何账号的路子：把远程
+指向一个普通目录，就能先把整条同步链路跑通。
+
+### 和现有安装并存
+
+在已经装好的机器上再装一遍，最容易变成同时调试两套。把 HOME 和各个 XDG 目录指到临时目录，再给
+单元起个自己的名字：
+
+```bash
+export HOME=/tmp/trial/home
+export XDG_CONFIG_HOME=/tmp/trial/config XDG_CACHE_HOME=/tmp/trial/cache
+export XDG_DATA_HOME=/tmp/trial/data XDG_STATE_HOME=/tmp/trial/state
+export XDG_RUNTIME_DIR=/tmp/trial/run        # systemd 在这里找自己的 socket
+export TMPDIR=/tmp/trial/tmp
+mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_DATA_HOME" \
+         "$XDG_STATE_HOME" "$TMPDIR"; chmod 700 "$XDG_RUNTIME_DIR" 2>/dev/null
+
+./install.sh --prefix /tmp/trial/prefix --no-start
+./setup.sh --remote trial: --local /tmp/trial/local --unit-name trial-sync --yes
+```
+
+两个细节最关键。`--unit-name` 让临时那套不和真身撞名，因为 systemd 的单元名在你的会话里是全局的，
+两套安装不可能同时拥有 `onedrive-sync.timer`。而 `XDG_RUNTIME_DIR` 必须指向一个真实存在的目录，
+否则 `systemctl --user` 要么连到你真正的会话，要么直接失败。
+
+`install.sh` 在 enable 之前会先问 systemd 到底从哪里读这个单元。如果管理进程看不到刚写入的目录，
+它会说明情况并停手，而不是去 enable 一个同名的别的单元。清理临时那套时，`uninstall.sh` 不会动
+`/etc` 里的 NetworkManager 钩子，除非那个文件点名的正是要卸载的单元，因为那是整机一份、属于当初
+装它的那套安装。
 
 ---
 
@@ -225,7 +253,8 @@ onedrive-check: /home/you/OneDrive/Vault against onedrive:Vault
     cloud path 412 chars: Notes/very/deep/...
 ```
 
-真的有东西会失败时它返回非 0，所以能写进脚本。`onedrive-sync --resync` 会先跑它并把报告写进日志，因为那一次会把所有东西传上去。托盘里也有对应的菜单项。具体限制值和它们是怎么量出来的，写在
+树没问题时返回 0，真的有东西会失败时返回 1，参数写错时返回 2，所以脚本能区分「名字有问题」和
+「我自己调错了」。`onedrive-sync --resync` 会先跑它并把报告写进日志，因为那一次会把所有东西传上去。托盘里也有对应的菜单项。具体限制值和它们是怎么量出来的，写在
 [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)。
 
 ### 网络恢复后立刻补同步
@@ -330,8 +359,9 @@ tests/filters.sh                # 默认过滤规则真的能过滤
 tests/docs.sh                   # 文档互链、写字规矩、文档里点名的文件
 ```
 
-两者都会把 `HOME` 和各个 XDG 目录指向临时目录，用替身脚本顶掉 rclone 和 systemctl，并使用专门的
-单元名，所以跑测试不会打扰正在工作的那套安装。加 `--verbose` 可以看到每条命令及其输出。CI 会在
+四个脚本都不需要 rclone 远程。前两个会把 `HOME` 和各个 XDG 目录指向临时目录，用替身脚本顶掉
+rclone、systemctl 和 sudo，并使用专门的单元名；`filters.sh` 拿真的 rclone 在一个临时目录上跑；
+`docs.sh` 只读仓库。四个都不会打扰正在工作的那套安装。加 `--verbose` 可以看到每条命令及其输出。CI 会在
 `ubuntu-latest` 上跑一遍，那台机器的发行版、systemd 和 rclone 都跟开发机不同。
 [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) 记录了它们覆盖了什么、在哪些版本上真的跑过，以及
 还有哪些环境没人试过。

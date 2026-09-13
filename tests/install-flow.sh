@@ -59,6 +59,14 @@ esac
 exit 0
 EOF
 
+# sudo is stubbed and fails. uninstall.sh reaches for the NetworkManager hook in
+# /etc, which belongs to the machine and not to this sandbox.
+cat > "$WORK/stubs/sudo" <<EOF
+#!/bin/bash
+printf '%s\\n' "\$*" >> "$WORK/sudo-calls"
+exit 1
+EOF
+
 # systemctl is stubbed too, so the watcher's "start the service" decision can be
 # observed without asking the real user manager to do anything.
 cat > "$WORK/stubs/systemctl" <<EOF
@@ -71,7 +79,7 @@ for a in "\$@"; do
 done
 exit 0
 EOF
-chmod +x "$WORK/stubs/rclone" "$WORK/stubs/systemctl"
+chmod +x "$WORK/stubs/rclone" "$WORK/stubs/systemctl" "$WORK/stubs/sudo"
 export PATH="$WORK/stubs:$PATH"
 
 echo "the documented install path, in a sandbox at $WORK"
@@ -115,6 +123,10 @@ check "ExecStart points at the installed wrapper" \
     grep -qF "ExecStart=$HOME/.local/bin/onedrive-sync" "$UNIT_DIR/$UNIT.service"
 check "the timer uses OnUnitInactiveSec, so runs cannot overlap" \
     grep -q '^OnUnitInactiveSec=7min' "$UNIT_DIR/$UNIT.timer"
+# The units are in the sandbox, which the running user manager does not read, so
+# enabling them would reach a same-named unit somewhere else. It has to notice.
+run "it does not enable a unit the manager cannot see" 0 "nothing was enabled" \
+    bash "$SRC_DIR/install.sh" --prefix "$HOME/.local" --no-start
 
 if command -v systemd-analyze >/dev/null 2>&1; then
     check "systemd accepts $UNIT.service" \
@@ -215,14 +227,37 @@ run "a resync reports the bad name and carries on" 0 "reserved name: CON" \
     "$HOME/.local/bin/onedrive-sync" --resync
 rm -f "$LOCAL_DIR/CON" "$LOCAL_DIR/Clash.md" "$LOCAL_DIR/clash.md"
 
+run "the help text is not truncated" 0 "were taken are in" \
+    "$HOME/.local/bin/onedrive-check" --help
+
 # ---------------------------------------------------------------- uninstall
 title "uninstall.sh"
-run "uninstall finishes" 0 "" bash "$SRC_DIR/uninstall.sh" --prefix "$HOME/.local"
+UNINSTALL_OUT="$(bash "$SRC_DIR/uninstall.sh" --prefix "$HOME/.local" 2>&1)"
+UNINSTALL_RC=$?
+if [ "$UNINSTALL_RC" -eq 0 ]; then
+    ok "uninstall finishes"
+else
+    bad "uninstall exits $UNINSTALL_RC"
+    printf '%s\n' "$UNINSTALL_OUT" | head -3 | sed 's/^/        /'
+fi
 check_absent "removes the installed scripts" \
     "$HOME/.local/bin/onedrive-sync" "$HOME/.local/bin/onedrive-tray" \
     "$HOME/.local/bin/onedrive-watch" "$HOME/.local/bin/onedrive-check"
 check_absent "removes the units" \
     "$UNIT_DIR/$UNIT.service" "$UNIT_DIR/$UNIT.timer" "$UNIT_DIR/$UNIT-watch.service"
 check "keeps the configuration (documented; --purge removes it)" test -f "$CFG"
+# The hook in /etc belongs to the machine. This sandbox never had one, and the
+# unit name it would name is not the one being removed, so sudo must not run.
+check_absent "never ran sudo" "$WORK/sudo-calls"
+HOOK=/etc/NetworkManager/dispatcher.d/90-rclone-onedrive-tray
+if [ -f "$HOOK" ]; then
+    if grep -q "Leaving" <<<"$UNINSTALL_OUT"; then
+        ok "left the machine-wide hook to the install that owns it"
+    else
+        bad "a hook exists for another unit and uninstall did not say it left it alone"
+    fi
+else
+    skip "no NetworkManager hook on this machine to leave alone"
+fi
 
 summary

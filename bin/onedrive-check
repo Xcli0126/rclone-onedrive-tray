@@ -26,7 +26,9 @@ CONFIG_FILE="$CONFIG_DIR/config"
 QUIET=0
 MAX_SHOWN=20
 
-usage() { sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; }
+# Print the whole header comment, whatever its length: a fixed range silently
+# truncates the help as soon as the comment grows.
+usage() { sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'; }
 
 while [ $# -gt 0 ]; do
     case "$1" in

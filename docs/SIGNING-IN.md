@@ -11,6 +11,26 @@ rclone listremotes
 rclone lsd onedrive:
 ```
 
+## Trying it without an account
+
+Everything except the account itself can be exercised first, which is worth doing
+before handing rclone a Microsoft login. Point a remote at a plain directory:
+
+```bash
+mkdir -p /tmp/onedrive-trial
+rclone config create trial alias remote /tmp/onedrive-trial
+rclone lsd trial:
+```
+
+Then follow the rest of the README with `trial:` as the remote. The sync loop, the
+timer, the watcher, the tray, the filters and the name checker all behave the same
+way; only the far side is a directory on this machine instead of OneDrive. Delete
+the remote afterwards with `rclone config delete trial`.
+
+`setup.sh` still insists on a remote that `rclone listremotes` knows about, and
+without one it will not start the browser sign-in for you when it is running
+non-interactively: it stops and says so.
+
 ## The short version
 
 On a desktop with a browser, for a personal account:

@@ -57,7 +57,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and logs the report, and the tray has it as a menu item. The limits it uses are measured rather
   than copied: a 383-character cloud path failed where 364 passed, so it treats 380 as the ceiling
   instead of Microsoft's documented 400.
-- `tests/filters.sh`: one file per default rule in a fixture tree, checked against rclone.
+- `tests/filters.sh`: one file per default rule in a fixture tree, checked against rclone. Plus
+  regression cases for everything above: a tray with no display, an unusable `TMPDIR`, a
+  non-interactive `setup.sh` with no remote, an installer that must not enable someone else's unit,
+  and an uninstaller that must not run `sudo`.
+- `docs` gained an account-free way to try the whole loop (`rclone config create trial alias remote
+  /tmp/onedrive-trial`), a guide to installing alongside an existing setup with `--prefix` and
+  `--unit-name`, the two paths in the installed-file list that were missing, and the exit statuses
+  `onedrive-check` uses.
 - `docs/FEATURE-PARITY.md`: what the Windows and macOS OneDrive clients actually do, sourced from
   Microsoft's own pages, sorted into must have, worth having and skip, with a status column for this
   project and an ordered list of the gaps. It records two things Microsoft does not document, a
@@ -70,6 +77,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `install.sh` could enable and start a unit belonging to another installation. It wrote the units
+  into the configured directory and then ran `systemctl --user enable --now`, but the user manager
+  reads its own search path: with `XDG_CONFIG_HOME` redirected it never sees those files, while a
+  same-named unit from the real install is still visible, and that is the one that gets started.
+  It now asks systemd for the unit's fragment path first and refuses to enable anything it does not
+  own. Found by a fresh-eyes install into a sandbox.
+- `uninstall.sh` removed `/etc/NetworkManager/dispatcher.d/90-rclone-onedrive-tray` regardless of
+  which install was being removed, because the hook is one machine-wide file that names a unit. It
+  now only touches it when the install is the default one and the hook names the unit being
+  uninstalled. The test suite had been running that code path with the real `sudo`, which happened
+  to fail with no terminal; `tests/install-flow.sh` now stubs `sudo` so it cannot reach `/etc` at
+  all.
+- `setup.sh --yes` with no rclone remote started the browser sign-in and blocked forever, with the
+  terminal showing nothing and no config written. A non-interactive run now stops and says how to
+  create a remote first, including an account-free trial remote.
+- `onedrive-tray` aborted with a core dump when there was no display, because GTK does that rather
+  than returning an error. It now checks `DISPLAY` and `WAYLAND_DISPLAY` first and explains that a
+  server wants `onedrive-sync` and the timer.
+- `onedrive-tray` printed "already running" and exited 0 when its lock file could not be created at
+  all, so an unusable `TMPDIR` looked like a second copy of the tray. The two cases are told apart
+  and the second one exits non-zero with the path it could not write.
+- `onedrive-check --help` was cut off mid-sentence: the header comment had grown past the hard-coded
+  line range in its own `usage()`.
 - The default filter rules did not work. Every pattern in `config/filters.example` was wrapped in
   single quotes on the assumption that a shell would read the file, and rclone reads it itself, so
   `- '*.tmp'` was a pattern beginning with an apostrophe. Temp files, swap files, editor backups

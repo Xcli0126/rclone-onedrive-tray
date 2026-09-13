@@ -88,6 +88,31 @@ for f in bin/onedrive-sync bin/onedrive-tray bin/onedrive-watch bin/onedrive-che
     check "$f exists" test -e "$f"
 done
 
+# ---------------------------------------------------------------- the suite count
+# "Two scripts" survived three new test files, because nothing checked it and the
+# commands underneath were right. The count is cheap to verify.
+title "the number of suites the prose claims"
+count=0
+for path in tests/*.sh; do [ -f "$path" ] && count=$((count + 1)); done
+case "$count" in
+    2) want=Two ;; 3) want=Three ;; 4) want=Four ;; 5) want=Five ;; *) want="" ;;
+esac
+for f in README.md docs/COMPATIBILITY.md; do
+    [ -f "$f" ] || continue
+    claims="$(grep -oE '(Two|Three|Four|Five) (suites|scripts)' "$f" | awk '{print $1}' | sort -u)"
+    if [ -z "$claims" ]; then
+        skip "$f makes no claim about how many suites there are"
+        continue
+    fi
+    while IFS= read -r stated; do
+        if [ "$stated" = "$want" ]; then
+            ok "$f says $stated, and there are $count"
+        else
+            bad "$f says $stated, but there are $count test suites"
+        fi
+    done <<<"$claims"
+done
+
 # ---------------------------------------------------------------- installer drift
 # A script that install.sh ships and uninstall.sh forgets is invisible until
 # somebody removes the package and finds a stray binary in ~/.local/bin.
