@@ -29,23 +29,59 @@ import sys
 import threading
 import time
 
-import gi
 
-gi.require_version("Gtk", "3.0")
+def _die(problem, fix):
+    """Report a missing dependency the way a person can act on.
+
+    A traceback from deep inside an import tells the reader nothing about what
+    to install, and a missing tray icon with no message at all is worse.
+    """
+    print(f"rclone-onedrive-tray: {problem}", file=sys.stderr)
+    print(f"\nTo fix it:\n    {fix}\n", file=sys.stderr)
+    raise SystemExit(1)
+
+
+APT = ("sudo apt install python3-gi python3-cairo gir1.2-gtk-3.0 "
+       "gir1.2-ayatanaappindicator3-0.1 gir1.2-notify-0.7")
+
+try:
+    import gi
+except ImportError:
+    _die("PyGObject is not installed, so there are no GTK bindings at all.",
+         APT)
+
+try:
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import GLib, Gtk  # noqa: E402
+except (ValueError, ImportError):
+    _die("The GTK 3 bindings are missing.", APT)
+
 try:
     gi.require_version("AyatanaAppIndicator3", "0.1")
     from gi.repository import AyatanaAppIndicator3 as AppIndicator
 except ValueError:
-    gi.require_version("AppIndicator3", "0.1")
-    from gi.repository import AppIndicator3 as AppIndicator
+    try:
+        gi.require_version("AppIndicator3", "0.1")
+        from gi.repository import AppIndicator3 as AppIndicator
+    except ValueError:
+        _die("No AppIndicator bindings were found, so no tray icon can be shown.",
+             APT + "\nOn GNOME you also need the AppIndicator shell extension "
+                   "(Ubuntu ships it as part of gnome-shell-extension-appindicator).")
 
-gi.require_version("Notify", "0.7")
-from gi.repository import GLib, Gtk, Notify  # noqa: E402
+# Notifications are a nicety, not a requirement: degrade instead of refusing to
+# start, and say so once.
+try:
+    gi.require_version("Notify", "0.7")
+    from gi.repository import Notify  # noqa: E402
+except ValueError:
+    Notify = None
 
+# The icons are drawn at startup, so without cairo the tray would appear as an
+# empty space with no explanation.
 try:
     import cairo
-except ImportError:  # pragma: no cover - cairo ships with python3-gi
-    cairo = None
+except ImportError:
+    _die("pycairo is missing, so the status icons cannot be drawn.", APT)
 
 APP_ID = "rclone-onedrive-tray"
 APP_NAME = "OneDrive"
@@ -506,7 +542,12 @@ class Tray:
         self.folders_seen = None
         self.building_folders = False
 
-        Notify.init(APP_ID)
+        if Notify is not None:
+            Notify.init(APP_ID)
+        else:
+            print("rclone-onedrive-tray: desktop notifications unavailable "
+                  "(gir1.2-notify-0.7 missing); continuing without them.",
+                  file=sys.stderr)
 
         self.ind = AppIndicator.Indicator.new(
             APP_ID, self.icons["unknown"],
@@ -841,6 +882,8 @@ class Tray:
             self.notify(APP_NAME, self.t("Path does not exist: {path}", path=path))
 
     def notify(self, title, body):
+        if Notify is None:
+            return
         try:
             note = Notify.Notification.new(title, body, self.icons.get("synced"))
             note.set_urgency(Notify.Urgency.NORMAL)

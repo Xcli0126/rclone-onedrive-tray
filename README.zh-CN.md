@@ -60,22 +60,29 @@ Linux 上没有官方 OneDrive 客户端。`rclone bisync` 能承担同步，但
 
 ## 环境要求
 
-| 组件 | 说明 |
-|---|---|
-| 带 systemd（用户会话）的 Linux | 在 Ubuntu 24.04 和 26.04、GNOME Wayland 下测试 |
-| [rclone](https://rclone.org/downloads/) 1.65 或更新 | `--recover`、`--resilient`、`--conflict-resolve` 需要它，发行版自带的往往偏旧 |
-| `python3-gi`、GTK 3 | 托盘程序 |
-| `gir1.2-ayatanaappindicator3-0.1` | 托盘图标。GNOME 下还需要 AppIndicator 扩展，Ubuntu 默认已装 |
-| `libnotify` | 桌面通知 |
-| `inotify-tools` | 实时同步。没装也能用，只是退回定时器节奏 |
+| 组件 | 用途 | 缺失后果 |
+|---|---|---|
+| 带 systemd（用户会话）的 Linux | 定时器、监听器、定时暂停 | 不会有任何定时同步 |
+| [rclone](https://rclone.org/downloads/) 1.65 或更新 | 所有同步 | 完全无法同步。低于 1.65 时，一次中断就需要人工 `--resync` |
+| `python3-gi`、`python3-cairo`、`gir1.2-gtk-3.0` | 托盘程序及其图标 | 托盘直接退出，并打印需要安装的包名 |
+| `gir1.2-ayatanaappindicator3-0.1` | 托盘图标 | 同上。只装运行库 `libayatana-appindicator3-1` 不够 |
+| `gir1.2-notify-0.7` | 桌面通知 | 托盘照常运行并提示一句，只是没有通知 |
+| `util-linux`（提供 `flock`） | 串行化同步运行 | 包装器拒绝启动，而不是冒险破坏 bisync 状态 |
+| `xdg-utils` | 「打开同步目录」「查看同步日志」 | 这两个菜单项无反应 |
+| `inotify-tools` | 实时同步 | 退回定时器节奏，功能仍可用 |
 
 Debian 或 Ubuntu：
 
 ```bash
-sudo apt install rclone python3-gi gir1.2-ayatanaappindicator3-0.1 libnotify-bin inotify-tools
+sudo apt install rclone python3-gi python3-cairo gir1.2-gtk-3.0 \
+     gir1.2-ayatanaappindicator3-0.1 gir1.2-notify-0.7 inotify-tools
 ```
 
-> 注意 rclone 版本。Ubuntu 源里的那个可能落后好几年，先用 `rclone version` 确认。低于 1.65 就去官网下新版本，把二进制放进 `/usr/local/bin`，它的优先级高于 `/usr/bin`。
+> 这一串里 **rclone 的版本最要紧**。Ubuntu 源里的那个可能落后好几年，先用 `rclone version` 确认。低于 1.65 就去官网下新版本，把二进制放进 `/usr/local/bin`，它的优先级高于 `/usr/bin`。
+
+完整依赖清单（含可选项，以及每项缺失时的确切表现）见
+[docs/DEPENDENCIES.md](docs/DEPENDENCIES.md)。托盘和同步包装器在缺少依赖时会打印安装命令并退出，
+而不是抛一堆 traceback。
 
 ---
 

@@ -38,39 +38,60 @@ warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31m[x]\033[0m %s\n' "$*" >&2; exit 1; }
 
 # --------------------------------------------------------------- dependencies
+# Each piece is probed on its own so the report names the package that is really
+# absent. A single combined probe would tell the reader to install a bundle and
+# leave them to work out which part they were missing.
 say "Checking dependencies"
 missing=()
+optional=()
 
 command -v rclone >/dev/null 2>&1 || missing+=("rclone")
 
-if ! python3 -c '
-import gi
-gi.require_version("Gtk", "3.0")
-try:
-    gi.require_version("AyatanaAppIndicator3", "0.1")
-except ValueError:
-    gi.require_version("AppIndicator3", "0.1")
-from gi.repository import Gtk  # noqa
-' >/dev/null 2>&1; then
-    missing+=("python3-gi gir1.2-ayatanaappindicator3-0.1 libnotify-bin")
+# flock is not optional: without it onedrive-sync cannot serialise runs.
+command -v flock >/dev/null 2>&1 || missing+=("util-linux (flock)")
+
+py_has() { python3 -c "$1" >/dev/null 2>&1; }
+
+py_has 'import gi' || missing+=("python3-gi")
+py_has 'import cairo' || missing+=("python3-cairo")
+py_has 'import gi; gi.require_version("Gtk","3.0"); from gi.repository import Gtk' \
+    || missing+=("gir1.2-gtk-3.0")
+
+if ! py_has 'import gi; gi.require_version("AyatanaAppIndicator3","0.1"); from gi.repository import AyatanaAppIndicator3' \
+   && ! py_has 'import gi; gi.require_version("AppIndicator3","0.1"); from gi.repository import AppIndicator3'; then
+    missing+=("gir1.2-ayatanaappindicator3-0.1")
 fi
 
+# These only take features away, so they are reported separately.
+py_has 'import gi; gi.require_version("Notify","0.7"); from gi.repository import Notify' \
+    || optional+=("gir1.2-notify-0.7 (desktop notifications)")
+command -v xdg-open >/dev/null 2>&1 || optional+=("xdg-utils (open folder / view log)")
+
+APT_LINE="sudo apt install rclone python3-gi python3-cairo gir1.2-gtk-3.0 gir1.2-ayatanaappindicator3-0.1 gir1.2-notify-0.7 inotify-tools"
+
 if [ "${#missing[@]}" -gt 0 ]; then
-    warn "Missing dependencies:"
+    warn "Missing required dependencies:"
     printf '    - %s\n' "${missing[@]}" >&2
-    cat >&2 <<'EOF'
+    cat >&2 <<EOF
 
 On Debian/Ubuntu install them with:
 
-    sudo apt install rclone python3-gi gir1.2-ayatanaappindicator3-0.1 libnotify-bin
+    $APT_LINE
 
 The rclone shipped by distributions is often too old: --resilient/--recover
 (which let an interrupted sync heal itself instead of demanding a manual
---resync) need rclone >= 1.65. Check with `rclone version`; if it is older, get
+--resync) need rclone >= 1.65. Check with \`rclone version\`; if it is older, get
 a current build from https://rclone.org/downloads/ and put the binary in
 /usr/local/bin (which takes precedence over /usr/bin).
+
+Full list, including what each absence causes: docs/DEPENDENCIES.md
 EOF
     exit 1
+fi
+
+if [ "${#optional[@]}" -gt 0 ]; then
+    warn "Optional dependencies not present (those features will be off):"
+    printf '    - %s\n' "${optional[@]}" >&2
 fi
 
 RCLONE_VER="$(rclone version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+' | head -1 || true)"

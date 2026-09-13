@@ -47,6 +47,13 @@ RCLONE_CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/rclone"
 
 command -v "$RCLONE" >/dev/null 2>&1 || die "rclone not found in PATH"
 
+# Fail loudly if the locking tool is absent. Without this check a missing flock
+# makes the command exit 127, `!` turns that into success, and every run reports
+# "another sync is already running" while never invoking rclone at all: a silent
+# total failure that looks like normal activity in the log.
+command -v flock >/dev/null 2>&1 ||
+    die "flock not found (it ships with util-linux); refusing to run without the lock"
+
 mkdir -p "$(dirname "$LOG")" "$LOCAL" 2>/dev/null
 
 log_line() { printf '%s %s\n' "$(date '+%Y/%m/%d %H:%M:%S')" "$*" >>"$LOG"; }

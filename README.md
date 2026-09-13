@@ -87,24 +87,31 @@ config file drives all of it, so no paths are hard-coded.
 
 ## Requirements
 
-| Component | Notes |
-|---|---|
-| Linux with systemd (user session) | Tested on Ubuntu 24.04 and 26.04, GNOME on Wayland |
-| [rclone](https://rclone.org/downloads/) 1.65 or newer | `--recover`, `--resilient` and `--conflict-resolve` need it. Distro packages are often older |
-| `python3-gi`, GTK 3 | Tray app |
-| `gir1.2-ayatanaappindicator3-0.1` | Tray icon. On GNOME you also need the AppIndicator shell extension, which Ubuntu ships |
-| `libnotify` | Desktop notifications |
-| `inotify-tools` | Realtime sync. Without it the timer still syncs, just on its own schedule |
+| Component | Needed for | If it is missing |
+|---|---|---|
+| Linux with systemd (user session) | Timer, watcher, timed pause | Nothing syncs on a schedule |
+| [rclone](https://rclone.org/downloads/) 1.65 or newer | Every sync | Nothing syncs. Below 1.65 an interrupted run needs a manual `--resync` |
+| `python3-gi`, `python3-cairo`, `gir1.2-gtk-3.0` | Tray app and its icons | The tray exits and names the packages |
+| `gir1.2-ayatanaappindicator3-0.1` | Tray icon | Same. The `libayatana-appindicator3-1` runtime library is not enough on its own |
+| `gir1.2-notify-0.7` | Desktop notifications | The tray runs and says so, without notifications |
+| `util-linux` (`flock`) | Serialising sync runs | The wrapper refuses to start rather than risk corrupting bisync state |
+| `xdg-utils` | "Open sync folder", "View sync log" | Those two menu items do nothing |
+| `inotify-tools` | Realtime sync | The timer still syncs, on its own schedule |
 
 On Debian or Ubuntu:
 
 ```bash
-sudo apt install rclone python3-gi gir1.2-ayatanaappindicator3-0.1 libnotify-bin inotify-tools
+sudo apt install rclone python3-gi python3-cairo gir1.2-gtk-3.0 \
+     gir1.2-ayatanaappindicator3-0.1 gir1.2-notify-0.7 inotify-tools
 ```
 
-> The rclone version matters. The one in the Ubuntu archive can be years behind, so check
-> `rclone version` first. Below 1.65, download a current build and put the binary in
-> `/usr/local/bin`, which takes precedence over `/usr/bin`.
+> The rclone version matters more than any other line here. The one in the Ubuntu archive can be
+> years behind, so check `rclone version` first. Below 1.65, download a current build and put the
+> binary in `/usr/local/bin`, which takes precedence over `/usr/bin`.
+
+Every dependency, including the optional ones and the exact failure each absence causes, is
+listed in [docs/DEPENDENCIES.md](docs/DEPENDENCIES.md). Both the tray and the sync wrapper exit
+with the install command rather than a traceback when something they need is absent.
 
 ---
 

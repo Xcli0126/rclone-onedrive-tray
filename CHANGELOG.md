@@ -43,6 +43,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Since a folder that is present locally but no longer synced is a trap (edits in it go
   nowhere), the tray asks whether to delete the local copy when you untick one.
 
+### Fixed
+
+- A missing `flock` made `onedrive-sync` print "another sync is already running" and exit 0 without
+  ever invoking rclone. Every run looked normal in the log while nothing synced. It now refuses to
+  start and says why.
+- A missing GTK, AppIndicator or cairo binding made the tray die with a Python traceback. It now
+  exits with the exact apt command, and a missing notification binding degrades to running without
+  notifications instead of being fatal.
+- `install.sh` probes each dependency on its own and names the package that is actually absent,
+  rather than pointing at a bundle the reader has to unpick. Optional pieces are reported
+  separately and do not block the install.
+- The requirements listed `libnotify-bin`, which provides the `notify-send` command line tool. The
+  tray needs the Python binding, which is `gir1.2-notify-0.7`.
+
 ## [1.0.0] - 2026-09-13
 
 First public release.
