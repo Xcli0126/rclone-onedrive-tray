@@ -51,6 +51,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   CI.
 - `docs/COMPATIBILITY.md`: the versions this was developed against, the behaviour measured on a
   real account, and an explicit list of what has never been tried.
+- `docs/FEATURE-PARITY.md`: what the Windows and macOS OneDrive clients actually do, sourced from
+  Microsoft's own pages, sorted into must have, worth having and skip, with a status column for this
+  project and an ordered list of the gaps. It records two things Microsoft does not document, a
+  conflict winner rule and any LAN sync feature, so nobody researches them twice.
 - `docs/SIGNING-IN.md`, for the one step this project does not wrap. Signing in belongs to rclone,
   so the page covers what the browser flow asks, how to pick the right drive when an account has
   more than one, the `ObjectHandle is Invalid` trap that follows a wrong pick, `rclone authorize`

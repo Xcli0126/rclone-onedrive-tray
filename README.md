@@ -309,6 +309,14 @@ the one moment the notification matters.
 - The tray icon needs an AppIndicator-compatible shell. Stock GNOME needs the AppIndicator
   extension; KDE, Xfce and Cinnamon work out of the box.
 - Linux only.
+- No Files On-Demand. Every synced file is a real file on disk, so the folder
+  takes its full size. Unticking a folder in the tray and deleting the local copy
+  is the way to reclaim space.
+- No per-file status in the file manager, no share links, no version history
+  browser, no metered-network or battery-saver pause. What the Windows and macOS
+  clients do, which parts of it are worth having, and which are deliberately
+  skipped are all written up in
+  [docs/FEATURE-PARITY.md](docs/FEATURE-PARITY.md).
 
 ---
 

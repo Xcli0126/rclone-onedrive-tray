@@ -256,6 +256,11 @@ sudo loginctl enable-linger "$USER"
 - 同步一个正在被应用写入的目录可能产生冲突。排除易变的状态文件，也就是示例过滤规则的做法，能避免大部分。
 - 托盘图标需要支持 AppIndicator 的桌面环境。原生 GNOME 需要 AppIndicator 扩展，KDE、Xfce、Cinnamon 开箱可用。
 - 仅支持 Linux。
+- 没有「按需文件」（Files On-Demand）。同步下来的都是真实文件，占满整份空间。想腾地方，就在托盘里
+  取消勾选某个文件夹，再删掉本地副本。
+- 没有文件管理器里的逐文件状态、没有分享链接、没有历史版本浏览、没有按流量计费网络或省电模式的
+  自动暂停。Windows 和 macOS 客户端到底做了什么、哪些值得做、哪些是故意不做的，都写在
+  [docs/FEATURE-PARITY.md](docs/FEATURE-PARITY.md)。
 
 ---
 
