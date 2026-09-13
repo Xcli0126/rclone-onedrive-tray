@@ -81,6 +81,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The tray had ten defects, all found by constructing its real menu on a private Broadway display
+  and activating every handler with stubs. The two dialogs that confirm a destructive action read
+  literally `dlg_resync_body` and `lcl_deselected_body` under the default English interface,
+  because those two strings existed only as translation keys. Every `systemctl`, `systemd-run` and
+  `rmtree` call ran on the GTK main loop, so a slow one froze the interface: with a one-second stub
+  a single poll blocked for two seconds and pressing Pause blocked for six. A missing or disabled
+  timer unit was reported as "Automatic sync paused", inventing a pause that never happened. The
+  quota row stayed visible and empty whenever `rclone about` failed, because `menu.show_all()`
+  undid `set_visible(False)`. A failed "Start tray at login" write left the tick in place with no
+  file behind it. A quoted `OPEN_APP_CMD` launched nothing and said nothing. The resync dialog's
+  buttons followed the system locale rather than `UI_LANG`. The single-instance lock file was left
+  behind on every exit. And the icon was handed to the indicator twice at startup and again on
+  every poll even when nothing had changed.
+- Three smaller defects in the same file, found while reviewing those fixes: a failed write of the
+  folder list reported "Could not read the folder list" and left the tick disagreeing with
+  `exclude-folders.txt`; `unit_states` treated systemd's `enabled-runtime` as off; and the resync
+  command quoted the script path by hand instead of using `shlex.quote`.
 - `onedrive-check` had eight defects, all found by attacking it rather than reading it. A trailing
   slash on `LOCAL` defeated the relative-path strip, which suppressed the whole "too long" group and
   made a tree with 520-character paths report "nothing to fix" and exit 0. `--max` was not

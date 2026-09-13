@@ -90,6 +90,198 @@ run "unusable TMPDIR: says so instead of already running" 1 "Could not create th
     env DISPLAY=:0 TMPDIR="$WORK/does-not-exist" \
         python3 "$SRC_DIR/bin/onedrive-tray"
 
+# The lock is a flock on the descriptor, but the file it lives in is visible in
+# $TMPDIR and used to survive the process. An empty config directory gets the
+# tray as far as the lock without ever touching GTK, so this needs no display.
+LOCK_DIR="$WORK/tray-lock"; mkdir -p "$LOCK_DIR"
+run "missing config: exits after taking the lock" 1 "Config not found" \
+    env DISPLAY=:0 TMPDIR="$LOCK_DIR" XDG_CONFIG_HOME="$WORK/no-config" \
+        python3 "$SRC_DIR/bin/onedrive-tray"
+check_absent "the lock file does not outlive the process" \
+    "$LOCK_DIR/rclone-onedrive-tray.lock"
+
+# English strings double as the translation keys, so a key shaped like an
+# identifier is shipped verbatim to an English user: the resync confirmation
+# once read "dlg_resync_body" in the default UI. The shape of every t("...") key
+# is therefore a test, along with its Chinese entry.
+tray_strings() {
+    python3 - "$SRC_DIR/bin/onedrive-tray" "$1" <<'PY'
+import ast
+import re
+import sys
+
+path, mode = sys.argv[1], sys.argv[2]
+tree = ast.parse(open(path, encoding="utf-8").read())
+
+literals = []
+for node in ast.walk(tree):
+    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "t" and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and isinstance(node.args[0].value, str)):
+        literals.append((node.lineno, node.args[0].value))
+
+if mode == "prose":
+    bad = [(n, k) for n, k in literals if re.fullmatch(r"[a-z][a-z0-9_]*", k)]
+    for n, k in bad:
+        print(f"line {n}: t({k!r}) is a symbolic key, not English prose")
+    sys.exit(1 if bad else 0)
+
+if mode == "zh":
+    strings = None
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+                getattr(t, "id", None) == "STRINGS" for t in node.targets):
+            strings = ast.literal_eval(node.value)
+            break
+    if strings is None:
+        sys.exit("STRINGS table not found")
+    zh = strings.get("zh", {})
+    bad = []
+    for lineno, key in literals:
+        if key not in zh:
+            bad.append(f"line {lineno}: t({key!r}) has no zh translation")
+            continue
+        want = set(re.findall(r"\{(\w+)\}", key))
+        got = set(re.findall(r"\{(\w+)\}", zh[key]))
+        if want != got:
+            bad.append(f"line {lineno}: {sorted(want)} in the key, "
+                       f"zh has {sorted(got)}")
+    for b in bad:
+        print(b)
+    sys.exit(1 if bad else 0)
+
+# Gtk.ButtonsType.* labels come from the system locale, so an English dialog on
+# a Chinese desktop showed 取消/确定. Dialogs have to add their own buttons.
+bad = [f"line {n.lineno}: Gtk.ButtonsType.{n.attr}"
+       for n in ast.walk(tree)
+       if isinstance(n, ast.Attribute) and n.attr in ("OK_CANCEL", "YES_NO")
+       and isinstance(n.value, ast.Attribute) and n.value.attr == "ButtonsType"]
+for b in bad:
+    print(b + " follows the system locale, not UI_LANG")
+sys.exit(1 if bad else 0)
+PY
+}
+
+run "translated strings: every t() key is English prose" 0 "" tray_strings prose
+run "translated strings: every t() key has a zh entry" 0 "" tray_strings zh
+run "dialogs: no locale-dependent stock buttons" 0 "" tray_strings buttons
+
+# unit_states() must tell a disabled unit and an unreadable one from a pause.
+# Treating "anything but enabled" as paused made a missing timer unit announce
+# "Automatic sync paused (click to resume)" when nothing had been paused.
+tray_unit_states() {
+    python3 - "$SRC_DIR/bin/onedrive-tray" <<'PY'
+import importlib.machinery
+import importlib.util
+import sys
+
+sys.dont_write_bytecode = True
+loader = importlib.machinery.SourceFileLoader("candidate", sys.argv[1])
+spec = importlib.util.spec_from_loader("candidate", loader)
+module = importlib.util.module_from_spec(spec)
+loader.exec_module(module)
+
+
+class Fake:
+    service = "onedrive-sync.service"
+    timer = "onedrive-sync.timer"
+
+
+def sh_for(active, enabled):
+    def sh(cmd, timeout=30):
+        if "is-active" in cmd:
+            return active
+        if "is-enabled" in cmd:
+            return enabled
+        raise AssertionError(cmd)
+    return sh
+
+
+cases = [
+    ("active and enabled", (0, "active\ninactive", ""), (0, "enabled", ""),
+     (True, "enabled")),
+    ("activating counts as active", (0, "activating\ninactive", ""), (0, "enabled", ""),
+     (True, "enabled")),
+    ("unit present but disabled", (3, "inactive\ninactive", ""), (0, "disabled", ""),
+     (False, "off")),
+    ("unit missing", (3, "inactive\ninactive", ""),
+     (1, "", "Failed to get unit file state for onedrive-sync.timer: No such file "
+             "or directory"), (False, "unknown")),
+    ("systemctl failed", (1, "", "stub failure"), (1, "", "stub failure"),
+     (False, "unknown")),
+]
+bad = []
+for name, active, enabled, want in cases:
+    module.sh = sh_for(active, enabled)
+    got = module.Tray.unit_states(Fake())
+    if got != want:
+        bad.append(f"{name}: unit_states() -> {got!r}, wanted {want!r}")
+for b in bad:
+    print(b)
+sys.exit(1 if bad else 0)
+PY
+}
+
+run "unit states: disabled and unknown are not 'paused'" 0 "" tray_unit_states
+
+# OPEN_APP_CMD is written shell-style, so a quoted path has to be split the way
+# a shell would. str.split() kept the quote characters and spawn() failed
+# silently; a command that cannot be launched must be reported instead.
+tray_open_app() {
+    python3 - "$SRC_DIR/bin/onedrive-tray" <<'PY'
+import importlib.machinery
+import importlib.util
+import sys
+
+sys.dont_write_bytecode = True
+loader = importlib.machinery.SourceFileLoader("candidate", sys.argv[1])
+spec = importlib.util.spec_from_loader("candidate", loader)
+module = importlib.util.module_from_spec(spec)
+loader.exec_module(module)
+
+
+class Fake:
+    def __init__(self, cmd):
+        self.open_cmd = cmd
+        self.open_name = "the app"
+        self.t = module.make_translator("en")
+        self.notes = []
+
+    def notify(self, title, body):
+        self.notes.append(body)
+
+
+calls = []
+real_spawn = module.spawn
+module.spawn = lambda argv: (calls.append(list(argv)), True)[1]
+
+bad = []
+quoted = Fake('"my app" --flag')
+module.Tray.open_app(quoted)
+if calls != [["my app", "--flag"]]:
+    bad.append(f"quoted command became {calls!r}, wanted [['my app', '--flag']]")
+if quoted.notes:
+    bad.append(f"a command that spawned fine still notified: {quoted.notes!r}")
+
+module.spawn = real_spawn
+missing = Fake("definitely-not-a-real-command-xyz")
+module.Tray.open_app(missing)
+if not missing.notes or "Could not start" not in missing.notes[-1]:
+    bad.append(f"a command that cannot start was not reported: {missing.notes!r}")
+
+unclosed = Fake('"unclosed')
+module.Tray.open_app(unclosed)
+if not unclosed.notes:
+    bad.append("an unsplittable command was not reported")
+for b in bad:
+    print(b)
+sys.exit(1 if bad else 0)
+PY
+}
+
+run "OPEN_APP_CMD: quoted command is split, failure is reported" 0 "" tray_open_app
+
 # ---------------------------------------------------------------- the wrapper
 title "onedrive-sync"
 FIX="$WORK/sync"; make_sync_fixture "$FIX"

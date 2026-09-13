@@ -10,7 +10,7 @@ and a guess is not something you can plan an install around.
 Four scripts, none of which needs an rclone remote and all safe on a working setup:
 
 ```bash
-tests/dependency-matrix.sh      # 24 cases: one missing dependency at a time
+tests/dependency-matrix.sh      # 31 cases: one missing dependency at a time, plus the tray
 tests/install-flow.sh           # 63 cases: the documented install path, end to end
 tests/filters.sh                # 27 cases: the default filters still filter, plus the checker
 tests/docs.sh                   # 27 cases: the links and rules the docs depend on
@@ -33,7 +33,12 @@ positive integer, a newline inside a name, an unreadable directory, the reserved
 name stems, and the rename classes rclone applies that Microsoft does not
 document. It exists because every rule in the shipped filter file
 was inert for a while: the patterns were quoted, which rclone reads as part of
-the pattern. `docs.sh` checks what the documentation claims about itself: every
+the pattern. `dependency-matrix.sh` also carries the tray's display-free regression cases: every
+string the tray passes to its translator is English prose rather than a bare key,
+every one has a Chinese entry, no dialog uses locale-dependent stock buttons, a
+disabled or unreadable timer unit is not reported as a pause, and a quoted
+`OPEN_APP_CMD` is split rather than passed through with its quotes.
+`docs.sh` checks what the documentation claims about itself: every
 relative link between the markdown files resolves, no page has picked up an em
 dash, the scripts and unit templates the READMEs name are still in the tree, and
 every script in `bin/` is both installed and uninstalled.
@@ -157,9 +162,13 @@ treat it as unknown rather than supported.
 - Suspend and resume. The dispatcher hook covers the reconnect, but hibernate
   with a sync in flight has not been reproduced.
 - More than one account or more than one config at a time.
-- The tray's panel icon, its menu, its notifications and the timed pause. A
-  desktop session is needed to click any of it, and the suites only go as far as
-  loading the module, drawing the five icons and parsing the log.
+- The tray's panel icon itself, and its notifications. A one-off test on a
+  private Broadway display constructed the real menu and activated every handler
+  with stubs, which found the ten defects listed in the changelog, and the
+  display-free cases above now guard the ones that can be checked without a
+  display. What no test here can show is the icon appearing in a panel: this
+  machine has no StatusNotifier host, so the indicator falls back and the shell
+  is what would render and click it.
 - Activating the systemd units inside a sandbox. A sandbox has no user manager of
   its own, so the suites write the units and run `systemd-analyze verify`; whether
   systemd loads and schedules them was measured on the development machine, where

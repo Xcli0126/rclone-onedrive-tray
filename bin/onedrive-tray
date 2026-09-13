@@ -145,8 +145,8 @@ def load_config() -> dict:
 
 # ---------------------------------------------------------------- localisation
 # English strings double as the lookup keys, so a language table only has to
-# list its differences.  "dlg_resync_body" is the one long string, which gets a
-# symbolic key to keep it readable.
+# list its differences.  A long body is written out as its own English sentence
+# for the same reason: a symbolic key would be shown verbatim to an English user.
 STRINGS = {
     "zh": {
         "Reading status…": "正在读取状态…",
@@ -156,11 +156,16 @@ STRINGS = {
         "View sync log": "查看同步日志",
         "Pause automatic sync": "暂停自动同步",
         "Automatic sync paused (click to resume)": "已暂停（点击恢复）",
+        "Automatic sync is off": "已关闭自动同步",
+        "Automatic sync state unknown": "无法读取自动同步状态",
         "Start tray at login": "开机自动启动图标",
         "Rebuild sync baseline (resync)…": "重建同步基线（resync）…",
         "Quit": "退出",
         "Rebuild the sync baseline?": "重建同步基线？",
-        "dlg_resync_body": (
+        "Cancel": "取消",
+        "Rebuild": "重建",
+        "The next run compares both sides from scratch and rebuilds the baseline. "
+        "On a large folder it takes a while and must not be interrupted.": (
             "仅在同步持续失败、或你确实批量删除了大量文件后使用。\n\n"
             "重建会把两边的文件按当前状态重新对齐，过程中请勿关机。"),
         "Syncing…": "正在同步…",
@@ -174,25 +179,29 @@ STRINGS = {
         "Paused until {when}": "已暂停，{when} 自动恢复",
         "Paused for {n}": "已暂停 {n}",
         "Could not schedule the resume": "无法安排自动恢复",
+        "Could not change the login setting": "无法修改开机自启动设置",
+        "Could not start {app}": "无法启动 {app}",
         "Folders to sync": "同步的文件夹",
         "Loading…": "加载中…",
         "No sub-folders": "没有子文件夹",
-        "Could not read the folder list": "无法读取文件夹列表",
         "{name} will sync": "「{name}」将同步到本地",
         "{name} will not sync": "「{name}」不再同步，云端不受影响",
         "Delete the local copy of {name}?": "要删除「{name}」的本地副本吗？",
-        "lcl_deselected_body": (
+        "The folder stays in OneDrive. Only the copy on this machine is deleted, "
+        "and ticking the folder again downloads it back.": (
             "这个文件夹已不再同步。它仍然完整保留在云端，重新勾选即可恢复。\n\n"
             "本地副本留着会占空间，而且在里面改的东西不会同步到任何地方。"),
         "Keep local copy": "保留本地副本",
         "Delete local copy": "删除本地副本",
         "Local copy deleted": "本地副本已删除",
         "Could not delete the local copy": "无法删除本地副本",
+        "Could not save the folder list": "无法保存文件夹清单",
         "{app} sync failed": "{app} 同步失败",
         "see the sync log": "请查看同步日志",
         "Sync finished {when}": "同步完成 {when}",
         "Path does not exist: {path}": "路径不存在：{path}",
         "Automatic sync paused · last {when}": "已暂停自动同步 · 上次 {when}",
+        "Automatic sync is off · last {when}": "已关闭自动同步 · 上次 {when}",
         "⚠ Sync failed {when}": "⚠ 同步失败 {when}",
         "Last sync {when}": "上次同步 {when}",
         "No sync recorded yet": "尚无同步记录（等待首次同步）",
@@ -353,7 +362,13 @@ def ensure_icons() -> dict:
 
 # ---------------------------------------------------------------- helpers
 def sh(cmd: str, timeout: int = 30):
-    """Run a short command and capture its output (used for systemctl only)."""
+    """Run a short command and capture its output.
+
+    Used for systemctl, systemd-run and the two read-only rclone queries. Every
+    call has a timeout, and callers that run on the GTK main loop must not use
+    this at all: a slow or hung command would freeze the tray (see poll() and
+    the *_async handlers).
+    """
     try:
         res = subprocess.run(cmd, shell=True, capture_output=True,
                              text=True, timeout=timeout)
@@ -537,13 +552,17 @@ class Tray:
 
         self.icons = ensure_icons()
         self.state = None
+        # The path most recently handed to the indicator. Indicator.new() has
+        # already set the "unknown" icon, so that is what is on screen now.
+        self.shown_icon = self.icons["unknown"]
         self.was_syncing = False
         self.notified_error_at = None
         self.manual_requested = False
         self.busy = False
         self.quota = None          # (used, total) once a query has succeeded
         self.quota_busy = False
-        self.paused_seen = None
+        self.auto_seen = None      # "on" / "off" / "paused" / "unknown"
+        self.state_busy = False
         self.folders = None        # top-level names, None until the first listing
         self.folders_busy = False
         self.folders_seen = None
@@ -561,7 +580,6 @@ class Tray:
             APP_ID, self.icons["unknown"],
             AppIndicator.IndicatorCategory.APPLICATION_STATUS)
         self.ind.set_status(AppIndicator.IndicatorStatus.ACTIVE)
-        self.ind.set_icon_full(self.icons["unknown"], APP_NAME)
 
         self._build_menu()
         self.ind.set_menu(self.menu)
@@ -633,7 +651,15 @@ class Tray:
         else:
             excluded.add(name)
         if not write_excluded_folders(self.exclude_file, excluded):
-            self.notify(APP_NAME, self.t("Could not read the folder list"))
+            self.notify(APP_NAME, self.t("Could not save the folder list"))
+            # Put the tick back. Leaving it where the click put it would show a
+            # change that was never written, so the menu and the file would
+            # disagree about which folders are synced.
+            self.building_folders = True
+            try:
+                item.set_active(not item.get_active())
+            finally:
+                self.building_folders = False
             return
         if item.get_active():
             self.notify(APP_NAME, self.t("{name} will sync", name=name))
@@ -642,8 +668,11 @@ class Tray:
             self._offer_local_delete(name)
 
         # A filter change needs no --resync, so the next run can simply be asked
-        # to happen.
-        sh(f"systemctl --user start --no-block {self.service}")
+        # to happen. systemctl runs in a worker: it can take seconds to answer.
+        threading.Thread(target=self._start_service, daemon=True).start()
+
+    def _start_service(self):
+        sh(f"systemctl --user start --no-block {self.service}", timeout=30)
 
     def _offer_local_delete(self, name):
         """Offer to reclaim the space a deselected folder occupies.
@@ -665,18 +694,35 @@ class Tray:
             transient_for=None, flags=0, message_type=Gtk.MessageType.QUESTION,
             buttons=Gtk.ButtonsType.NONE,
             text=self.t("Delete the local copy of {name}?", name=name))
-        dialog.format_secondary_text(self.t("lcl_deselected_body"))
+        dialog.format_secondary_text(self.t(
+            "The folder stays in OneDrive. Only the copy on this machine is "
+            "deleted, and ticking the folder again downloads it back."))
         dialog.add_button(self.t("Keep local copy"), Gtk.ResponseType.CANCEL)
         dialog.add_button(self.t("Delete local copy"), Gtk.ResponseType.OK)
         response = dialog.run()
         dialog.destroy()
         if response != Gtk.ResponseType.OK:
             return
-        try:
-            shutil.rmtree(target)
-            self.notify(APP_NAME, self.t("Local copy deleted"))
-        except OSError:
-            self.notify(APP_NAME, self.t("Could not delete the local copy"))
+        self._delete_local(target)
+
+    def _delete_local(self, target):
+        """Delete a local copy off the main loop, then report what happened.
+
+        shutil.rmtree() over a large tree takes long enough that running it here
+        froze the whole menu, so it runs in a worker and only the result comes
+        back through the main loop.
+        """
+        def worker():
+            try:
+                shutil.rmtree(target)
+            except OSError:
+                GLib.idle_add(self.notify, APP_NAME,
+                              self.t("Could not delete the local copy"))
+            else:
+                GLib.idle_add(self.notify, APP_NAME,
+                              self.t("Local copy deleted"))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _check_names(self, *_):
         """Look for names OneDrive will refuse, without freezing the menu.
@@ -805,6 +851,11 @@ class Tray:
         self._add(self.t("Quit"), lambda *_: Gtk.main_quit())
 
         self.menu.show_all()
+        # show_all() re-shows the quota row even though there is nothing to put
+        # in it. no_show_all keeps the row out of the layout until poll() has a
+        # quota line and asks for it explicitly.
+        self.item_quota.set_no_show_all(True)
+        self.item_quota.set_visible(bool(self.quota))
         self._refresh_checks()
 
     def _add(self, label, handler):
@@ -814,18 +865,24 @@ class Tray:
         return item
 
     def _refresh_checks(self):
-        enabled = self.is_enabled(self.timer)
-        # Keep poll()'s change detector honest. pause_for() and resume_now() call
-        # this directly, and without this the menu label would still read
-        # "paused" after a timed pause had already expired.
-        self.paused_seen = not enabled
-        if enabled:
+        """Re-label the pause entry from the last known systemd state.
+
+        This never shells out itself: it is called from the menu build and from
+        poll()/pause_for()/resume_now(), and is_enabled() used to make every one
+        of those block the main loop on systemctl.
+        """
+        auto = self.auto_seen
+        if auto in (None, "on"):
             self.item_pause.set_label(self.t("Pause automatic sync"))
-            return
-        until = self._paused_until()
-        self.item_pause.set_label(
-            self.t("Paused until {when}", when=until) if until
-            else self.t("Automatic sync paused (click to resume)"))
+        elif auto == "paused":
+            until = self._paused_until()
+            self.item_pause.set_label(
+                self.t("Paused until {when}", when=until) if until
+                else self.t("Automatic sync paused (click to resume)"))
+        elif auto == "off":
+            self.item_pause.set_label(self.t("Automatic sync is off"))
+        else:
+            self.item_pause.set_label(self.t("Automatic sync state unknown"))
 
     def _paused_until(self) -> str:
         """Time the automatic resume is due, as HH:MM, or an empty string."""
@@ -856,7 +913,7 @@ class Tray:
     def _run(self, mode):
         try:
             if mode == "resync":
-                sh(f'"{self.sync_script}" --resync', timeout=3600)
+                sh(f"{shlex.quote(self.sync_script)} --resync", timeout=3600)
             else:
                 sh(f"systemctl --user start {self.service}", timeout=3600)
         finally:
@@ -865,9 +922,16 @@ class Tray:
     def on_resync(self, *_):
         dialog = Gtk.MessageDialog(
             transient_for=None, flags=0, message_type=Gtk.MessageType.WARNING,
-            buttons=Gtk.ButtonsType.OK_CANCEL,
+            buttons=Gtk.ButtonsType.NONE,
             text=self.t("Rebuild the sync baseline?"))
-        dialog.format_secondary_text(self.t("dlg_resync_body"))
+        dialog.format_secondary_text(self.t(
+            "The next run compares both sides from scratch and rebuilds the "
+            "baseline. On a large folder it takes a while and must not be "
+            "interrupted."))
+        # Explicit buttons, not Gtk.ButtonsType.*: the stock ones follow the
+        # system locale, so an English dialog on a Chinese desktop read 取消/确定.
+        dialog.add_button(self.t("Cancel"), Gtk.ResponseType.CANCEL)
+        dialog.add_button(self.t("Rebuild"), Gtk.ResponseType.OK)
         response = dialog.run()
         dialog.destroy()
         if response != Gtk.ResponseType.OK or self.busy:
@@ -879,21 +943,30 @@ class Tray:
     def _set_units(self, action: str):
         """start/stop the timer and the watcher together."""
         for unit in (self.timer, self.watch):
-            sh(f"systemctl --user {action} {unit}")
+            sh(f"systemctl --user {action} {unit}", timeout=30)
 
     def pause_for(self, minutes: int):
         """Stop syncing for a while and let systemd bring it back by itself.
 
         Both units are stopped, not just the timer: leaving the watcher running
-        would let a local edit start a sync during the pause.
+        would let a local edit start a sync during the pause. Every systemctl
+        call happens in a worker: a slow user manager used to freeze the tray
+        for the whole pause.
         """
-        self._set_units("stop")
-        sh(f"systemctl --user disable {self.timer} {self.watch}")
-        sh(f"systemctl --user stop {PAUSE_UNIT}.timer {PAUSE_UNIT}.service 2>/dev/null")
+        def worker():
+            self._set_units("stop")
+            sh(f"systemctl --user disable {self.timer} {self.watch}", timeout=30)
+            sh(f"systemctl --user stop {PAUSE_UNIT}.timer {PAUSE_UNIT}.service "
+               f"2>/dev/null", timeout=30)
+            _, _, err = sh(
+                f"systemd-run --user --on-active={minutes}min --unit={PAUSE_UNIT} "
+                f"systemctl --user enable --now {self.timer} {self.watch}",
+                timeout=30)
+            GLib.idle_add(self._after_pause, minutes, err)
 
-        _, _, err = sh(
-            f"systemd-run --user --on-active={minutes}min --unit={PAUSE_UNIT} "
-            f"systemctl --user enable --now {self.timer} {self.watch}")
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _after_pause(self, minutes, err):
         if err and "Running timer" not in err:
             self.notify(APP_NAME, f"{self.t('Could not schedule the resume')}: {err[:70]}")
         else:
@@ -906,14 +979,25 @@ class Tray:
             key = {30: "30 minutes", 120: "2 hours", 480: "8 hours"}.get(
                 minutes, f"{minutes} min")
             self.notify(APP_NAME, self.t("Paused for {n}", n=self.t(key)))
+            self.auto_seen = "paused"
         self._refresh_checks()
+        return False
 
     def resume_now(self):
-        sh(f"systemctl --user stop {PAUSE_UNIT}.timer {PAUSE_UNIT}.service 2>/dev/null")
-        self._set_units("enable --now")
+        def worker():
+            sh(f"systemctl --user stop {PAUSE_UNIT}.timer {PAUSE_UNIT}.service "
+               f"2>/dev/null", timeout=30)
+            self._set_units("enable --now")
+            GLib.idle_add(self._after_resume)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _after_resume(self):
         self._clear_stamp()
+        self.auto_seen = "on"
         self.notify(APP_NAME, self.t("Automatic sync resumed"))
         self._refresh_checks()
+        return False
 
     def on_toggle_boot(self, item):
         if item.get_active():
@@ -930,17 +1014,27 @@ class Tray:
                         "X-GNOME-Autostart-enabled=true\n")
                 os.chmod(AUTOSTART, 0o644)
             except OSError:
-                pass
+                # The click has already ticked the box, so swallowing the error
+                # left the menu claiming autostart was on while no file existed.
+                self.notify(APP_NAME, self.t("Could not change the login setting"))
+                item.set_active(False)
         elif os.path.exists(AUTOSTART):
             try:
                 os.remove(AUTOSTART)
             except OSError:
-                pass
+                self.notify(APP_NAME, self.t("Could not change the login setting"))
+                item.set_active(True)
 
     def open_app(self, *_):
-        argv = self.open_cmd.split()
-        if argv:
-            spawn(argv)
+        # The command is quoted shell-style ("my app" --flag), so it needs the
+        # same splitting a shell would do; str.split() kept the quote characters
+        # and handed spawn() an argv[0] that does not exist.
+        try:
+            argv = shlex.split(self.open_cmd)
+        except ValueError:
+            argv = []
+        if not argv or not spawn(argv):
+            self.notify(APP_NAME, self.t("Could not start {app}", app=self.open_name))
 
     def open_path(self, path):
         if os.path.exists(path):
@@ -959,41 +1053,106 @@ class Tray:
             pass
 
     # -------------------------------------------------- polling
-    @staticmethod
-    def is_enabled(unit):
-        return sh(f"systemctl --user is-enabled {unit}")[1] == "enabled"
+    def _set_icon(self, path):
+        """Hand a new icon to the indicator, and only a new one.
+
+        set_icon_full() makes libayatana-appindicator look up the scale factor
+        of an internal widget. In a session with no StatusNotifier host (this
+        machine has none) that widget does not exist, so the call can print
+        `gtk_widget_get_scale_factor: assertion 'GTK_IS_WIDGET (widget)' failed`.
+        That critical may well be specific to this fallback mode. It is not
+        silenced by touching GLib log handlers; calling this only on a real
+        change keeps it to at most one message per state change.
+        """
+        if path == self.shown_icon:
+            return
+        self.shown_icon = path
+        self.ind.set_icon_full(path, APP_NAME)
 
     def unit_states(self):
-        """One subprocess for both units.
+        """Return (service_active, timer_state).
+
+        timer_state is "enabled" (automatic sync on), "off" (the unit exists but
+        is disabled) or "unknown" (systemctl could not be asked, or does not know
+        the unit). The last one used to be reported as a pause, which invented a
+        pause that never happened.
 
         Note: `systemctl is-active` reports "activating" (not "active") while a
-        Type=oneshot service runs, so both must be accepted.
+        Type=oneshot service runs, so both must be accepted. It also exits
+        non-zero when any of the named units is inactive, which is a normal
+        answer here and not a failure.
         """
-        _, out, _ = sh(f"systemctl --user is-active {self.service} {self.timer}; "
-                       f"systemctl --user is-enabled {self.timer}")
-        parts = out.splitlines()
-        svc = parts[0].strip() if len(parts) > 0 else ""
-        enabled = parts[2].strip() if len(parts) > 2 else ""
-        return svc in ("active", "activating"), enabled != "enabled"
+        _, out, _ = sh(
+            f"systemctl --user is-active {self.service} {self.timer}", timeout=30)
+        lines = [line.strip() for line in out.splitlines() if line.strip()]
+        active = bool(lines) and lines[0] in ("active", "activating")
+
+        rc, out, _ = sh(f"systemctl --user is-enabled {self.timer}", timeout=30)
+        answer = out.splitlines()[0].strip() if out.strip() else ""
+        if rc != 0 or not answer:
+            timer = "unknown"
+        elif "enabled" in answer or answer in ("linked", "linked-runtime", "alias"):
+            timer = "enabled"
+        else:
+            timer = "off"
+        return active, timer
 
     def poll(self):
-        syncing, paused = self.unit_states()
+        """Ask for the state in the background and return at once.
+
+        Every query shells out to systemctl, which can take seconds (or hang)
+        when the user manager is busy. Doing that here froze the whole tray, so
+        the subprocess work happens in a worker and _apply_state() runs back on
+        the main loop through GLib.idle_add().
+        """
+        self._query_state()
+        return True
+
+    def _query_state(self):
+        if self.state_busy:
+            return
+        self.state_busy = True
+
+        def worker():
+            try:
+                syncing, timer_state = self.unit_states()
+            except Exception:  # noqa: BLE001
+                syncing, timer_state = False, "unknown"
+            GLib.idle_add(self._apply_state, syncing, timer_state)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _apply_state(self, syncing, timer_state):
+        self.state_busy = False
+
+        # "off" is a real answer (automatic sync was turned off); "unknown" is
+        # the absence of an answer. Only a stamp left by pause_for() means the
+        # tray itself paused the units.
+        if timer_state == "enabled":
+            auto = "on"
+        elif timer_state == "unknown":
+            auto = "unknown"
+        elif self._paused_until():
+            auto = "paused"
+        else:
+            auto = "off"
+
+        # A timed pause ends when the transient timer re-enables the units.
+        # Drop the stamp then, and re-label the menu whenever the state flips.
+        if auto != "paused" and os.path.exists(PAUSE_STAMP):
+            self._clear_stamp()
+        if auto != self.auto_seen:
+            self.auto_seen = auto
+            self._refresh_checks()
+
         kind, when, tag, raw = read_last_result(self.log)
         hint = self.t(tag)
         if hint == tag:            # this tag has no translation
             hint = raw
 
-        # A timed pause ends when the transient timer re-enables the units.
-        # Drop the stamp then, and re-label the menu whenever the state flips.
-        if not paused and os.path.exists(PAUSE_STAMP):
-            self._clear_stamp()
-        if paused != self.paused_seen:
-            self.paused_seen = paused
-            self._refresh_checks()
-
         if syncing:
             state = "syncing"
-        elif paused:
+        elif auto in ("paused", "off"):
             state = "paused"
         elif kind == "error":
             state = "error"
@@ -1004,7 +1163,7 @@ class Tray:
 
         if state != self.state:
             self.state = state
-            self.ind.set_icon_full(self.icons[state], APP_NAME)
+            self._set_icon(self.icons[state])
 
         if self.was_syncing and not syncing:
             if kind == "error":
@@ -1029,8 +1188,10 @@ class Tray:
                     text += f" · {prog['file'][:34]}"
             else:
                 text = self.t("Syncing…")
-        elif paused:
+        elif auto == "paused":
             text = self.t("Automatic sync paused · last {when}", when=when or "—")
+        elif auto == "off":
+            text = self.t("Automatic sync is off · last {when}", when=when or "—")
         elif kind == "error":
             text = self.t("⚠ Sync failed {when}", when=when)
             if hint:
@@ -1056,7 +1217,7 @@ class Tray:
             self.folders_seen = self.folders
             self._build_folder_menu()
 
-        return True
+        return False
 
 
 def acquire_lock():
@@ -1074,6 +1235,23 @@ def acquire_lock():
         handle.close()
         return None
     return handle
+
+
+def release_lock(handle):
+    """Drop the lock and remove the file this process created.
+
+    The lock itself is the flock on the descriptor, but the file was left behind
+    in $TMPDIR after every exit, so a later run (or a curious user) found a stale
+    lock sitting there.
+    """
+    try:
+        os.remove(LOCK_FILE)
+    except OSError:
+        pass
+    try:
+        handle.close()
+    except OSError:
+        pass
 
 
 def main():
@@ -1102,18 +1280,23 @@ def main():
         print("rclone-onedrive-tray is already running.", file=sys.stderr)
         return 0
 
-    if not os.path.exists(CONFIG_FILE):
-        print(f"Config not found: {CONFIG_FILE}\nRun install.sh first.",
-              file=sys.stderr)
-        return 1
+    # Everything past this point owns the lock file, so every return path
+    # removes it again.
+    try:
+        if not os.path.exists(CONFIG_FILE):
+            print(f"Config not found: {CONFIG_FILE}\nRun install.sh first.",
+                  file=sys.stderr)
+            return 1
 
-    cfg = load_config()
-    if not icon_dir_ok():
-        print("Warning: cannot write icons, the tray icon may be blank.",
-              file=sys.stderr)
+        cfg = load_config()
+        if not icon_dir_ok():
+            print("Warning: cannot write icons, the tray icon may be blank.",
+                  file=sys.stderr)
 
-    Tray(cfg)
-    Gtk.main()
+        Tray(cfg)
+        Gtk.main()
+    finally:
+        release_lock(lock)
     return 0
 
 
