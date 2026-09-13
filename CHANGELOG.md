@@ -42,13 +42,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bookkeeping, not actions; the file counts on both sides stay the same.
   Since a folder that is present locally but no longer synced is a trap (edits in it go
   nowhere), the tray asks whether to delete the local copy when you untick one.
-- Two test suites, runnable with no OneDrive account and no risk to a working setup.
+- Four test suites, runnable with no OneDrive account and no risk to a working setup.
   `tests/dependency-matrix.sh` hides one dependency at a time and checks that the behaviour matches
   what `docs/DEPENDENCIES.md` promises. `tests/install-flow.sh` runs the documented install path,
   uninstall included, inside a sandbox and checks the files and the rclone command line it
-  produces. A third, `tests/docs.sh`, checks that the internal links resolve, that no page has
-  picked up an em dash, and that the files the READMEs name still exist. All three are wired into
-  CI.
+  produces. `tests/filters.sh` runs rclone over a fixture tree to prove each default rule really
+  filters. `tests/docs.sh` checks that the internal links resolve, that no page has picked up an em
+  dash, that the files the READMEs name still exist, and that the prose does not contradict the
+  number of suites. All four are wired into CI.
 - `docs/COMPATIBILITY.md`: the versions this was developed against, the behaviour measured on a
   real account, and an explicit list of what has never been tried.
 - `onedrive-check`, a pre-flight walk of the local tree that reports names OneDrive will refuse,
@@ -57,6 +58,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and logs the report, and the tray has it as a menu item. The limits it uses are measured rather
   than copied: a 383-character cloud path failed where 364 passed, so it treats 380 as the ceiling
   instead of Microsoft's documented 400.
+- `tests/install-flow.sh` gained regression cases for the delete cap: the conversion from a count
+  to a percentage, the abort being reported as a delete-cap problem with a way forward, and an
+  unrelated failure not being blamed on it.
 - `tests/filters.sh`: one file per default rule in a fixture tree, checked against rclone. Plus
   regression cases for everything above: a tray with no display, an unusable `TMPDIR`, a
   non-interactive `setup.sh` with no remote, an installer that must not enable someone else's unit,
@@ -77,6 +81,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The delete cap did not cap anything, which is the one defect here that could lose data. rclone
+  bisync reads `--max-delete` as a percentage of the file pair, while `MAX_DELETE` and the
+  documentation promise a file count, so the shipped `MAX_DELETE="100"` allowed every deletion.
+  Measured on rclone 1.75.1: with 250 of 300 files deleted locally, `--max-delete 100` exited 0 and
+  propagated the deletions to the other side in both directions, while `--max-delete 5` aborted with
+  "Safety abort: too many deletes (>5%, 150 of 200)". The wrapper now converts the configured count
+  into the equivalent percentage using the size of the pair from rclone's own listing, and falls
+  back to a small cap when it cannot measure one. End to end afterwards: `MAX_DELETE=100` over a
+  200-file pair aborted and left the far side untouched, and `MAX_DELETE=200` let the same 150
+  deletions through as intended.
+- The `[maxdelete]` hint never fired, because rclone words the abort as "too many deletes" and the
+  pattern looked for `max-delete`. Adding that literal then made every unrelated failure report a
+  delete cap, because the wrapper logs its own `--max-delete N%` line before each run; the match is
+  now on the abort wording only. `onedrive-sync --force` exists so the hint can name the way
+  forward, and `--resync`, `--dry-run` and `--verbose` are passed through too.
+- `uninstall.sh` and `install.sh` now compare `HOME` against the password database before touching
+  the machine-wide NetworkManager hook. A test that redirects `HOME` while keeping the default unit
+  name used to look exactly like the main install.
+- Personal data in a published file: `docs/TROUBLESHOOTING.md` carried a real OneDrive drive
+  identifier in three places, twice as the literal argument of a fix command. Replaced with
+  placeholders.
+- Documentation that contradicted the code, all found by reading the published tree: the example
+  filter rule in both READMEs was quoted, which is the exact mistake that made the shipped rules
+  inert; `config/config.example` said a deselected folder's local copy is deleted, which is the
+  opposite of the measured behaviour; `docs/TROUBLESHOOTING.md` recommended the fixed `/tmp` lock
+  file this project moved away from, and stated that any `--exclude` needs a resync, which is not
+  true of the tray's folder selection; the Chinese README managed both "two test scripts" and "four
+  test scripts" in the same section; the changelog said two suites and then three. `tests/docs.sh`
+  now checks the count claim in the changelog and in the Chinese README as well.
 - `install.sh` could enable and start a unit belonging to another installation. It wrote the units
   into the configured directory and then ran `systemctl --user enable --now`, but the user manager
   reads its own search path: with `XDG_CONFIG_HOME` redirected it never sees those files, while a

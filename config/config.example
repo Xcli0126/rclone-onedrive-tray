@@ -46,9 +46,11 @@ FILTERS_FILE="$HOME/.config/rclone-onedrive-tray/filters.txt"
 # REMOTE. This is what the tray's "Folders to sync" menu edits and what setup.sh
 # writes when you deselect folders.
 #
-# A deselected folder is treated as absent on both sides, so the local copies go
-# away to free the space while the cloud keeps everything. Toggling one neither
-# needs --resync nor touches the remote. Empty or missing means sync all of it.
+# A deselected folder is left alone on both sides: measured on rclone 1.75.1,
+# excluding a folder touches neither the local copy nor the cloud, so nothing is
+# lost and nothing is freed either. The tray offers to delete the local copy
+# separately when you untick one. Toggling needs no --resync. Empty or missing
+# means sync all of it.
 EXCLUDE_FOLDERS_FILE="$HOME/.config/rclone-onedrive-tray/exclude-folders.txt"
 
 # ------------------------------------------------------------------ tray

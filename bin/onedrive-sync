@@ -90,11 +90,66 @@ if [ -f "$LOG" ] && [ "$(stat -c%s "$LOG" 2>/dev/null || echo 0)" -gt "$MAX_LOG_
     mv -f "$LOG" "$LOG.1"
 fi
 
+# ---------------------------------------------------------------- delete cap
+# rclone bisync reads --max-delete as a PERCENTAGE of the file pair, while the
+# config and the documentation promise a count. Passing the count straight
+# through therefore capped nothing at all. Measured on rclone 1.75.1:
+#
+#   --max-delete 100, 250 of 300 files deleted -> rc 0, deletions propagated
+#   --max-delete 5,   150 of 200 files deleted -> "Safety abort: too many
+#                                                  deletes (>5%, 150 of 200)"
+#
+# So the count is converted into the equivalent percentage, using the size of
+# the pair as rclone last recorded it. Flooring the division means the cap
+# trips slightly before the configured count rather than after it.
+pair_slug() { printf '%s' "$1" | sed -e 's|^/||' -e 's|[/: ]|_|g'; }
+
+pair_size() {
+    # rclone names the listing <left>..<right>.path1.lst and keeps one per pair.
+    # Only the right half is reliable: with an alias remote rclone resolves the
+    # left half to the target path, so anchoring on the local side is what
+    # matches in both cases. The -old and -err variants do not match at all.
+    local local_slug listing count best=0
+    local_slug="$(pair_slug "$LOCAL")"
+    for listing in "$RCLONE_CACHE"/bisync/*.."$local_slug".path1.lst; do
+        [ -f "$listing" ] || continue
+        count="$(grep -c '^-' "$listing" 2>/dev/null || true)"
+        count="${count//[^0-9]/}"
+        [ -n "$count" ] && [ "$count" -gt "$best" ] && best="$count"
+    done
+    # The local tree is a second opinion, and the only one available before the
+    # first run has written a listing. The larger of the two is used, so a small
+    # local side cannot inflate the percentage into uselessness.
+    count="$(find "$LOCAL" -type f 2>/dev/null | wc -l)"
+    count="${count//[^0-9]/}"
+    [ -n "$count" ] && [ "$count" -gt "$best" ] && best="$count"
+    printf '%s' "$best"
+}
+
+max_delete_pct=100
+if [ "${MAX_DELETE:-0}" -eq 0 ] 2>/dev/null; then
+    max_delete_pct=0                  # documented as "no deletions allowed"
+elif [ "${MAX_DELETE:-0}" -gt 0 ] 2>/dev/null; then
+    pair_total="$(pair_size)"
+    pair_total="${pair_total//[^0-9]/}"
+    if [ -n "$pair_total" ] && [ "$pair_total" -gt 0 ]; then
+        max_delete_pct=$(( MAX_DELETE * 100 / pair_total ))
+        [ "$max_delete_pct" -lt 1 ] && max_delete_pct=1
+        [ "$max_delete_pct" -gt 100 ] && max_delete_pct=100
+        log_line "NOTICE: delete cap MAX_DELETE=$MAX_DELETE of about $pair_total files = --max-delete ${max_delete_pct}%"
+    else
+        # Nothing to measure: no listing and an empty local tree. Not knowing is
+        # not a reason to allow every deletion, so keep a small cap.
+        max_delete_pct=5
+        log_line "NOTICE: delete cap MAX_DELETE=$MAX_DELETE with no known pair size, using --max-delete 5%"
+    fi
+fi
+
 # ---------------------------------------------------------------- build argv
 read -r -a BISYNC_OPTS <<<"$BISYNC_ARGS"
 ARGS=(bisync "$REMOTE" "$LOCAL")
 ARGS+=("${BISYNC_OPTS[@]}")
-ARGS+=(--max-delete "$MAX_DELETE" --log-level INFO --log-file "$LOG")
+ARGS+=(--max-delete "$max_delete_pct" --log-level INFO --log-file "$LOG")
 if [ -n "$FILTERS_FILE" ] && [ -f "$FILTERS_FILE" ]; then
     ARGS+=(--filters-file "$FILTERS_FILE")
 fi
@@ -116,6 +171,20 @@ if [ -n "$EXCLUDE_FOLDERS_FILE" ] && [ -f "$EXCLUDE_FOLDERS_FILE" ]; then
     done < "$EXCLUDE_FOLDERS_FILE"
     [ "$excluded" -gt 0 ] && log_line "NOTICE: ${excluded} folder(s) deselected"
 fi
+
+for arg in "$@"; do
+    case "$arg" in
+        --force)
+            ARGS+=(--force)
+            log_line "NOTICE: --force given, the delete cap will not stop this run" ;;
+        --resync|--dry-run|--verbose)
+            ARGS+=("$arg") ;;
+        *)
+            printf '%s: unknown option: %s\n' "$APP" "$arg" >&2
+            printf 'usage: %s [--resync] [--force]\n' "$APP" >&2
+            exit 2 ;;
+    esac
+done
 
 if [ "${1:-}" = "--resync" ]; then
     # A name OneDrive refuses turns the first full upload into a retry loop, so
@@ -153,9 +222,12 @@ hint_for() {
     if grep -qiE 'prior lock file found' <<<"$t"; then
         tag=lock
         msg="a sync lock is still held; if this repeats, delete the *.lck files in ~/.cache/rclone/bisync"
-    elif grep -qiE 'max-delete|excessive deletes|deletion limit' <<<"$t"; then
+    # Deliberately not matching the bare word max-delete: this wrapper logs its
+    # own "--max-delete N%" conversion line just before the run, and matching it
+    # tagged every unrelated failure as a delete-cap abort.
+    elif grep -qiE 'too many deletes|excessive deletes|deletion limit' <<<"$t"; then
         tag=maxdelete
-        msg="more than MAX_DELETE=$MAX_DELETE files would be deleted; if that is intended run: onedrive-sync --resync"
+        msg="more than MAX_DELETE=$MAX_DELETE files would be deleted; if that is intended run: onedrive-sync --force"
     elif grep -qiE 'lookup .*:53|dial tcp|no such host|Temporary failure in name resolution|server misbehaving' <<<"$t"; then
         tag=network
         msg="network or DNS temporarily unavailable; will retry"

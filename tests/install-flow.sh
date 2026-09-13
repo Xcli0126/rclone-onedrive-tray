@@ -148,9 +148,16 @@ if [ -s "$CALLS" ]; then
     ok "rclone was invoked exactly as configured"
     for flag in bisync "$REMOTE" "$LOCAL_DIR" --resilient --recover \
                 "--max-lock 2m" "--conflict-resolve none" "--conflict-loser num" \
-                "--max-delete 100" --filters-file --resync; do
+                --max-delete --filters-file --resync; do
         check "the command line carries $flag" grep -qF -- "$flag" "$CALLS"
     done
+    # The configured MAX_DELETE is a file count, while rclone reads the flag as a
+    # percentage, so what reaches rclone is a number the wrapper calculated.
+    if grep -qE -- '--max-delete [0-9]+' "$CALLS"; then
+        ok "the delete cap reaches rclone as a percentage"
+    else
+        bad "the delete cap was not passed as a number"
+    fi
 else
     bad "rclone was never invoked"
 fi
@@ -229,6 +236,70 @@ rm -f "$LOCAL_DIR/CON" "$LOCAL_DIR/Clash.md" "$LOCAL_DIR/clash.md"
 
 run "the help text is not truncated" 0 "were taken are in" \
     "$HOME/.local/bin/onedrive-check" --help
+
+# ---------------------------------------------------------------- the delete cap
+# rclone bisync reads --max-delete as a PERCENTAGE, so passing the configured
+# file count straight through capped nothing at all. Measured on rclone 1.75.1
+# before the fix: --max-delete 100 with 250 of 300 files deleted exited 0 and
+# propagated the deletions. The wrapper now converts the count using the size of
+# the pair, taken from rclone's listing.
+title "the delete cap"
+CAP="$WORK/cap"
+mkdir -p "$CAP/cfg/rclone-onedrive-tray" "$CAP/cache/rclone/bisync" "$CAP/local"
+for i in $(seq 1 200); do : > "$CAP/local/f$i.txt"; done
+slug="$(printf '%s' "$CAP/local" | sed -e 's|^/||' -e 's|[/: ]|_|g')"
+{ printf '# bisync listing v1 from test\n'
+  for i in $(seq 1 200); do
+      printf -- '-        1 - - 2026-01-01T00:00:00.000000000+0000 "f%s.txt"\n' "$i"
+  done
+} > "$CAP/cache/rclone/bisync/x..$slug.path1.lst"
+cat > "$CAP/cfg/rclone-onedrive-tray/config" <<EOF
+REMOTE="capfake:Vault"
+LOCAL="$CAP/local"
+LOG="$CAP/sync.log"
+RCLONE="rclone"
+MAX_DELETE="100"
+RETRIES="1"
+EOF
+cat > "$CAP/rclone" <<'STUB'
+#!/bin/bash
+printf '%s\n' "$*" >> "$CAP_ARGS"
+[ -n "${CAP_STDERR:-}" ] && printf '%s\n' "$CAP_STDERR" >&2
+exit "${CAP_RC:-0}"
+STUB
+chmod +x "$CAP/rclone"
+
+: > "$WORK/cap-args"
+env PATH="$CAP:$PATH" XDG_CONFIG_HOME="$CAP/cfg" XDG_CACHE_HOME="$CAP/cache" \
+    CAP_ARGS="$WORK/cap-args" "$HOME/.local/bin/onedrive-sync" >/dev/null 2>&1 || true
+if grep -q -- '--max-delete 50' "$WORK/cap-args"; then
+    ok "a count of 100 over 200 files becomes --max-delete 50"
+else
+    bad "expected --max-delete 50, recorded: $(cat "$WORK/cap-args" 2>/dev/null | head -1)"
+fi
+
+# The cap aborting has to be reported as such, with a way forward.
+CAP_STDERR='2026/01/01 00:00:00 ERROR : Safety abort: too many deletes (>50%, 150 of 200) on Path1'
+run "an abort is reported as a delete-cap problem" 1 "[maxdelete]" \
+    env PATH="$CAP:$PATH" XDG_CONFIG_HOME="$CAP/cfg" XDG_CACHE_HOME="$CAP/cache" \
+        CAP_ARGS="$WORK/cap-args" CAP_STDERR="$CAP_STDERR" CAP_RC=1 "$HOME/.local/bin/onedrive-sync"
+run "and it says how to proceed" 1 "--force" \
+    env PATH="$CAP:$PATH" XDG_CONFIG_HOME="$CAP/cfg" XDG_CACHE_HOME="$CAP/cache" \
+        CAP_ARGS="$WORK/cap-args" CAP_STDERR="$CAP_STDERR" CAP_RC=1 "$HOME/.local/bin/onedrive-sync"
+
+# The wrapper logs its own "--max-delete N%" line before every run, and an
+# earlier version of the hint matched that text, so every unrelated failure was
+# reported as a delete-cap abort.
+: > "$CAP/sync.log"
+CAP_STDERR='2026/01/01 00:00:00 ERROR : Bisync critical error: something else'
+run "an unrelated failure is not blamed on the delete cap" 1 "[resync]" \
+    env PATH="$CAP:$PATH" XDG_CONFIG_HOME="$CAP/cfg" XDG_CACHE_HOME="$CAP/cache" \
+        CAP_ARGS="$WORK/cap-args" CAP_STDERR="$CAP_STDERR" CAP_RC=1 "$HOME/.local/bin/onedrive-sync"
+if grep -q 'maxdelete' "$CAP/sync.log"; then
+    bad "the delete-cap tag reached the log for an unrelated failure"
+else
+    ok "and the log has no delete-cap tag for it"
+fi
 
 # ---------------------------------------------------------------- uninstall
 title "uninstall.sh"

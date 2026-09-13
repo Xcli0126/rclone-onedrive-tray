@@ -97,21 +97,42 @@ for path in tests/*.sh; do [ -f "$path" ] && count=$((count + 1)); done
 case "$count" in
     2) want=Two ;; 3) want=Three ;; 4) want=Four ;; 5) want=Five ;; *) want="" ;;
 esac
-for f in README.md docs/COMPATIBILITY.md; do
+# The Chinese README is checked below, with characters.
+for f in README.md docs/COMPATIBILITY.md CHANGELOG.md; do
     [ -f "$f" ] || continue
-    claims="$(grep -oE '(Two|Three|Four|Five) (suites|scripts)' "$f" | awk '{print $1}' | sort -u)"
+    claims="$(grep -oE '(Two|Three|Four|Five)( test)? (suites|scripts)|both (suites|scripts)' "$f" |
+        sed -e 's/^both/Both/' | awk '{print $1}' | sort -u)"
     if [ -z "$claims" ]; then
         skip "$f makes no claim about how many suites there are"
         continue
     fi
     while IFS= read -r stated; do
-        if [ "$stated" = "$want" ]; then
+        if [ "$stated" = "$want" ] || { [ "$stated" = "Both" ] && [ "$count" -eq 2 ]; }; then
             ok "$f says $stated, and there are $count"
         else
             bad "$f says $stated, but there are $count test suites"
         fi
     done <<<"$claims"
 done
+
+# The Chinese README says it with characters, which no English grep above catches.
+# 测试 is required: "两个脚本不会调用 sudo" is about the two installer scripts.
+zh="$(grep -oE '(两|二|三|四|五|六)个测试脚本' README.zh-CN.md 2>/dev/null | sort -u || true)"
+if [ -z "$zh" ]; then
+    skip "README.zh-CN.md makes no claim about how many suites there are"
+else
+    case "$count" in
+        2) want_zh="两" ;; 3) want_zh="三" ;; 4) want_zh="四" ;;
+        5) want_zh="五" ;; 6) want_zh="六" ;; *) want_zh="" ;;
+    esac
+    while IFS= read -r stated; do
+        if [ "${stated:0:1}" = "$want_zh" ]; then
+            ok "README.zh-CN.md says $stated, and there are $count"
+        else
+            bad "README.zh-CN.md says $stated, but there are $count test suites"
+        fi
+    done <<<"$zh"
+fi
 
 # ---------------------------------------------------------------- installer drift
 # A script that install.sh ships and uninstall.sh forgets is invisible until

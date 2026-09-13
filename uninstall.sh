@@ -72,7 +72,13 @@ NM_TARGET="/etc/NetworkManager/dispatcher.d/90-rclone-onedrive-tray"
 # the unit being uninstalled. Without those checks, removing a test install from
 # a scratch prefix would delete the working install's hook.
 if [ -f "$NM_TARGET" ]; then
-    if [ "$PREFIX_GIVEN" -eq 1 ] && [ "$PREFIX" != "$HOME/.local" ]; then
+    # The real home from the password database, which does not move when a test
+    # redirects HOME. A redirected HOME with the default unit name used to look
+    # exactly like the main install and reached for this hook.
+    real_home="$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6)"
+    if [ -n "$real_home" ] && [ "$HOME" != "$real_home" ]; then
+        say "Leaving $NM_TARGET alone: HOME is redirected to $HOME"
+    elif [ "$PREFIX_GIVEN" -eq 1 ] && [ "$PREFIX" != "$HOME/.local" ]; then
         say "Leaving $NM_TARGET alone: this uninstall is for $PREFIX"
     elif ! grep -q "$UNIT_NAME" "$NM_TARGET" 2>/dev/null; then
         say "Leaving $NM_TARGET alone: it does not mention $UNIT_NAME"

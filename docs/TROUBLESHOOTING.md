@@ -110,7 +110,7 @@ curl -s -H "Authorization: Bearer $TOKEN" https://graph.microsoft.com/v1.0/me/dr
 ```
 
 `/me/drive` returns the default drive with the correct id (for a personal account it looks like
-`0123456789ABCDEF`, and *not* like `b!...`).
+sixteen hex characters, `0123456789ABCDEF`, and *not* like `b!...`).
 
 **Fix:** Pin it explicitly:
 
@@ -229,13 +229,25 @@ now" during a timer run waits (up to 120 s) instead of racing. If you drive rclo
 the same:
 
 ```bash
-exec 9>/tmp/onedrive-sync.lock
-flock -n 9 || { echo "already running"; exit 0; }
+# Not /tmp: a fixed name there is world-writable, so any local user can hold it
+# and stall your sync, and two people's jobs would collide.
+LOCK="${XDG_CACHE_HOME:-$HOME/.cache}/rclone/bisync/manual.lck"
+mkdir -p "$(dirname "$LOCK")"
+exec 9>"$LOCK"
+if ! flock -w 120 9; then
+    echo "another sync is already running" >&2
+    exit 1
+fi
 ```
 
 ### Changing filters requires a resync
 
-Adding an `--exclude` changes the baseline. Run `onedrive-sync --resync` once afterwards.
+Adding an `--exclude` to the filter file changes the baseline. Run `onedrive-sync --resync` once
+afterwards.
+
+The tray's folder selection is different: entries in `exclude-folders.txt` are passed as
+`--exclude` on the command line and do not change the baseline, so ticking and unticking a folder
+needs no resync and touches neither side.
 Excluded files are *left alone on both sides*; they are not deleted.
 
 ---

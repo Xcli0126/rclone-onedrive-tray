@@ -164,32 +164,43 @@ a remote that points at a plain directory and needs no account at all.
 ### Trying it alongside an existing install
 
 Installing over a working setup is how you end up debugging two of them at once,
-so point everything at a scratch tree and give the units their own name:
+so point everything at a scratch tree and give the units their own name. This
+route needs no account: it syncs one directory to another.
 
 ```bash
 export HOME=/tmp/trial/home
 export XDG_CONFIG_HOME=/tmp/trial/config XDG_CACHE_HOME=/tmp/trial/cache
 export XDG_DATA_HOME=/tmp/trial/data XDG_STATE_HOME=/tmp/trial/state
-export XDG_RUNTIME_DIR=/tmp/trial/run        # systemd finds its socket here
+export XDG_RUNTIME_DIR=/tmp/trial/run          # systemd looks for its socket here
 export TMPDIR=/tmp/trial/tmp
 mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_DATA_HOME" \
-         "$XDG_STATE_HOME" "$TMPDIR"; chmod 700 "$XDG_RUNTIME_DIR" 2>/dev/null
+         "$XDG_STATE_HOME" "$XDG_RUNTIME_DIR" "$TMPDIR"
+chmod 700 "$XDG_RUNTIME_DIR"
 
-./install.sh --prefix /tmp/trial/prefix --no-start
+mkdir -p "$XDG_CONFIG_HOME/rclone" /tmp/trial/cloud /tmp/trial/local
+export RCLONE_CONFIG="$XDG_CONFIG_HOME/rclone/rclone.conf"
+rclone config create trial alias remote /tmp/trial/cloud
+
 ./setup.sh --remote trial: --local /tmp/trial/local --unit-name trial-sync --yes
 ```
 
-Two things make the difference. `--unit-name` keeps the trial units away from the
-real ones: systemd unit names are global to your session, and two installs cannot
-both own `onedrive-sync.timer`. And `XDG_RUNTIME_DIR` must point somewhere, or
-`systemctl --user` either reaches your real session or fails outright.
+Run `setup.sh` rather than `install.sh`. The wizard calls the installer itself,
+and running the installer first writes the config that `setup.sh` then refuses to
+overwrite.
 
-`install.sh` checks where systemd actually reads the unit from before enabling
-anything. If the manager cannot see the directory the units were written into, it
-says so and stops instead of enabling a same-named unit belonging to something
-else. When you remove the trial, `uninstall.sh` leaves the NetworkManager hook in
-`/etc` alone unless it names the unit being removed, because that file is
-machine-wide and belongs to whichever install put it there.
+Three things make the difference. `--unit-name` keeps the trial units away from
+the real ones, because systemd unit names are global to your session and two
+installs cannot both own `onedrive-sync.timer`. `RCLONE_CONFIG` has to point at
+the trial's own file, because rclone keeps its accounts under `XDG_CONFIG_HOME`,
+so the remote you just made is invisible to `setup.sh` without it. And
+`XDG_RUNTIME_DIR` has to exist and be yours, or `systemctl --user` either reaches
+your real session or fails outright. A scratch runtime directory holds no systemd
+socket, so `install.sh` writes the units, reports that the manager cannot see
+them, and enables nothing.
+
+`uninstall.sh` leaves the NetworkManager hook in `/etc` alone unless it belongs
+to the install being removed, so a trial cannot pull the hook out from under the
+install you already have.
 
 ---
 
@@ -224,7 +235,7 @@ per-machine UI state, are the usual things worth excluding. A starting point shi
 - /.rag/**                          # machine-local vector index (can be hundreds of MB)
 - /.obsidian/workspace.json         # editor layout; flip-flops between machines
 - .DS_Store
-- '**/__pycache__/**'
+- **/__pycache__/**
 ```
 
 > Changing `REMOTE`, `LOCAL`, `FILTERS_FILE` or `BISYNC_ARGS` invalidates the baseline. Run
@@ -430,7 +441,7 @@ tests/docs.sh                   # internal links, writing rules, promised files
 The first two point `HOME` and the XDG directories at a temporary tree, replace rclone, systemctl
 and sudo with stubs, and use a probe unit name. `filters.sh` runs the real rclone over a fixture
 directory, and `docs.sh` only reads the repository. None of them can disturb a working install.
-`--verbose` shows every command and its output. CI runs both on `ubuntu-latest`, which is a
+`--verbose` shows every command and its output. CI runs all four on `ubuntu-latest`, which is a
 different distribution, systemd and rclone from the machine they were written on.
 [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) records what they cover, the versions they have
 been run against, and what nobody has tried yet.

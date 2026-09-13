@@ -175,7 +175,12 @@ chmod 0644 "$AUTOSTART_DIR/rclone-onedrive-tray.desktop"
 # --------------------------------------------------------------- NM dispatcher
 if [ "$NM_DISPATCHER" -eq 1 ]; then
     say "Installing the NetworkManager dispatcher hook"
-    if [ "$PREFIX" != "$HOME/.local" ]; then
+    real_home="$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6)"
+    if [ -n "$real_home" ] && [ "$HOME" != "$real_home" ]; then
+        warn "HOME is redirected to $HOME while this hook is machine-wide."
+        warn "It would start $UNIT_NAME.timer for the real user, so it is not installed."
+        NM_DISPATCHER=0
+    elif [ "$PREFIX" != "$HOME/.local" ]; then
         warn "this hook is machine-wide and will start $UNIT_NAME.timer,"
         warn "which lives outside $HOME/.local. Install the units normally if that is"
         warn "not what you meant."

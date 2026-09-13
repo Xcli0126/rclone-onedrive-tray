@@ -11,9 +11,9 @@ Four scripts, none of which needs an rclone remote and all safe on a working set
 
 ```bash
 tests/dependency-matrix.sh      # 24 cases: one missing dependency at a time
-tests/install-flow.sh           # 57 cases: the documented install path, end to end
+tests/install-flow.sh           # 63 cases: the documented install path, end to end
 tests/filters.sh                # 19 cases: the default filters still filter
-tests/docs.sh                   # 25 cases: the links and rules the docs depend on
+tests/docs.sh                   # 27 cases: the links and rules the docs depend on
 ```
 
 Add `--verbose` to any of them to see each command and its output.
@@ -86,7 +86,7 @@ and `~$draft.docx` uploaded normally. The measurements are in
 
 ## Verified in CI
 
-Every push runs both suites on a GitHub runner. That runner is a second
+Every push runs all four suites on a GitHub runner. That runner is a second
 environment rather than a repeat of the first:
 
 | Component | Version |
@@ -104,7 +104,7 @@ does say something the local run cannot.
 
 The runner's rclone being 1.60.1 helps in one direction only. `install.sh`
 warns about that version, which is one of the cases the matrix checks. The sync
-itself is stubbed in both suites, so nothing here proves that 1.60.1 syncs. It
+itself is stubbed in the two suites that stub rclone, so nothing here proves that 1.60.1 syncs. It
 does not, and `docs/DEPENDENCIES.md` explains what fails and why.
 
 ## An independent acceptance run
@@ -170,7 +170,7 @@ treat it as unknown rather than supported.
 
 ## If your machine is not in the table
 
-Run both suites. They do not need your OneDrive account, they take under a
+Run all four suites. They do not need your OneDrive account, they take under a
 minute, and a failure prints the assertion that disagreed with the
 documentation. That output is the useful thing to send, along with the versions
 from the first table.

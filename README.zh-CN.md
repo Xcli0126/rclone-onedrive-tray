@@ -129,8 +129,8 @@ onedrive-sync --resync   # 建立基线，会把云端全部拉下来
 
 ### 和现有安装并存
 
-在已经装好的机器上再装一遍，最容易变成同时调试两套。把 HOME 和各个 XDG 目录指到临时目录，再给
-单元起个自己的名字：
+在已经装好的机器上再装一遍，最容易变成同时调试两套。把 HOME 和各个 XDG 目录指到临时目录，
+再给单元起个自己的名字。这条路不需要任何账号，它把一个目录同步到另一个目录：
 
 ```bash
 export HOME=/tmp/trial/home
@@ -139,20 +139,27 @@ export XDG_DATA_HOME=/tmp/trial/data XDG_STATE_HOME=/tmp/trial/state
 export XDG_RUNTIME_DIR=/tmp/trial/run        # systemd 在这里找自己的 socket
 export TMPDIR=/tmp/trial/tmp
 mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_DATA_HOME" \
-         "$XDG_STATE_HOME" "$TMPDIR"; chmod 700 "$XDG_RUNTIME_DIR" 2>/dev/null
+         "$XDG_STATE_HOME" "$XDG_RUNTIME_DIR" "$TMPDIR"
+chmod 700 "$XDG_RUNTIME_DIR"
 
-./install.sh --prefix /tmp/trial/prefix --no-start
+mkdir -p "$XDG_CONFIG_HOME/rclone" /tmp/trial/cloud /tmp/trial/local
+export RCLONE_CONFIG="$XDG_CONFIG_HOME/rclone/rclone.conf"
+rclone config create trial alias remote /tmp/trial/cloud
+
 ./setup.sh --remote trial: --local /tmp/trial/local --unit-name trial-sync --yes
 ```
 
-两个细节最关键。`--unit-name` 让临时那套不和真身撞名，因为 systemd 的单元名在你的会话里是全局的，
-两套安装不可能同时拥有 `onedrive-sync.timer`。而 `XDG_RUNTIME_DIR` 必须指向一个真实存在的目录，
-否则 `systemctl --user` 要么连到你真正的会话，要么直接失败。
+只跑 `setup.sh`，不要再单独跑 `install.sh`：向导自己会调安装脚本，而先跑安装脚本会把配置写好，
+接着 `setup.sh` 就会拒绝覆盖它。
 
-`install.sh` 在 enable 之前会先问 systemd 到底从哪里读这个单元。如果管理进程看不到刚写入的目录，
-它会说明情况并停手，而不是去 enable 一个同名的别的单元。清理临时那套时，`uninstall.sh` 不会动
-`/etc` 里的 NetworkManager 钩子，除非那个文件点名的正是要卸载的单元，因为那是整机一份、属于当初
-装它的那套安装。
+三个细节最关键。`--unit-name` 让临时那套不和真身撞名，因为 systemd 的单元名在你的会话里是全局的。
+`RCLONE_CONFIG` 必须指向临时那套自己的文件，因为 rclone 把账号存在 `XDG_CONFIG_HOME` 下，不指的话
+`setup.sh` 根本看不到你刚建好的远程。`XDG_RUNTIME_DIR` 必须存在而且属于你，否则 `systemctl --user`
+要么连到你真正的会话，要么直接失败；临时运行目录里没有 systemd 的 socket，所以 `install.sh` 会把
+单元写下来、告诉你管理进程看不到它们，然后什么都不启用。
+
+`uninstall.sh` 不会动 `/etc` 里的 NetworkManager 钩子，除非那个文件属于正在卸载的这一套，所以临时
+安装不可能把真身的钩子拔掉。
 
 ---
 
@@ -185,7 +192,7 @@ UI_LANG=""                    # 界面语言：en / zh，留空则跟随 $LANG
 - /.rag/**                          # 机器本地向量索引，可能几百 MB
 - /.obsidian/workspace.json         # 编辑器布局，两台机器之间来回覆盖
 - .DS_Store
-- '**/__pycache__/**'
+- **/__pycache__/**
 ```
 
 > 改动 `REMOTE`、`LOCAL`、`FILTERS_FILE` 或 `BISYNC_ARGS` 会让基线失效，之后跑一次
@@ -350,7 +357,7 @@ watch-issues.sh --forget    # 清空记录，下次全部重报
 
 ### 测试
 
-两个测试脚本都不需要真的 rclone 远程：
+四个测试脚本都不需要真的 rclone 远程：
 
 ```bash
 tests/dependency-matrix.sh      # 每次只藏起来一个依赖
