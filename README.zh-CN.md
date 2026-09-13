@@ -106,7 +106,7 @@ cd rclone-onedrive-tray
 所有东西都装进你的家目录，两个脚本都不会调用 `sudo`。
 
 ```
-~/.local/bin/onedrive-sync, onedrive-tray, onedrive-watch
+~/.local/bin/onedrive-sync, onedrive-tray, onedrive-watch, onedrive-check
 ~/.config/rclone-onedrive-tray/config, filters.txt
 ~/.config/systemd/user/onedrive-sync.{service,timer}
 ~/.config/systemd/user/onedrive-sync-watch.service
@@ -189,6 +189,7 @@ Pause automatic sync ▸   30 minutes
                          Resume now
 ☑ Start tray at login
 ────────────────────────────────
+Check file names
 Rebuild sync baseline (resync)…
 Quit
 ```
@@ -202,11 +203,30 @@ Quit
 ```bash
 onedrive-sync                 # 跑一次增量同步，最多 3 次尝试
 onedrive-sync --resync        # 重建同步基线
+onedrive-check                # 检查 OneDrive 会拒绝或改名的文件名和路径
 systemctl --user list-timers onedrive-sync.timer
 systemctl --user start onedrive-sync.service     # 立即同步
 journalctl --user -u onedrive-sync.service -f
 tail -f ~/.cache/rclone-onedrive-tray/sync.log
 ```
+
+### OneDrive 不收的文件名
+
+有些名字 OneDrive 直接拒收，还有一批它会悄悄改名，而 bisync 是用最贵的方式发现的：其他文件都传完了，卡在那一个上，然后从此每次同步都重试同一个。`onedrive-check` 会在上传之前走一遍本地目录，把问题按「会被拒收」「会被 rclone 改名」「路径太长」分好类列出来：
+
+```
+onedrive-check: /home/you/OneDrive/Vault against onedrive:Vault
+
+  OneDrive will refuse these (1)
+    reserved name: Notes/CON
+  OneDrive will rename these (1)
+    Notes/plan:a.md -- '"*:<>?\|' in 'plan:a.md'
+  These paths are too long (1)
+    cloud path 412 chars: Notes/very/deep/...
+```
+
+真的有东西会失败时它返回非 0，所以能写进脚本。`onedrive-sync --resync` 会先跑它并把报告写进日志，因为那一次会把所有东西传上去。托盘里也有对应的菜单项。具体限制值和它们是怎么量出来的，写在
+[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)。
 
 ### 网络恢复后立刻补同步
 
@@ -306,6 +326,7 @@ watch-issues.sh --forget    # 清空记录，下次全部重报
 ```bash
 tests/dependency-matrix.sh      # 每次只藏起来一个依赖
 tests/install-flow.sh           # 在沙箱里走一遍文档里的安装流程
+tests/filters.sh                # 默认过滤规则真的能过滤
 tests/docs.sh                   # 文档互链、写字规矩、文档里点名的文件
 ```
 

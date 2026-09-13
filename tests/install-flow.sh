@@ -190,12 +190,37 @@ fi
 check "the watcher reports the tree it watches" \
     grep -qF "watching $LOCAL_DIR" "$WORK/watch.log"
 
+# ---------------------------------------------------------------- the checker
+title "onedrive-check"
+check "the checker is installed" test -x "$HOME/.local/bin/onedrive-check"
+run "a clean tree needs nothing" 0 "nothing to fix" \
+    "$HOME/.local/bin/onedrive-check"
+
+# One name Microsoft reserves, one pair the service cannot keep apart.
+touch "$LOCAL_DIR/CON" "$LOCAL_DIR/Clash.md" "$LOCAL_DIR/clash.md"
+run "a reserved name is reported" 1 "reserved name: CON" \
+    "$HOME/.local/bin/onedrive-check"
+run "a case clash is reported" 1 "OneDrive ignores case" \
+    "$HOME/.local/bin/onedrive-check"
+rm -f "$LOCAL_DIR/CON" "$LOCAL_DIR/clash.md"
+: > "$LOCAL_DIR/a:b.md"
+run "a name that will be renamed does not fail the check" 0 "will rename these" \
+    "$HOME/.local/bin/onedrive-check"
+rm -f "$LOCAL_DIR/a:b.md"
+
+# The wrapper checks before a resync, because that is the run that uploads
+# everything and turns one bad name into a permanent retry loop.
+touch "$LOCAL_DIR/CON"
+run "a resync reports the bad name and carries on" 0 "reserved name: CON" \
+    "$HOME/.local/bin/onedrive-sync" --resync
+rm -f "$LOCAL_DIR/CON" "$LOCAL_DIR/Clash.md" "$LOCAL_DIR/clash.md"
+
 # ---------------------------------------------------------------- uninstall
 title "uninstall.sh"
 run "uninstall finishes" 0 "" bash "$SRC_DIR/uninstall.sh" --prefix "$HOME/.local"
 check_absent "removes the installed scripts" \
     "$HOME/.local/bin/onedrive-sync" "$HOME/.local/bin/onedrive-tray" \
-    "$HOME/.local/bin/onedrive-watch"
+    "$HOME/.local/bin/onedrive-watch" "$HOME/.local/bin/onedrive-check"
 check_absent "removes the units" \
     "$UNIT_DIR/$UNIT.service" "$UNIT_DIR/$UNIT.timer" "$UNIT_DIR/$UNIT-watch.service"
 check "keeps the configuration (documented; --purge removes it)" test -f "$CFG"

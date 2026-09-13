@@ -116,6 +116,27 @@ if [ -n "$EXCLUDE_FOLDERS_FILE" ] && [ -f "$EXCLUDE_FOLDERS_FILE" ]; then
 fi
 
 if [ "${1:-}" = "--resync" ]; then
+    # A name OneDrive refuses turns the first full upload into a retry loop, so
+    # the tree is checked once, here, where the cost of a walk is nothing next to
+    # the transfer that follows. It reports and carries on: the user may well
+    # want the 700 files that are fine before dealing with the one that is not.
+    #
+    # The sibling script is preferred over the one on PATH because systemd runs
+    # this with ExecStart and a minimal PATH, where the installed directory is
+    # not necessarily present.
+    check_cmd=""
+    case "${BASH_SOURCE[0]}" in
+        */*) self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+             [ -x "$self_dir/onedrive-check" ] && check_cmd="$self_dir/onedrive-check" ;;
+    esac
+    [ -n "$check_cmd" ] || check_cmd="$(command -v onedrive-check 2>/dev/null || true)"
+    if [ -n "$check_cmd" ]; then
+        if ! check_report="$("$check_cmd" 2>&1)"; then
+            log_line "WARNING: names or paths OneDrive will refuse were found before the resync"
+            printf '%s\n' "$check_report" >>"$LOG"
+            printf '%s\n' "$check_report" >&2
+        fi
+    fi
     ARGS+=(--resync)
     log_line "NOTICE: --resync requested, rebuilding baseline"
 fi

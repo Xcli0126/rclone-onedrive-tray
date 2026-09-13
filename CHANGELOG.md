@@ -51,6 +51,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   CI.
 - `docs/COMPATIBILITY.md`: the versions this was developed against, the behaviour measured on a
   real account, and an explicit list of what has never been tried.
+- `onedrive-check`, a pre-flight walk of the local tree that reports names OneDrive will refuse,
+  names rclone will silently rename on the way up, and paths that are too long. It exits non-zero
+  when something will actually fail, so it can be scripted. `onedrive-sync --resync` runs it first
+  and logs the report, and the tray has it as a menu item. The limits it uses are measured rather
+  than copied: a 383-character cloud path failed where 364 passed, so it treats 380 as the ceiling
+  instead of Microsoft's documented 400.
+- `tests/filters.sh`: one file per default rule in a fixture tree, checked against rclone.
 - `docs/FEATURE-PARITY.md`: what the Windows and macOS OneDrive clients actually do, sourced from
   Microsoft's own pages, sorted into must have, worth having and skip, with a status column for this
   project and an ordered list of the gaps. It records two things Microsoft does not document, a
@@ -63,6 +70,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The default filter rules did not work. Every pattern in `config/filters.example` was wrapped in
+  single quotes on the assumption that a shell would read the file, and rclone reads it itself, so
+  `- '*.tmp'` was a pattern beginning with an apostrophe. Temp files, swap files, editor backups
+  and `__pycache__` were synced despite the rules that were supposed to stop them. The quotes are
+  gone, and `tests/filters.sh` now runs rclone over a fixture tree so a rule that stops working
+  fails the build.
+- `- .Trash-*` never excluded anything inside `.Trash-1000`. rclone still walks into a directory it
+  excludes, so the contents need the `/**` as well. It is `- .Trash-*/**` now, which the same test
+  covers.
 - An rclone older than the flags in `BISYNC_ARGS` rejected them before opening its log file, so
   `onedrive-sync` reported `[other] see log` and pointed at a log with nothing in it. It now copies
   rclone's stderr into its own log and reports `[oldrclone]` naming the version requirement.

@@ -32,8 +32,8 @@ complexity budget on.
 | Recovery after suspend or a crash | Built into the client | yes: `--resilient --recover` plus stale-lock clearing, measured at 15 to 18 seconds |
 | Runs that cannot overlap | One process | yes: a `flock` beside the cached state, and a second run waits |
 | Sync as soon as the network returns | Built into the client | yes: NetworkManager dispatcher hook, measured under a second |
-| Not syncing files the service rejects | A fixed internal list | partial: `.tmp`, `.partial`, `.DS_Store`, `Thumbs.db`, `desktop.ini` and editor swap files are in the default filters; `~$` Office lock files, `.lock` and the reserved names are not |
-| Warning about names and paths the service will refuse | "Shorten path" and a rename action per item | no: an over-long path fails at upload and bisync retries it |
+| Not syncing files the service rejects | A fixed internal list | yes: `~$*` for Office lock files, `.lock`, temp files, swap files, editor backups, `.DS_Store`, `Thumbs.db`, `desktop.ini`. Fixed after a test showed the shipped rules had been inert, see below |
+| Warning about names and paths the service will refuse | "Shorten path" and a rename action per item | yes: `onedrive-check`, run before a resync and from the tray. It reports refused names, names rclone will rename, and over-long paths, using a measured 380-character limit rather than the documented 400 |
 | Start at login | Built into the client | yes: an autostart entry |
 
 ## Worth having
@@ -90,13 +90,13 @@ bugs in this project.
 
 | Limit | Value | What it means here |
 |---|---|---|
-| Cloud path | Under 400 characters including the file name | Longer paths fail at upload. Nothing warns first |
+| Cloud path | Under 400 characters including the file name | Documented as 400, measured to fail from 383 and pass at 364 on one personal account, so `onedrive-check` treats 380 as the limit |
 | Total sync path | 520 characters, of which the local root may be 120 | Microsoft's own client raises a sync error. Here bisync retries |
 | File name | 255 characters | Same |
 | Largest file | 250 GB | Larger files cannot be uploaded at all |
 | Recommended item count | 300,000 per account | Above it, performance degrades even for items that are not synced |
 | Invalid characters | `"` `*` `:` `<` `>` `?` `/` `\` `\|`, plus leading or trailing spaces | Microsoft's client renames them. rclone maps them to look-alike Unicode, so names change on the way up |
-| Reserved names | `.lock`, `CON`, `PRN`, `AUX`, `NUL`, `COM0` to `COM9`, `LPT0` to `LPT9`, `_vti_`, `desktop.ini`, anything starting with `~$` | Rejected by the service |
+| Reserved names | `.lock`, `CON`, `PRN`, `AUX`, `NUL`, `COM0` to `COM9`, `LPT0` to `LPT9`, `_vti_`, `desktop.ini`, anything starting with `~$` | Not uniform in practice: `CON` was refused, `.lock` uploaded and then vanished from listings, `~$` uploaded normally |
 | Files the Microsoft client never syncs | `.tmp` and `.ini` | This project syncs `.ini` on purpose, since on Linux those are usually real settings a user wants on both machines |
 | Name case | The service is case insensitive | `Hello.doc` and `hello.doc` cannot coexist |
 | Versions | OneDrive Personal creates a version on every change, and rclone cannot delete versions on Personal | Disk usage on the service can exceed the size of the folder. `no_versions` and `cleanup` are for work accounts only |
@@ -104,19 +104,26 @@ bugs in this project.
 
 ## Where the gaps are, in order
 
-If the next round of work is about parity, this is the order the gaps are worth
-closing. It is a list, not a schedule.
+The two must-haves that were missing are done. `config/filters.example` now skips
+`~$*`, `.lock` and the rest, and `onedrive-check` walks the tree before a resync.
+What is left is the worth-having column, ordered:
 
-1. `~$*` in the default filters. Office lock files are pure junk and they are the
-   most likely cause of a first-run retry loop on a folder that has ever held a
-   Word document.
-2. A pre-flight path and name check, reported in the tray before an upload is
-   attempted rather than after it fails.
-3. Copy link, since `rclone link` already exists and it removes the main reason
+1. Copy link, since `rclone link` already exists and it removes the main reason
    to open the OneDrive website.
-4. Pausing on a metered connection, read from NetworkManager, behind a setting.
-5. Bandwidth presets, written into `BISYNC_ARGS`.
-6. Naming the files in a mass-delete report.
+2. Per-file status in the file manager, which needs a Nautilus or Dolphin
+   extension rather than anything in this repository.
+3. Pausing on a metered connection, read from NetworkManager, behind a setting.
+4. Bandwidth presets, written into `BISYNC_ARGS`.
+5. Naming the files in a mass-delete report.
+
+Two things that came out of building the two above, and are worth knowing:
+
+- The shipped filters had been inert. Every pattern was wrapped in single quotes,
+  which rclone read as part of the pattern, so `.tmp`, `.swp`, `__pycache__` and
+  the rest synced anyway. `tests/filters.sh` now runs rclone over a fixture tree
+  and fails if a rule stops working.
+- `- .Trash-*` never matched a directory's contents, because rclone still walks
+  into a directory it excludes. It is `.Trash-*/**` now. The same test found it.
 
 ## Sources
 

@@ -79,13 +79,24 @@ done
 # The READMEs name the scripts and units that install.sh produces. If one is
 # renamed, the install instructions quietly stop matching reality.
 title "files the READMEs name"
-for f in bin/onedrive-sync bin/onedrive-tray bin/onedrive-watch \
+for f in bin/onedrive-sync bin/onedrive-tray bin/onedrive-watch bin/onedrive-check \
          systemd/onedrive-sync.service.in \
          systemd/onedrive-sync.timer.in systemd/onedrive-watch.service.in \
          autostart/rclone-onedrive-tray.desktop.in \
          config/config.example config/filters.example \
          setup.sh install.sh uninstall.sh; do
     check "$f exists" test -e "$f"
+done
+
+# ---------------------------------------------------------------- installer drift
+# A script that install.sh ships and uninstall.sh forgets is invisible until
+# somebody removes the package and finds a stray binary in ~/.local/bin.
+title "install.sh and uninstall.sh agree about bin/"
+for path in bin/*; do
+    [ -f "$path" ] || continue
+    name="$(basename "$path")"
+    check "install.sh installs $name" grep -q "bin/$name\"" install.sh
+    check "uninstall.sh removes $name" grep -q "BIN_DIR/$name" uninstall.sh
 done
 
 summary

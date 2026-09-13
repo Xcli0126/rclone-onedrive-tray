@@ -481,7 +481,53 @@ produced a confusing `rc=127` that looked like a `PATH` problem but wasn't.)
 
 ---
 
-## 8. General diagnosis recipes
+## 8. Names and paths OneDrive refuses
+
+**Symptom:** the sync never reaches a clean state. The log repeats the same line on every run,
+either `invalidRequest: pathIsTooLong: ... must be 400 characters or less` or a bare
+`invalidRequest: Invalid request` with no explanation, while the rest of the folder is fine.
+
+**Cause:** OneDrive rejected the item. bisync keeps the item on its retry list, so every later run
+uploads it again, fails again, and leaves the rest of the sync looking healthy.
+
+**What the service actually does.** Measured on rclone 1.75.1 against a personal account, one file
+per case, in a throwaway folder that was deleted afterwards:
+
+| Case | Result |
+|---|---|
+| 364-character cloud path | uploaded |
+| 383-character cloud path | `pathIsTooLong` |
+| a file named `CON` | `invalidRequest: Invalid request` |
+| a file named `.lock` | uploaded, then absent from every listing |
+| a file named `~$draft.docx` | uploaded normally |
+| `a:b.md`, `trailing. ` | uploaded, stored under a look-alike name |
+
+Two things follow from that table. The documented 400-character limit is not a working limit: the
+failure showed up around 380, which is why the checker uses 380. And the reserved-name list is not
+uniform. `CON` fails loudly, `.lock` uploads and then becomes invisible, and `~$` names upload
+normally even though Microsoft documents them as reserved.
+
+**Fix:** use the checker.
+
+```bash
+onedrive-check              # what will fail, what will be renamed, what is too long
+onedrive-check --quiet      # exit status only, for a script
+```
+
+It groups what it finds into refused, renamed, and too long. Renaming or moving the offending file
+locally is the whole fix; the next run uploads it. Nothing in the cloud has to change, and a name
+that was already uploaded under a look-alike stays where it is until you rename it there too.
+
+`onedrive-sync --resync` runs the checker first and writes the report to the log, because the
+resync is the run that tries to upload everything. The tray has it under "Check file names".
+
+The default filters in `config/filters.example` already skip the junk that most often causes this:
+`~$*` for Office lock files, `.lock`, temp files, swap files and editor backups. If you edited that
+file, compare it with the shipped one, and remember that changing it needs one resync.
+
+---
+
+## 9. General diagnosis recipes
 
 ```bash
 # what is the sync actually doing?

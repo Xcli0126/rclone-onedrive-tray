@@ -121,6 +121,7 @@ mkdir -p "$BIN_DIR"
 install -m 0755 "$SRC_DIR/bin/onedrive-sync" "$BIN_DIR/onedrive-sync"
 install -m 0755 "$SRC_DIR/bin/onedrive-tray" "$BIN_DIR/onedrive-tray"
 install -m 0755 "$SRC_DIR/bin/onedrive-watch" "$BIN_DIR/onedrive-watch"
+install -m 0755 "$SRC_DIR/bin/onedrive-check" "$BIN_DIR/onedrive-check"
 
 # --------------------------------------------------------------- config
 say "Installing configuration into $CONFIG_DIR"

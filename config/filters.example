@@ -8,8 +8,21 @@
 # Everything listed here is ignored on BOTH sides, so those files simply stay as
 # they are locally and in the cloud.
 #
+# Do NOT put quotes around a pattern. rclone reads this file itself; a shell is
+# never involved, so '- *.tmp' is a pattern that starts with an apostrophe and
+# matches nothing. That mistake shipped here once and made half of these rules
+# inert.
+#
 # NOTE: changing this file requires a one-off baseline rebuild:
 #     onedrive-sync --resync
+
+# --- files OneDrive and its own client will not sync --------------------------
+# Office writes "~$document.docx" next to an open document and deletes it on
+# close. Microsoft reserves names starting with ~$, and syncing a file that is
+# being written produces conflicts for nothing.
+- ~$*
+# Microsoft reserves the name .lock. Nothing legitimate is called that.
+- .lock
 
 # --- caches / indexes that are machine-specific and get regenerated -----------
 # (example: the .rag vector index of an Obsidian RAG plugin, often hundreds of MB)
@@ -24,12 +37,14 @@
 - .DS_Store
 - Thumbs.db
 - desktop.ini
-- .Trash-*
-- '*~'
-- '*.swp'
-- '*.tmp'
-- '*.partial'
+# A bare directory name does not prune anything: rclone still walks into a
+# directory it excludes, so the contents need the /** as well.
+- .Trash-*/**
+- *~
+- *.swp
+- *.tmp
+- *.partial
 
 # --- language caches ---------------------------------------------------------
-- '**/__pycache__/**'
-- '*.pyc'
+- **/__pycache__/**
+- *.pyc

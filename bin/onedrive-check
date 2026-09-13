@@ -1,0 +1,186 @@
+#!/usr/bin/env bash
+#
+# onedrive-check: report local names and paths that OneDrive will refuse or rename.
+#
+# bisync finds these the expensive way. It uploads, the service rejects the item,
+# and every later run retries the same item: the log fills with the same error and
+# the sync never reaches a clean state. One walk of the tree before the first sync
+# turns that loop into a list you can act on.
+#
+#   onedrive-check              report for the configured pair
+#   onedrive-check --quiet      no output, exit status only
+#   onedrive-check --max N      show at most N entries per group (default 20)
+#
+# Exit 0 when nothing will fail, 1 when something will, 2 on a usage error. A name
+# that will be renamed rather than rejected does not change the exit status.
+#
+# What counts as a failure was measured, not assumed. The numbers and how they
+# were taken are in docs/TROUBLESHOOTING.md.
+
+set -uo pipefail
+
+APP="onedrive-check"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/rclone-onedrive-tray"
+CONFIG_FILE="$CONFIG_DIR/config"
+
+QUIET=0
+MAX_SHOWN=20
+
+usage() { sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; }
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --quiet|-q) QUIET=1; shift ;;
+        --max)      MAX_SHOWN="${2:?--max needs a number}"; shift 2 ;;
+        -h|--help)  usage; exit 0 ;;
+        *)          echo "$APP: unknown option: $1" >&2; usage >&2; exit 2 ;;
+    esac
+done
+
+die() { printf '%s: %s\n' "$APP" "$*" >&2; exit 2; }
+
+[ -f "$CONFIG_FILE" ] || die "config not found: $CONFIG_FILE (run install.sh first)"
+# shellcheck source=/dev/null
+. "$CONFIG_FILE"
+
+: "${LOCAL:?LOCAL is not set in $CONFIG_FILE}"
+: "${REMOTE:?REMOTE is not set in $CONFIG_FILE}"
+
+[ -d "$LOCAL" ] || die "sync directory not found: $LOCAL"
+
+REMOTE_PATH="${REMOTE#*:}"
+[ "$REMOTE_PATH" = "$REMOTE" ] && REMOTE_PATH=""
+
+# Measured against a personal account on rclone 1.75.1: a cloud path of 364
+# characters uploaded, one of 383 came back pathIsTooLong. Microsoft documents
+# 400, so the service counts something a little longer than the path itself and
+# the documented number is not a working limit. 380 sits below every failure seen
+# and leaves room for a file that gets renamed.
+LIMIT_CLOUD=380
+# Microsoft's documented total: a local path of up to 400 plus a root folder of
+# up to 120. Only reachable with a long LOCAL, but nothing else catches it.
+LIMIT_TOTAL=520
+# Documented, not measured. No 255-character name can be created on ext4 either,
+# so this is a guard rather than a case that happens.
+LIMIT_NAME=255
+
+long_paths=0
+renamed=0
+rejected=0
+declare -a long_list=() renamed_list=() rejected_list=()
+declare -A seen_lower=()
+
+# Microsoft reserves the Windows device names, and the one that was tried was
+# refused: "CON: Failed to copy: invalidRequest: Invalid request".
+is_reserved_name() {
+    case "${1,,}" in
+        con|prn|aux|nul|com[0-9]|lpt[0-9]) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+add() {  # add <group> <entry>
+    case "$1" in
+        long)     long_paths=$((long_paths + 1)); long_list+=("$2") ;;
+        renamed)  renamed=$((renamed + 1));       renamed_list+=("$2") ;;
+        rejected) rejected=$((rejected + 1));     rejected_list+=("$2") ;;
+    esac
+}
+
+while IFS= read -r -d '' path; do
+    rel="${path#"$LOCAL"/}"
+    name="${rel##*/}"
+
+    # --- an over-long directory is one problem, not one per file inside it ----
+    # find visits a directory before its contents, so the ancestor has already
+    # been reported by the time its children are considered.
+    parent_over=0
+    parent="${path%/*}"
+    if [ "$parent" != "$path" ] && [ "$parent" != "$LOCAL" ]; then
+        prel="${parent#"$LOCAL"/}"
+        pcloud=$(( ${#REMOTE_PATH} + ${#prel} ))
+        [ -n "$REMOTE_PATH" ] && pcloud=$((pcloud + 1))
+        if [ "$pcloud" -ge "$LIMIT_CLOUD" ] ||
+           [ $(( ${#LOCAL} + ${#prel} + 1 )) -ge "$LIMIT_TOTAL" ]; then
+            parent_over=1
+        fi
+    fi
+
+    if [ "$parent_over" -eq 0 ]; then
+        cloud_len=$(( ${#REMOTE_PATH} + ${#rel} ))
+        [ -n "$REMOTE_PATH" ] && cloud_len=$((cloud_len + 1))
+        if [ "$cloud_len" -ge "$LIMIT_CLOUD" ]; then
+            add long "cloud path $cloud_len chars: $rel"
+        elif [ $(( ${#LOCAL} + ${#rel} + 1 )) -ge "$LIMIT_TOTAL" ]; then
+            add long "local path $(( ${#LOCAL} + ${#rel} + 1 )) chars: $rel"
+        fi
+    fi
+
+    # --- what makes the service refuse the item -------------------------------
+    if is_reserved_name "$name"; then
+        add rejected "reserved name: $rel"
+    fi
+    if [ "${#name}" -ge "$LIMIT_NAME" ]; then
+        add long "name is ${#name} chars: $rel"
+    fi
+
+    # --- names the service cannot tell apart ---------------------------------
+    # OneDrive is case insensitive, so these two cannot both exist there.
+    dir="${rel%/*}"; [ "$dir" = "$rel" ] && dir=""
+    key="$dir/${name,,}"
+    if [ -n "${seen_lower[$key]:-}" ]; then
+        add rejected "$rel clashes with ${seen_lower[$key]} (OneDrive ignores case)"
+    else
+        seen_lower[$key]="$name"
+    fi
+
+    # --- what rclone will silently rename on the way up ----------------------
+    # Microsoft does not allow these, and rclone's encoding replaces them with
+    # look-alike characters. The upload succeeds and the cloud name then differs
+    # from the local one, which is harder to debug than a failure would be.
+    IFS='/' read -r -a parts <<<"$rel"
+    bad_part=""
+    for part in "${parts[@]}"; do
+        case "$part" in
+            ' '*|*' ') bad_part="space at the start or end of '$part'" ;;
+            *.)        bad_part="period at the end of '$part'" ;;
+            *)         if printf '%s' "$part" | grep -qE '["*:<>?\\|]'; then
+                           bad_part="'\"*:<>?\\|' in '$part'"
+                       fi ;;
+        esac
+        [ -n "$bad_part" ] && break
+    done
+    [ -n "$bad_part" ] && add renamed "$rel -- $bad_part"
+done < <(find "$LOCAL" -mindepth 1 -print0 2>/dev/null)
+
+if [ "$QUIET" -eq 0 ]; then
+    printf '%s: %s against %s\n\n' "$APP" "$LOCAL" "$REMOTE"
+
+    print_group() {  # print_group <heading> <count> <entries...>
+        local heading="$1" count="$2"; shift 2
+        printf '  %s (%d)\n' "$heading" "$count"
+        if [ "$count" -eq 0 ]; then printf '\n'; return; fi
+        local shown=0
+        for entry in "$@"; do
+            [ "$shown" -ge "$MAX_SHOWN" ] && break
+            printf '    %s\n' "$entry"
+            shown=$((shown + 1))
+        done
+        [ "$count" -gt "$MAX_SHOWN" ] && printf '    ... and %d more\n' "$((count - MAX_SHOWN))"
+        printf '\n'
+    }
+
+    print_group "OneDrive will refuse these" "$rejected" ${rejected_list[@]+"${rejected_list[@]}"}
+    print_group "OneDrive will rename these" "$renamed"  ${renamed_list[@]+"${renamed_list[@]}"}
+    print_group "These paths are too long"   "$long_paths" ${long_list[@]+"${long_list[@]}"}
+
+    if [ $((rejected + renamed + long_paths)) -eq 0 ]; then
+        printf '  nothing to fix. Names and paths are within what OneDrive accepts.\n'
+    else
+        printf '  %d to look at. Limits and measurements: docs/TROUBLESHOOTING.md\n' \
+            "$((rejected + renamed + long_paths))"
+    fi
+fi
+
+[ $((rejected + long_paths)) -eq 0 ] || exit 1
+exit 0

@@ -138,7 +138,7 @@ interrupted, so it stays a decision you make rather than a side effect of answer
 Everything lands in your home directory, and neither script calls `sudo`.
 
 ```
-~/.local/bin/onedrive-sync, onedrive-tray, onedrive-watch
+~/.local/bin/onedrive-sync, onedrive-tray, onedrive-watch, onedrive-check
 ~/.config/rclone-onedrive-tray/config, filters.txt
 ~/.config/systemd/user/onedrive-sync.{service,timer}
 ~/.config/systemd/user/onedrive-sync-watch.service
@@ -224,6 +224,7 @@ Pause automatic sync ▸   30 minutes
                          Resume now
 ☑ Start tray at login
 ────────────────────────────────
+Check file names
 Rebuild sync baseline (resync)…
 Quit
 ```
@@ -243,11 +244,35 @@ From a terminal:
 ```bash
 onedrive-sync                 # one incremental sync (3 attempts)
 onedrive-sync --resync        # rebuild the baseline
+onedrive-check                # names and paths OneDrive will refuse
 systemctl --user list-timers onedrive-sync.timer
 systemctl --user start onedrive-sync.service     # sync now
 journalctl --user -u onedrive-sync.service -f
 tail -f ~/.cache/rclone-onedrive-tray/sync.log
 ```
+
+### Names OneDrive will not take
+
+OneDrive refuses some names outright and quietly renames others, and bisync finds that out the
+expensive way: it uploads everything else, fails on the one item, and retries it on every run
+from then on. `onedrive-check` walks the local tree and says what is wrong before that happens,
+grouped into what will be refused, what rclone will rename on the way up, and what is too long:
+
+```
+onedrive-check: /home/you/OneDrive/Vault against onedrive:Vault
+
+  OneDrive will refuse these (1)
+    reserved name: Notes/CON
+  OneDrive will rename these (1)
+    Notes/plan:a.md -- '"*:<>?\|' in 'plan:a.md'
+  These paths are too long (1)
+    cloud path 412 chars: Notes/very/deep/...
+```
+
+It exits non-zero when something will actually fail, so it can go in a script. `onedrive-sync
+--resync` runs it first and logs the report, because that is the run that uploads everything. The
+tray has it as a menu item. The limits and how they were measured are in
+[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
 
 ### Syncing sooner after the network comes back
 
@@ -313,7 +338,8 @@ the one moment the notification matters.
   takes its full size. Unticking a folder in the tray and deleting the local copy
   is the way to reclaim space.
 - No per-file status in the file manager, no share links, no version history
-  browser, no metered-network or battery-saver pause. What the Windows and macOS
+  browser, no metered-network or battery-saver pause. `onedrive-check` reports
+  what OneDrive will refuse, but nothing stops you creating such a file. What the Windows and macOS
   clients do, which parts of it are worth having, and which are deliberately
   skipped are all written up in
   [docs/FEATURE-PARITY.md](docs/FEATURE-PARITY.md).
@@ -365,6 +391,7 @@ Two suites, neither of which needs an rclone remote:
 ```bash
 tests/dependency-matrix.sh      # hides one dependency at a time
 tests/install-flow.sh           # the documented install path, in a sandbox
+tests/filters.sh                # the default filters still filter
 tests/docs.sh                   # internal links, writing rules, promised files
 ```
 
