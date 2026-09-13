@@ -122,6 +122,10 @@ rclone lsd onedrive:     # 应该能列出你的文件
 onedrive-sync --resync   # 建立基线，会把云端全部拉下来
 ```
 
+登录这一步本项目没有包进来。账号归 rclone 管，也只能由 rclone 管，所以先用 rclone 登进去，
+再回来跑安装。[docs/SIGNING-IN.md](docs/SIGNING-IN.md) 写了浏览器授权会依次问什么、工作或学校
+账号需要额外准备什么、以及机器上没有浏览器时怎么办。
+
 ---
 
 ## 配置
@@ -297,6 +301,7 @@ watch-issues.sh --forget    # 清空记录，下次全部重报
 ```bash
 tests/dependency-matrix.sh      # 每次只藏起来一个依赖
 tests/install-flow.sh           # 在沙箱里走一遍文档里的安装流程
+tests/docs.sh                   # 文档互链、写字规矩、文档里点名的文件
 ```
 
 两者都会把 `HOME` 和各个 XDG 目录指向临时目录，用替身脚本顶掉 rclone 和 systemctl，并使用专门的

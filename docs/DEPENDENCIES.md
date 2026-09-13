@@ -42,7 +42,8 @@ some distributions is too old to sync safely.
 
 An authorised rclone remote. Run `rclone config` once and confirm with
 `rclone lsd yourremote:`. Without it there is nothing to sync, and the log says
-so in plain terms.
+so in plain terms. The walkthrough, including work accounts and machines with no
+browser, is in [SIGNING-IN.md](SIGNING-IN.md).
 
 ## Checking your machine
 

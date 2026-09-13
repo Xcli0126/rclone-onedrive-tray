@@ -12,9 +12,10 @@ Two scripts, both safe to run on a working setup:
 ```bash
 tests/dependency-matrix.sh      # 21 cases: one missing dependency at a time
 tests/install-flow.sh           # 47 cases: the documented install path, end to end
+tests/docs.sh                   # 14 cases: the links and rules the docs depend on
 ```
 
-Add `--verbose` to either one to see each command and its output.
+Add `--verbose` to any of them to see each command and its output.
 
 `dependency-matrix.sh` hides a single dependency and checks that what happens
 matches what the documentation promises: the tray must name the apt package it
@@ -23,6 +24,10 @@ must warn about an rclone that is too old. Missing typelibs are simulated by a
 `sitecustomize.py` on `PYTHONPATH`, missing commands by a `PATH` built from
 symlinks that deliberately leaves them out.
 
+`docs.sh` checks what the documentation claims about itself: every relative link
+between the markdown files resolves, no page has picked up an em dash, and the
+scripts and unit templates the READMEs name are still in the tree.
+
 `install-flow.sh` runs `setup.sh --yes` and `uninstall.sh` for real, with `HOME`
 and every XDG directory pointed into a temporary tree. It checks the files
 README says appear, that `systemd-analyze verify` accepts the generated units,
@@ -30,7 +35,7 @@ that the installed wrapper hands rclone the documented argument list, that two
 overlapping runs serialise on the lock, and that the watcher asks systemd to
 start a sync after a local edit.
 
-Neither suite touches a live installation. Both replace rclone and systemctl with
+None of them touch a live installation. Both replace rclone and systemctl with
 stubs, use a probe unit name instead of `onedrive-sync`, and remove their
 temporary tree on exit.
 
@@ -116,6 +121,10 @@ treat it as unknown rather than supported.
 - Suspend and resume. The dispatcher hook covers the reconnect, but hibernate
   with a sync in flight has not been reproduced.
 - More than one account or more than one config at a time.
+- Work and school accounts, and installing on a machine with no browser. Only a
+  personal account on a desktop has been authorised here. The other routes in
+  [SIGNING-IN.md](SIGNING-IN.md) are rclone's documented ones, not ones this
+  project has watched work.
 
 ## If your machine is not in the table
 

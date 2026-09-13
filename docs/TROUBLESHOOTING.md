@@ -3,6 +3,9 @@
 Everything below is a failure mode that was actually hit and diagnosed while building this.
 Symptoms first, then cause, then fix.
 
+Signing in for the first time is not a failure mode, so it has its own page:
+[SIGNING-IN.md](SIGNING-IN.md).
+
 ---
 
 ## 1. Authorisation

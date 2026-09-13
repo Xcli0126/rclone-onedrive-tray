@@ -17,14 +17,15 @@ jobs:
           shellcheck setup.sh install.sh uninstall.sh \
                      bin/onedrive-sync bin/onedrive-watch \
                      tests/dependency-matrix.sh tests/install-flow.sh \
-                     tests/lib/harness.sh \
+                     tests/docs.sh tests/lib/harness.sh \
                      extras/networkmanager-dispatcher.sh \
                      extras/watch-issues.sh extras/install-issue-watch.sh
 
       - name: Shell syntax
         run: |
           for f in setup.sh install.sh uninstall.sh bin/onedrive-sync bin/onedrive-watch \
-                   tests/dependency-matrix.sh tests/install-flow.sh tests/lib/harness.sh \
+                   tests/dependency-matrix.sh tests/install-flow.sh tests/docs.sh \
+                   tests/lib/harness.sh \
                    extras/watch-issues.sh extras/install-issue-watch.sh; do
             bash -n "$f"
           done
@@ -70,3 +71,6 @@ jobs:
 
       - name: Install flow
         run: tests/install-flow.sh --verbose
+
+      - name: Documentation
+        run: tests/docs.sh --verbose

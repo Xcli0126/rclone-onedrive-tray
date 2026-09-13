@@ -154,6 +154,11 @@ rclone lsd onedrive:     # should list your files
 onedrive-sync --resync   # build the baseline; downloads everything
 ```
 
+Signing in is the one step this project does not wrap, because rclone owns it and
+rclone has to own it. [docs/SIGNING-IN.md](docs/SIGNING-IN.md) walks through what
+the browser flow asks, what a work account needs, and what to do on a machine
+with no browser.
+
 ---
 
 ## Configuration
@@ -352,6 +357,7 @@ Two suites, neither of which needs an rclone remote:
 ```bash
 tests/dependency-matrix.sh      # hides one dependency at a time
 tests/install-flow.sh           # the documented install path, in a sandbox
+tests/docs.sh                   # internal links, writing rules, promised files
 ```
 
 Both point `HOME` and the XDG directories at a temporary tree, replace rclone and systemctl

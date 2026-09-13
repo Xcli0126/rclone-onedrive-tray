@@ -46,9 +46,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tests/dependency-matrix.sh` hides one dependency at a time and checks that the behaviour matches
   what `docs/DEPENDENCIES.md` promises. `tests/install-flow.sh` runs the documented install path,
   uninstall included, inside a sandbox and checks the files and the rclone command line it
-  produces. Both are wired into CI.
+  produces. A third, `tests/docs.sh`, checks that the internal links resolve, that no page has
+  picked up an em dash, and that the files the READMEs name still exist. All three are wired into
+  CI.
 - `docs/COMPATIBILITY.md`: the versions this was developed against, the behaviour measured on a
   real account, and an explicit list of what has never been tried.
+- `docs/SIGNING-IN.md`, for the one step this project does not wrap. Signing in belongs to rclone,
+  so the page covers what the browser flow asks, how to pick the right drive when an account has
+  more than one, the `ObjectHandle is Invalid` trap that follows a wrong pick, `rclone authorize`
+  for a machine with no browser, work and school accounts, and the 90-day token expiry. `setup.sh`
+  points at it when it finds no remote, and so does `docs/DEPENDENCIES.md`.
 
 ### Fixed
 

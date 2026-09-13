@@ -95,13 +95,15 @@ if [ -z "$REMOTES" ]; then
     echo
     warn "No rclone remotes are configured yet."
     echo "    Creating one needs a browser to authorise your Microsoft account."
+    echo "    Step by step, including work accounts and machines without a browser:"
+    echo "        docs/SIGNING-IN.md"
     name="$(ask 'Name for the new remote' 'onedrive')"
     say "Running: rclone config create $name onedrive"
     echo "    (rclone will open your browser; complete the sign-in there)"
     if rclone config create "$name" onedrive; then
         REMOTES="$(rclone listremotes 2>/dev/null)"
     else
-        die "could not create the remote; run 'rclone config' by hand and re-run this script"
+        die "could not create the remote; see docs/SIGNING-IN.md, or run 'rclone config' by hand and re-run this script"
     fi
 fi
 
