@@ -64,16 +64,40 @@ Measured against a real OneDrive account, roughly 700 files:
 | Files reconciled at the time of writing | 708, no differences reported by `rclone check` |
 | Timer interval | 5 minutes, and a run cannot overlap the next |
 
+## Verified in CI
+
+Every push runs both suites on a GitHub runner. That runner is a second
+environment rather than a repeat of the first:
+
+| Component | Version |
+|---|---|
+| Ubuntu | 24.04.5 LTS, x86_64 |
+| Kernel | 6.17.0-1022-azure |
+| systemd | 255 |
+| bash | 5.2.21 |
+| python3 | 3.12.3 |
+| rclone | 1.60.1, the distribution build |
+
+systemd 255 is four major versions behind the development machine, python3 is
+3.12 rather than 3.14, and bash is 5.2 rather than 5.3, so a green run there
+does say something the local run cannot.
+
+The runner's rclone being 1.60.1 helps in one direction only. `install.sh`
+warns about that version, which is one of the cases the matrix checks. The sync
+itself is stubbed in both suites, so nothing here proves that 1.60.1 syncs. It
+does not, and `docs/DEPENDENCIES.md` explains what fails and why.
+
 ## Not verified
 
 Everything below is untested. It may well work. Nobody has watched it work, so
 treat it as unknown rather than supported.
 
-- Distributions other than Ubuntu. Debian, Fedora, Arch and openSUSE ship the
-  same pieces under different package names, and the installer's apt line will
-  not help you find them.
-- Desktop shells other than GNOME. KDE, XFCE and MATE have their own tray
-  protocols and their own ways of hiding icons.
+- Distributions other than Ubuntu, and Ubuntu releases other than 24.04 and
+  26.04. Debian, Fedora, Arch and openSUSE ship the same pieces under different
+  package names, and the installer's apt line will not help you find them.
+- Desktop shells other than GNOME, and GNOME versions other than 50. CI has no
+  desktop session, so there the tray is only exercised as far as importing its
+  bindings; that it draws a working panel icon has been seen on one machine.
 - X11. Only a Wayland session has been used, and the tray draws its own icons
   through cairo, which is where a difference would show up first.
 - macOS, Windows and WSL. The scripts assume systemd user units and POSIX

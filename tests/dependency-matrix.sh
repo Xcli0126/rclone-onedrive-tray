@@ -176,8 +176,11 @@ run "no Notify typelib: warns but installs anyway" 0 "Optional dependencies" \
 # The distribution rclone is frequently below 1.65, so the installer has to say
 # so instead of letting every later sync die on an unknown flag.
 mkdir -p "$WORK/oldrclone"
-printf '#!/bin/bash\n[ "$1" = version ] && echo "rclone v1.60.1"\nexit 0\n' \
-    > "$WORK/oldrclone/rclone"
+cat > "$WORK/oldrclone/rclone" <<'EOF'
+#!/bin/bash
+[ "$1" = version ] && echo "rclone v1.60.1"
+exit 0
+EOF
 chmod +x "$WORK/oldrclone/rclone"
 run "rclone older than 1.65: installs, but warns about recovery" 0 "older than 1.65" \
     env PATH="$WORK/oldrclone:$STUB:$PATH" XDG_CONFIG_HOME="$WORK/i5" \
