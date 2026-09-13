@@ -79,9 +79,11 @@ run "no pycairo: exits and names pycairo" 1 "pycairo" \
 run "no Notify typelib: still loads, notifications off" 0 "LOADED" \
     env PYTHONPATH="$SHIM" HIDE_TYPELIB=Notify python3 "$LOADER" "$SRC_DIR/bin/onedrive-tray"
 # GTK aborts with a core dump when there is no display, so the tray has to say
-# what it is before it gets that far.
+# what it is before it gets that far. Loading the module does not reach that
+# code, which is deliberate: the dependency checks above have to keep working on
+# a headless machine.
 run "no display: exits and says it needs a session" 1 "graphical session" \
-    env -u DISPLAY -u WAYLAND_DISPLAY python3 "$LOADER" "$SRC_DIR/bin/onedrive-tray"
+    env -u DISPLAY -u WAYLAND_DISPLAY python3 "$SRC_DIR/bin/onedrive-tray"
 # A display has to be set to get past the guard above, but the lock is taken
 # before GTK connects to it, so nothing here opens a window.
 run "unusable TMPDIR: says so instead of already running" 1 "Could not create the lock file" \

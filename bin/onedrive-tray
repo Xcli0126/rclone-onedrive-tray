@@ -44,14 +44,6 @@ def _die(problem, fix):
 APT = ("sudo apt install python3-gi python3-cairo gir1.2-gtk-3.0 "
        "gir1.2-ayatanaappindicator3-0.1 gir1.2-notify-0.7")
 
-# GTK does not fail politely without a display: it aborts the process and leaves
-# a core dump, which on a server looks like a crash rather than a missing desktop.
-if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
-    _die("this is the tray icon, and it needs a graphical session.",
-         "There is no DISPLAY or WAYLAND_DISPLAY here.\n"
-         "On a server or over SSH, use onedrive-sync and the systemd timer:\n"
-         "    onedrive-sync --resync && systemctl --user enable --now onedrive-sync.timer")
-
 try:
     import gi
 except ImportError:
@@ -1085,6 +1077,20 @@ def acquire_lock():
 
 
 def main():
+    # Checked here rather than at import time, so a headless machine still gets
+    # the dependency report first: which package is missing is the more useful
+    # answer when both are wrong. GTK does not fail politely in this situation,
+    # it aborts the process and leaves a core dump.
+    if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        print("rclone-onedrive-tray: this is the tray icon, and it needs a "
+              "graphical session.\n"
+              "    There is no DISPLAY or WAYLAND_DISPLAY here.\n"
+              "    On a server or over SSH, use onedrive-sync and the timer:\n"
+              "        onedrive-sync --resync && "
+              "systemctl --user enable --now onedrive-sync.timer",
+              file=sys.stderr)
+        return 1
+
     try:
         lock = acquire_lock()
     except OSError as exc:
