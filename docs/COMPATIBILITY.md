@@ -12,7 +12,7 @@ Four scripts, none of which needs an rclone remote and all safe on a working set
 ```bash
 tests/dependency-matrix.sh      # 24 cases: one missing dependency at a time
 tests/install-flow.sh           # 63 cases: the documented install path, end to end
-tests/filters.sh                # 19 cases: the default filters still filter
+tests/filters.sh                # 27 cases: the default filters still filter, plus the checker
 tests/docs.sh                   # 27 cases: the links and rules the docs depend on
 ```
 
@@ -27,7 +27,11 @@ symlinks that deliberately leaves them out.
 
 `filters.sh` runs rclone over a fixture tree containing one file per default
 rule and checks that each one is really excluded and that the look-alike
-legitimate files survive. It exists because every rule in the shipped filter file
+legitimate files survive. It also carries the regression cases for
+`onedrive-check`: a `LOCAL` with a trailing slash, a `--max` that is not a
+positive integer, a newline inside a name, an unreadable directory, the reserved
+name stems, and the rename classes rclone applies that Microsoft does not
+document. It exists because every rule in the shipped filter file
 was inert for a while: the patterns were quoted, which rclone reads as part of
 the pattern. `docs.sh` checks what the documentation claims about itself: every
 relative link between the markdown files resolves, no page has picked up an em

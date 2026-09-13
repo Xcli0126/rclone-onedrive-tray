@@ -33,17 +33,41 @@ trap 'rm -rf "$WORK"' EXIT
 echo "default filters, against rclone $(rclone version | head -1 | awk '{print $2}')"
 
 # ---------------------------------------------------------------- the shape
+# A pattern is read verbatim, so a quote becomes part of it. The quote can sit
+# anywhere in the rule, not only right after the sign: a check that looked at
+# one position passed a file with "- *.bak'" appended.
+rules_are_unquoted() {
+    ! grep -qE "^[[:space:]]*[+-][[:space:]]+.*['\"]" "$1"
+}
+
 title "the file itself"
-# A pattern is read verbatim, so a quote becomes part of it. Checked directly as
-# well as functionally, because a pattern that happens to match nothing either
-# way would slip through otherwise.
-if grep -nE "^[[:space:]]*[+-][[:space:]]+['\"]" "$FILTERS"; then
-    bad "these rules are quoted, and rclone will treat the quote as part of the pattern"
-else
+# Checked directly as well as functionally, because a pattern that happens to
+# match nothing either way would slip through otherwise.
+if rules_are_unquoted "$FILTERS"; then
     ok "no rule is quoted"
+else
+    bad "these rules are quoted, and rclone will treat the quote as part of the pattern"
+    grep -nE "^[[:space:]]*[+-][[:space:]]+.*['\"]" "$FILTERS" || true
 fi
 check "the rules do not include a whitespace-only line" \
     grep -qvE '^[[:space:]]*$' "$FILTERS"
+
+# The check itself has to fail on a quoted rule, or it proves nothing. Both
+# positions are exercised: at the end of the pattern and in the middle of it.
+QUOTED="$WORK/filters.quoted"
+cp "$FILTERS" "$QUOTED"
+printf -- "- *.bak'\n" >> "$QUOTED"
+if rules_are_unquoted "$QUOTED"; then
+    bad "the quote check missed a rule with a quote at the end"
+else
+    ok "the quote check catches a trailing quote"
+fi
+printf -- "- mid\"dle.tmp\n" >> "$QUOTED"
+if rules_are_unquoted "$QUOTED"; then
+    bad "the quote check missed a double quote mid-pattern"
+else
+    ok "the quote check catches a quote inside a rule"
+fi
 
 # ---------------------------------------------------------------- the fixture
 title "a tree full of things that should not sync"
@@ -110,5 +134,43 @@ kept notes/plain.md
 kept notes/not-tmp.txt
 kept .obsidian/app.json
 kept notes/keep.py
+
+# ---------------------------------------------------------------- the checker
+# bin/onedrive-check is the pre-flight that says which names the filters did not
+# catch. These are the regressions an adversarial pass found in it: a trailing
+# slash on LOCAL used to suppress every "too long" report, and --max used to
+# reach the arithmetic with whatever it was handed.
+title "onedrive-check"
+CHECKER="$SRC_DIR/bin/onedrive-check"
+CHK_CFG="$WORK/checkcfg/rclone-onedrive-tray"
+CHK_TREE="$WORK/checktree"
+mkdir -p "$CHK_CFG" "$CHK_TREE"
+: > "$CHK_TREE/plain.md"
+
+# A 400-character remote path puts every entry past the measured 380 limit, so
+# the trailing slash on LOCAL is the only thing that can hide the report.
+CHK_REMOTE="onedrive:$(printf 'r%.0s' $(seq 1 400))"
+printf 'LOCAL="%s/"\nREMOTE="%s"\n' "$CHK_TREE" "$CHK_REMOTE" > "$CHK_CFG/config"
+run "a trailing slash on LOCAL still reports over-long paths" 1 "too long" \
+    env XDG_CONFIG_HOME="$WORK/checkcfg" "$CHECKER"
+printf 'LOCAL="%s"\nREMOTE="%s"\n' "$CHK_TREE" "$CHK_REMOTE" > "$CHK_CFG/config"
+run "the same LOCAL without the slash gives the same verdict" 1 "too long" \
+    env XDG_CONFIG_HOME="$WORK/checkcfg" "$CHECKER"
+
+# --max is a positive integer or a usage error, and a usage error is one line.
+printf 'LOCAL="%s"\nREMOTE="onedrive:Vault"\n' "$CHK_TREE" > "$CHK_CFG/config"
+run "--max refuses a non-number" 2 "positive integer" \
+    env XDG_CONFIG_HOME="$WORK/checkcfg" "$CHECKER" --max abc
+run "--max refuses a negative number" 2 "positive integer" \
+    env XDG_CONFIG_HOME="$WORK/checkcfg" "$CHECKER" --max -3
+
+# The reserved-name list is the stem before the first dot, not the whole name.
+: > "$CHK_TREE/CON.txt"
+run "CON.txt is refused like CON" 1 "reserved name: CON.txt" \
+    env XDG_CONFIG_HOME="$WORK/checkcfg" "$CHECKER"
+rm -f "$CHK_TREE/CON.txt"
+: > "$CHK_TREE/a:b.md"
+run "a renamed name does not fail the check" 0 "will rename these" \
+    env XDG_CONFIG_HOME="$WORK/checkcfg" "$CHECKER"
 
 summary

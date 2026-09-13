@@ -12,7 +12,9 @@
 #   onedrive-check --max N      show at most N entries per group (default 20)
 #
 # Exit 0 when nothing will fail, 1 when something will, 2 on a usage error. A name
-# that will be renamed rather than rejected does not change the exit status.
+# that will be renamed rather than rejected does not change the exit status. A
+# directory find could not read leaves the walk incomplete and also exits 1: an
+# incomplete report is not a clean one, and the output says so.
 #
 # What counts as a failure was measured, not assumed. The numbers and how they
 # were taken are in docs/TROUBLESHOOTING.md.
@@ -30,23 +32,44 @@ MAX_SHOWN=20
 # truncates the help as soon as the comment grows.
 usage() { sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'; }
 
+die() { printf '%s: %s\n' "$APP" "$*" >&2; exit 2; }
+
 while [ $# -gt 0 ]; do
     case "$1" in
         --quiet|-q) QUIET=1; shift ;;
-        --max)      MAX_SHOWN="${2:?--max needs a number}"; shift 2 ;;
+        --max)
+            # Anything that is not a positive integer is a usage error, not a
+            # value to feed to print_group: the old form let "--max abc" reach
+            # the arithmetic and flood stderr instead of failing once.
+            [ $# -ge 2 ] || die "--max needs a positive integer"
+            case "$2" in
+                ''|*[!0-9]*) die "--max needs a positive integer, got '$2'" ;;
+            esac
+            [ "$2" -gt 0 ] || die "--max needs a positive integer, got '$2'"
+            MAX_SHOWN="$2"; shift 2 ;;
         -h|--help)  usage; exit 0 ;;
         *)          echo "$APP: unknown option: $1" >&2; usage >&2; exit 2 ;;
     esac
 done
 
-die() { printf '%s: %s\n' "$APP" "$*" >&2; exit 2; }
-
 [ -f "$CONFIG_FILE" ] || die "config not found: $CONFIG_FILE (run install.sh first)"
 # shellcheck source=/dev/null
 . "$CONFIG_FILE"
 
-: "${LOCAL:?LOCAL is not set in $CONFIG_FILE}"
-: "${REMOTE:?REMOTE is not set in $CONFIG_FILE}"
+# A missing variable used to reach the reader as a raw bash error from ":?LOCAL",
+# which looks like a bug in this script rather than the configuration fault it is.
+[ -n "${LOCAL:-}" ]  || die "LOCAL is not set in $CONFIG_FILE"
+[ -n "${REMOTE:-}" ] || die "REMOTE is not set in $CONFIG_FILE"
+
+# Strip trailing slashes before anything compares against LOCAL. The strips below
+# are literal matches, so "/x/y/" matched nothing, every rel stayed absolute, and
+# every parent then looked over-long, which suppressed every report. "/" itself
+# has to keep working.
+while [ "$LOCAL" != "/" ] && [ "${LOCAL%/}" != "$LOCAL" ]; do
+    LOCAL="${LOCAL%/}"
+done
+LOCAL_SLASH="$LOCAL/"
+[ "$LOCAL" = "/" ] && LOCAL_SLASH="/"
 
 [ -d "$LOCAL" ] || die "sync directory not found: $LOCAL"
 
@@ -71,26 +94,83 @@ renamed=0
 rejected=0
 declare -a long_list=() renamed_list=() rejected_list=()
 declare -A seen_lower=()
+# Every path that landed in any group, so the closing line can count distinct
+# paths: one file that is both renamed and over-long is one thing to look at.
+declare -A reported=()
 
 # Microsoft reserves the Windows device names, and the one that was tried was
-# refused: "CON: Failed to copy: invalidRequest: Invalid request".
+# refused: "CON: Failed to copy: invalidRequest: Invalid request". Windows also
+# ignores everything after the first dot, so CON.txt is the same name as CON.
 is_reserved_name() {
-    case "${1,,}" in
+    local stem="${1%%.*}"
+    case "${stem,,}" in
         con|prn|aux|nul|com[0-9]|lpt[0-9]) return 0 ;;
         *) return 1 ;;
     esac
 }
 
-add() {  # add <group> <entry>
-    case "$1" in
-        long)     long_paths=$((long_paths + 1)); long_list+=("$2") ;;
-        renamed)  renamed=$((renamed + 1));       renamed_list+=("$2") ;;
-        rejected) rejected=$((rejected + 1));     rejected_list+=("$2") ;;
-    esac
+# 0 when $1 is valid UTF-8, 1 otherwise, byte by byte. The check runs under a C
+# locale on purpose so it does not depend on the caller's locale, and the caller
+# only reaches it for a name that already holds a byte outside printable ASCII,
+# so an all-ASCII tree never pays for the loop.
+is_valid_utf8() {
+    local LC_ALL=C
+    local s="$1"
+    local i=0 n=${#s} b c rest lo hi
+    while [ "$i" -lt "$n" ]; do
+        printf -v b '%d' "'${s:i:1}"
+        if [ "$b" -lt 128 ]; then
+            i=$((i + 1)); continue
+        elif [ "$b" -ge 194 ] && [ "$b" -le 223 ]; then
+            rest=1; lo=128; hi=191
+        elif [ "$b" -ge 224 ] && [ "$b" -le 239 ]; then
+            rest=2; lo=128; hi=191
+            [ "$b" -eq 224 ] && lo=160
+            [ "$b" -eq 237 ] && hi=159
+        elif [ "$b" -ge 240 ] && [ "$b" -le 244 ]; then
+            rest=3; lo=128; hi=191
+            [ "$b" -eq 240 ] && lo=144
+            [ "$b" -eq 244 ] && hi=143
+        else
+            return 1
+        fi
+        i=$((i + 1))
+        [ "$i" -lt "$n" ] || return 1
+        printf -v c '%d' "'${s:i:1}"
+        if [ "$c" -lt "$lo" ] || [ "$c" -gt "$hi" ]; then
+            return 1
+        fi
+        i=$((i + 1))
+        while [ "$rest" -gt 1 ]; do
+            [ "$i" -lt "$n" ] || return 1
+            printf -v c '%d' "'${s:i:1}"
+            if [ "$c" -lt 128 ] || [ "$c" -gt 191 ]; then
+                return 1
+            fi
+            i=$((i + 1))
+            rest=$((rest - 1))
+        done
+    done
+    return 0
 }
 
+add() {  # add <group> <path> <entry>
+    case "$1" in
+        long)     long_paths=$((long_paths + 1)); long_list+=("$3") ;;
+        renamed)  renamed=$((renamed + 1));       renamed_list+=("$3") ;;
+        rejected) rejected=$((rejected + 1));     rejected_list+=("$3") ;;
+    esac
+    reported["$2"]=1
+}
+
+# find's stderr otherwise vanished into /dev/null, and a directory it could not
+# read then looked exactly like a tree with nothing wrong in it. The walk streams
+# on stdin, so the errors go to a file and are reported after the walk.
+find_err="$(mktemp)" || die "cannot create a temporary file for find's errors"
+trap 'rm -f "$find_err"' EXIT
+
 while IFS= read -r -d '' path; do
-    rel="${path#"$LOCAL"/}"
+    rel="${path#"$LOCAL_SLASH"}"
     name="${rel##*/}"
 
     # --- an over-long directory is one problem, not one per file inside it ----
@@ -98,8 +178,8 @@ while IFS= read -r -d '' path; do
     # been reported by the time its children are considered.
     parent_over=0
     parent="${path%/*}"
-    if [ "$parent" != "$path" ] && [ "$parent" != "$LOCAL" ]; then
-        prel="${parent#"$LOCAL"/}"
+    if [ -n "$parent" ] && [ "$parent" != "$path" ] && [ "$parent" != "$LOCAL" ]; then
+        prel="${parent#"$LOCAL_SLASH"}"
         pcloud=$(( ${#REMOTE_PATH} + ${#prel} ))
         [ -n "$REMOTE_PATH" ] && pcloud=$((pcloud + 1))
         if [ "$pcloud" -ge "$LIMIT_CLOUD" ] ||
@@ -112,18 +192,18 @@ while IFS= read -r -d '' path; do
         cloud_len=$(( ${#REMOTE_PATH} + ${#rel} ))
         [ -n "$REMOTE_PATH" ] && cloud_len=$((cloud_len + 1))
         if [ "$cloud_len" -ge "$LIMIT_CLOUD" ]; then
-            add long "cloud path $cloud_len chars: $rel"
+            add long "$rel" "cloud path $cloud_len chars: $rel"
         elif [ $(( ${#LOCAL} + ${#rel} + 1 )) -ge "$LIMIT_TOTAL" ]; then
-            add long "local path $(( ${#LOCAL} + ${#rel} + 1 )) chars: $rel"
+            add long "$rel" "local path $(( ${#LOCAL} + ${#rel} + 1 )) chars: $rel"
         fi
     fi
 
     # --- what makes the service refuse the item -------------------------------
     if is_reserved_name "$name"; then
-        add rejected "reserved name: $rel"
+        add rejected "$rel" "reserved name: $rel"
     fi
     if [ "${#name}" -ge "$LIMIT_NAME" ]; then
-        add long "name is ${#name} chars: $rel"
+        add long "$rel" "name is ${#name} chars: $rel"
     fi
 
     # --- names the service cannot tell apart ---------------------------------
@@ -131,29 +211,58 @@ while IFS= read -r -d '' path; do
     dir="${rel%/*}"; [ "$dir" = "$rel" ] && dir=""
     key="$dir/${name,,}"
     if [ -n "${seen_lower[$key]:-}" ]; then
-        add rejected "$rel clashes with ${seen_lower[$key]} (OneDrive ignores case)"
+        add rejected "$rel" "$rel clashes with ${seen_lower[$key]} (OneDrive ignores case)"
     else
         seen_lower[$key]="$name"
     fi
 
     # --- what rclone will silently rename on the way up ----------------------
-    # Microsoft does not allow these, and rclone's encoding replaces them with
-    # look-alike characters. The upload succeeds and the cloud name then differs
-    # from the local one, which is harder to debug than a failure would be.
-    IFS='/' read -r -a parts <<<"$rel"
+    # Microsoft does not allow these, and rclone's default OneDrive encoding
+    # (Slash,LtGt,DoubleQuote,Colon,Question,Asterisk,Pipe,BackSlash,Del,Ctl,
+    # LeftSpace,LeftTilde,RightSpace,RightPeriod,InvalidUtf8,Dot) replaces them
+    # with look-alike characters. The upload succeeds and the cloud name then
+    # differs from the local one, which is harder to debug than a failure would
+    # be.
+    #
+    # Split on "/" by hand rather than with `read -a`: read stops at the first
+    # newline, so a name holding one used to truncate the rest of the scan.
     bad_part=""
-    for part in "${parts[@]}"; do
+    rest="$rel"
+    while [ -n "$rest" ]; do
+        if [[ "$rest" == */* ]]; then
+            part="${rest%%/*}"
+            rest="${rest#*/}"
+        else
+            part="$rest"
+            rest=""
+        fi
         case "$part" in
-            ' '*|*' ') bad_part="space at the start or end of '$part'" ;;
-            *.)        bad_part="period at the end of '$part'" ;;
-            *)         if printf '%s' "$part" | grep -qE '["*:<>?\\|]'; then
-                           bad_part="'\"*:<>?\\|' in '$part'"
-                       fi ;;
+            ' '*|*' ')           bad_part="space at the start or end of '$part'" ;;
+            '~'*)                bad_part="leading tilde in '$part'" ;;
+            *.)                  bad_part="period at the end of '$part'" ;;
+            *[$'\x7f']*)         bad_part="DEL (0x7f) in '$part'" ;;
+            *[[:cntrl:]]*)       bad_part="control character in '$part'" ;;
+            *[\"\*:\<\>\?\\\|]*) bad_part="'\"*:<>?\\|' in '$part'" ;;
+            *)
+                # InvalidUtf8: a name that is not even a byte outside printable
+                # ASCII cannot be one, so the common name skips the scan.
+                if [[ "$part" == *[!-~]* ]] && ! is_valid_utf8 "$part"; then
+                    bad_part="bytes that are not valid UTF-8 in '$part'"
+                fi ;;
         esac
         [ -n "$bad_part" ] && break
     done
-    [ -n "$bad_part" ] && add renamed "$rel -- $bad_part"
-done < <(find "$LOCAL" -mindepth 1 -print0 2>/dev/null)
+    [ -n "$bad_part" ] && add renamed "$rel" "$rel -- $bad_part"
+done < <(find "$LOCAL" -mindepth 1 -print0 2>"$find_err")
+
+# find's error lines are the report that the walk was incomplete. Read them after
+# the loop, once find has closed its stderr.
+declare -a walk_err_lines=()
+if [ -s "$find_err" ]; then
+    while IFS= read -r line; do walk_err_lines+=("$line"); done < "$find_err"
+fi
+walk_errors=${#walk_err_lines[@]}
+distinct=${#reported[@]}
 
 if [ "$QUIET" -eq 0 ]; then
     printf '%s: %s against %s\n\n' "$APP" "$LOCAL" "$REMOTE"
@@ -176,13 +285,22 @@ if [ "$QUIET" -eq 0 ]; then
     print_group "OneDrive will rename these" "$renamed"  ${renamed_list[@]+"${renamed_list[@]}"}
     print_group "These paths are too long"   "$long_paths" ${long_list[@]+"${long_list[@]}"}
 
-    if [ $((rejected + renamed + long_paths)) -eq 0 ]; then
+    if [ "$walk_errors" -gt 0 ]; then
+        print_group "The walk was incomplete: find could not read these" \
+            "$walk_errors" ${walk_err_lines[@]+"${walk_err_lines[@]}"}
+        printf '  WARNING: the walk was incomplete, so this report does not cover the whole tree.\n\n'
+    fi
+
+    if [ "$distinct" -eq 0 ] && [ "$walk_errors" -eq 0 ]; then
         printf '  nothing to fix. Names and paths are within what OneDrive accepts.\n'
-    else
+    elif [ "$distinct" -gt 0 ]; then
         printf '  %d to look at. Limits and measurements: docs/TROUBLESHOOTING.md\n' \
-            "$((rejected + renamed + long_paths))"
+            "$distinct"
     fi
 fi
 
-[ $((rejected + long_paths)) -eq 0 ] || exit 1
+# An incomplete walk cannot certify the tree either, so it joins the failures.
+if [ "$walk_errors" -gt 0 ] || [ $((rejected + long_paths)) -gt 0 ]; then
+    exit 1
+fi
 exit 0

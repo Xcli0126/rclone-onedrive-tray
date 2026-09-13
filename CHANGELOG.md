@@ -81,6 +81,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `onedrive-check` had eight defects, all found by attacking it rather than reading it. A trailing
+  slash on `LOCAL` defeated the relative-path strip, which suppressed the whole "too long" group and
+  made a tree with 520-character paths report "nothing to fix" and exit 0. `--max` was not
+  validated, so `--max abc` printed every entry and leaked `integer expected` into stderr. A newline
+  inside a file name truncated the rename scan. A directory that could not be read was silently
+  skipped, so an incomplete walk looked like a clean tree. Four of rclone's encoding classes were
+  missing from the renamed group: a leading `~`, control characters, `0x7f` and bytes that are not
+  valid UTF-8. Reserved names matched only the whole name, so `CON.txt` and `aux.md` slipped through.
+  A missing `LOCAL` exited 1 with a raw bash error instead of the documented 2, and the closing
+  count counted a path twice when it appeared in two groups. Verified per defect against fixtures
+  that reproduce each one, plus a differential run showing the verdicts for the pre-existing
+  classes are unchanged.
+- `onedrive-check` was also slow: it started one `grep` process per path component, so 20,200 items
+  took about 30 seconds and a 300,000-item account would have taken minutes. The check is now bash
+  pattern matching, measured at 3.4 seconds for the same tree, about 8.8 times faster.
 - The delete cap did not cap anything, which is the one defect here that could lose data. rclone
   bisync reads `--max-delete` as a percentage of the file pair, while `MAX_DELETE` and the
   documentation promise a file count, so the shipped `MAX_DELETE="100"` allowed every deletion.

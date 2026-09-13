@@ -524,11 +524,31 @@ normally even though Microsoft documents them as reserved.
 ```bash
 onedrive-check              # what will fail, what will be renamed, what is too long
 onedrive-check --quiet      # exit status only, for a script
+onedrive-check --max 5      # at most five entries per group
 ```
 
-It groups what it finds into refused, renamed, and too long. Renaming or moving the offending file
-locally is the whole fix; the next run uploads it. Nothing in the cloud has to change, and a name
-that was already uploaded under a look-alike stays where it is until you rename it there too.
+It groups what it finds into refused, renamed, and too long, and gives one entry per offending
+subtree rather than one per file inside it. Renaming or moving the offending file locally is the
+whole fix; the next run uploads it. Nothing in the cloud has to change, and a name that was already
+uploaded under a look-alike stays where it is until you rename it there too.
+
+What it counts as renamed is rclone's OneDrive encoding, not only the characters Microsoft lists:
+the illegal set, a leading `~`, leading or trailing spaces, a trailing period, control characters,
+`0x7f`, and bytes that are not valid UTF-8.
+
+Reserved names are matched on the stem, so `CON.txt` and `aux.md` are refused as well as `CON` and
+`AUX`, while `console.txt` is fine.
+
+The exit status is part of the interface:
+
+| Status | Meaning |
+|---|---|
+| 0 | the tree is fine, or the only findings are names that will be renamed |
+| 1 | something will be refused or is too long, or the walk could not read part of the tree |
+| 2 | a usage or configuration problem: a bad option, a `--max` that is not a positive integer, a missing config, or a `LOCAL` that does not exist |
+
+That last row of status 1 matters: if a directory cannot be read, the report says the walk was
+incomplete instead of claiming the tree is clean.
 
 `onedrive-sync --resync` runs the checker first and writes the report to the log, because the
 resync is the run that tries to upload everything. The tray has it under "Check file names".
