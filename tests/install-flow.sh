@@ -275,7 +275,7 @@ env PATH="$CAP:$PATH" XDG_CONFIG_HOME="$CAP/cfg" XDG_CACHE_HOME="$CAP/cache" \
 if grep -q -- '--max-delete 50' "$WORK/cap-args"; then
     ok "a count of 100 over 200 files becomes --max-delete 50"
 else
-    bad "expected --max-delete 50, recorded: $(cat "$WORK/cap-args" 2>/dev/null | head -1)"
+    bad "expected --max-delete 50, recorded: $(head -1 "$WORK/cap-args" 2>/dev/null)"
 fi
 
 # The cap aborting has to be reported as such, with a way forward.
