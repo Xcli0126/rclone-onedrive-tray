@@ -240,6 +240,39 @@ if ! flock -w 120 9; then
 fi
 ```
 
+### The sync aborts with "too many deletes"
+
+**Symptom:** the run stops with `Safety abort: too many deletes (>13%, 104 of 750)`, the log says the
+rule that tripped, and the wrapper reports `[maxdelete]`.
+
+**Cause:** rclone bisync reads `--max-delete` as a percentage of the file pair, and aborts when more
+than that share would be deleted. Its own default is 50%, described upstream as a guard against
+losing everything after a network failure or a mistake. This project's `MAX_DELETE` is a count, so
+the wrapper converts it: `MAX_DELETE=100` over a 750-file folder becomes `--max-delete 13%`. The log
+records the conversion on every run.
+
+The conversion has two edges, both recorded in the log:
+
+- `MAX_DELETE=0` refuses every deletion.
+- A `MAX_DELETE` at least as large as the folder means no cap at all. The log says
+  `no delete cap is in effect`, because passing 100 would otherwise switch off rclone's 50% default
+  silently.
+
+A value that is not a number is ignored with a warning, which leaves rclone's own 50% in place.
+
+**One documented trap:** renaming a directory that holds more than half the files looks to bisync
+like a mass deletion followed by a mass upload, and it trips this check. Upstream suggests
+`--max-delete 75` or `--force` for that case.
+
+**Fix:** if the deletions are intended, run it once with the check bypassed:
+
+```bash
+onedrive-sync --force
+```
+
+`--force` is passed straight to rclone and the log records that it was given. Raising `MAX_DELETE`
+in the config also works and keeps the cap for later runs.
+
 ### Changing filters requires a resync
 
 Adding an `--exclude` to the filter file changes the baseline. Run `onedrive-sync --resync` once

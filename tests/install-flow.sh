@@ -287,6 +287,33 @@ run "and it says how to proceed" 1 "--force" \
     env PATH="$CAP:$PATH" XDG_CONFIG_HOME="$CAP/cfg" XDG_CACHE_HOME="$CAP/cache" \
         CAP_ARGS="$WORK/cap-args" CAP_STDERR="$CAP_STDERR" CAP_RC=1 "$HOME/.local/bin/onedrive-sync"
 
+# The configured count is translated into rclone's percentage, and the edges of
+# that translation matter: 0 must refuse every deletion, an unusable value must
+# leave rclone's own 50% default in place rather than switching it off with 100,
+# and a count at least as large as the folder must say so in the log.
+cap_case() {  # cap_case <value> -> prints the --max-delete the stub recorded
+    sed -i "s|^MAX_DELETE=.*|MAX_DELETE=\"$1\"|" "$CAP/cfg/rclone-onedrive-tray/config"
+    : > "$WORK/cap-args"
+    env PATH="$CAP:$PATH" XDG_CONFIG_HOME="$CAP/cfg" XDG_CACHE_HOME="$CAP/cache" \
+        CAP_ARGS="$WORK/cap-args" "$HOME/.local/bin/onedrive-sync" >/dev/null 2>&1 || true
+    grep -oE -- '--max-delete [0-9]+' "$WORK/cap-args" | awk '{print $2}'
+}
+check "MAX_DELETE=0 refuses every deletion" test "$(cap_case 0)" = 0
+check "MAX_DELETE=100 over 200 files is 50 percent" test "$(cap_case 100)" = 50
+check "a count the size of the folder becomes 100" test "$(cap_case 200)" = 100
+if [ -z "$(cap_case -1)" ]; then
+    ok "an unusable count leaves rclone's own default in place"
+else
+    bad "an unusable count still passed --max-delete"
+fi
+if [ -z "$(cap_case abc)" ]; then
+    ok "a non-numeric count passes no flag either"
+else
+    bad "a non-numeric count still passed --max-delete"
+fi
+check "and it is called out in the log" grep -q "MAX_DELETE='abc' is not a number" "$CAP/sync.log"
+sed -i "s|^MAX_DELETE=.*|MAX_DELETE=\"100\"|" "$CAP/cfg/rclone-onedrive-tray/config"
+
 # The wrapper logs its own "--max-delete N%" line before every run, and an
 # earlier version of the hint matched that text, so every unrelated failure was
 # reported as a delete-cap abort.

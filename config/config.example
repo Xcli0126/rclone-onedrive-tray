@@ -25,8 +25,17 @@ INTERVAL_MIN="5"
 
 # ------------------------------------------------------------------ safety
 # Abort a run if it would delete more than this many files. A guard against a
-# wiped-out folder propagating to the cloud. Raise it if you legitimately delete
-# large folders; see docs/TROUBLESHOOTING.md for how to recover from a trip.
+# wiped-out folder propagating to the cloud.
+#
+# The number is a count of files, and it is translated into what rclone actually
+# reads, a percentage of the pair: 100 of a 750-file folder becomes
+# --max-delete 13%. Two consequences are worth knowing.
+#
+# 0 refuses every deletion. A number at least as large as the whole folder means
+# no cap at all, and the log says so, because rclone's own default of 50% only
+# applies when the flag is absent. Raise this if you legitimately delete large
+# folders; docs/TROUBLESHOOTING.md covers the translation and how to recover from
+# a trip.
 MAX_DELETE="100"
 
 # Extra arguments handed to `rclone bisync`.

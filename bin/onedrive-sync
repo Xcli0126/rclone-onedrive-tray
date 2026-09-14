@@ -126,30 +126,44 @@ pair_size() {
     printf '%s' "$best"
 }
 
-max_delete_pct=100
-if [ "${MAX_DELETE:-0}" -eq 0 ] 2>/dev/null; then
+# An empty value leaves the flag off entirely, so rclone's own default applies.
+# That default is 50%, which the upstream documentation calls a safety net against
+# deleting everything after a network failure or a mistake. Passing 100 would turn
+# it off, so it is only passed when the configuration actually asks for it.
+max_delete_pct=""
+if [ "$MAX_DELETE" -eq 0 ] 2>/dev/null; then
     max_delete_pct=0                  # documented as "no deletions allowed"
-elif [ "${MAX_DELETE:-0}" -gt 0 ] 2>/dev/null; then
+elif [ "$MAX_DELETE" -gt 0 ] 2>/dev/null; then
     pair_total="$(pair_size)"
     pair_total="${pair_total//[^0-9]/}"
     if [ -n "$pair_total" ] && [ "$pair_total" -gt 0 ]; then
         max_delete_pct=$(( MAX_DELETE * 100 / pair_total ))
         [ "$max_delete_pct" -lt 1 ] && max_delete_pct=1
-        [ "$max_delete_pct" -gt 100 ] && max_delete_pct=100
-        log_line "NOTICE: delete cap MAX_DELETE=$MAX_DELETE of about $pair_total files = --max-delete ${max_delete_pct}%"
+        if [ "$max_delete_pct" -ge 100 ]; then
+            # The configured count is at least the whole pair, so the faithful
+            # translation allows everything, including the deletions rclone
+            # would have blocked on its own.
+            max_delete_pct=100
+            log_line "NOTICE: MAX_DELETE=$MAX_DELETE is at least the $pair_total known files, so no delete cap is in effect"
+        else
+            log_line "NOTICE: delete cap MAX_DELETE=$MAX_DELETE of about $pair_total files = --max-delete ${max_delete_pct}%"
+        fi
     else
         # Nothing to measure: no listing and an empty local tree. Not knowing is
         # not a reason to allow every deletion, so keep a small cap.
         max_delete_pct=5
         log_line "NOTICE: delete cap MAX_DELETE=$MAX_DELETE with no known pair size, using --max-delete 5%"
     fi
+else
+    log_line "WARNING: MAX_DELETE='$MAX_DELETE' is not a number, using rclone's --max-delete default of 50%"
 fi
 
 # ---------------------------------------------------------------- build argv
 read -r -a BISYNC_OPTS <<<"$BISYNC_ARGS"
 ARGS=(bisync "$REMOTE" "$LOCAL")
 ARGS+=("${BISYNC_OPTS[@]}")
-ARGS+=(--max-delete "$max_delete_pct" --log-level INFO --log-file "$LOG")
+ARGS+=(--log-level INFO --log-file "$LOG")
+[ -n "$max_delete_pct" ] && ARGS+=(--max-delete "$max_delete_pct")
 if [ -n "$FILTERS_FILE" ] && [ -f "$FILTERS_FILE" ]; then
     ARGS+=(--filters-file "$FILTERS_FILE")
 fi

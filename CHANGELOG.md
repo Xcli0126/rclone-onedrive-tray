@@ -81,6 +81,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The delete cap had two edges that switched off rclone's own safety net. rclone reads
+  `--max-delete` as a percentage and defaults to 50%, but the flag is only left at its default when
+  it is absent, so a `MAX_DELETE` that was not a number, or one at least as large as the folder,
+  passed `--max-delete 100` and turned the net off. An unusable value now passes no flag at all, and
+  a count the size of the folder is logged as `no delete cap is in effect` rather than being applied
+  silently. `config/config.example` and `docs/TROUBLESHOOTING.md` now explain the translation, both
+  edges, and the trap upstream documents where renaming a directory that holds more than half the
+  files looks like a mass deletion. Five regression cases cover the matrix.
 - The tray had ten defects, all found by constructing its real menu on a private Broadway display
   and activating every handler with stubs. The two dialogs that confirm a destructive action read
   literally `dlg_resync_body` and `lcl_deselected_body` under the default English interface,
