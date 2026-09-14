@@ -27,6 +27,7 @@ complexity budget on.
 | Storage quota on screen | Warning icon near the limit, dashboard in the account | yes: `rclone about`, refreshed every 30 minutes |
 | Conflicts keep both files | Microsoft documents no winner rule, only advice to rename | yes: `--conflict-resolve none --conflict-loser num`, and the log says which copy was renamed |
 | A deletion cap | Notification above 200 deleted files, admin policy for confirmation | yes: `MAX_DELETE` aborts the run and reports `[maxdelete]` |
+| Refusing to sync a tree it cannot read | The client verifies access before it acts and shows "sign in" or a mount error | yes: rclone's own `--check-access`, off by default, turned on with `CHECK_ACCESS`. `onedrive-check-access` plants the marker file it looks for. The cap limits how much one run may remove; this refuses the run when one side cannot be read at all, see [TROUBLESHOOTING](TROUBLESHOOTING.md#the-run-aborts-with-an-access-check-failure-and-nothing-was-changed) |
 | Selective sync of top-level folders | "Choose folders" checkbox tree in settings | yes: `exclude-folders.txt` plus a tray submenu; measured to leave both sides untouched |
 | Realtime detection of local edits | Built into the client | yes: inotify watcher, debounced |
 | Recovery after suspend or a crash | Built into the client | yes: `--resilient --recover` plus stale-lock clearing, measured at 15 to 18 seconds |
@@ -106,6 +107,14 @@ bugs in this project.
 
 The two must-haves that were missing are done. `config/filters.example` now skips
 `~$*`, `.lock` and the rest, and `onedrive-check` walks the tree before a resync.
+
+The delete cap gained a second, independent safety net beside it. rclone's own
+`--check-access` aborts a run when a marker file is missing on one side, which is
+the shape of a network, authorisation or mount failure: an empty tree that bisync
+would otherwise read as "everything over there was deleted". It stays off until
+`CHECK_ACCESS="1"` is set, and `onedrive-check-access` creates the file it looks
+for.
+
 What is left is the worth-having column, ordered:
 
 1. Copy link, since `rclone link` already exists and it removes the main reason

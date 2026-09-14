@@ -108,7 +108,7 @@ fi
 
 # ---------------------------------------------------------------- the install
 title "install.sh via setup.sh"
-for s in onedrive-sync onedrive-tray onedrive-watch; do
+for s in onedrive-sync onedrive-tray onedrive-watch onedrive-check onedrive-check-access; do
     check "installs $s" test -x "$HOME/.local/bin/$s"
 done
 check "generates $UNIT.service" test -f "$UNIT_DIR/$UNIT.service"
@@ -311,8 +311,48 @@ if [ -z "$(cap_case abc)" ]; then
 else
     bad "a non-numeric count still passed --max-delete"
 fi
-check "and it is called out in the log" grep -q "MAX_DELETE='abc' is not a number" "$CAP/sync.log"
+check "and it is called out in the log" grep -q "MAX_DELETE='abc' is not a usable count" "$CAP/sync.log"
 sed -i "s|^MAX_DELETE=.*|MAX_DELETE=\"100\"|" "$CAP/cfg/rclone-onedrive-tray/config"
+
+# Two ways the denominator can be wrong, both found by an adversarial pass.
+# A --force inherited from BISYNC_ARGS bypasses rclone's cap, and it used to
+# pass silently while every other guard looked intact.
+cat > "$CAP/cfg/rclone-onedrive-tray/config" <<EOF
+REMOTE="capfake:Vault"
+LOCAL="$CAP/local"
+LOG="$CAP/sync.log"
+RCLONE="rclone"
+MAX_DELETE="100"
+BISYNC_ARGS="--resilient --force"
+RETRIES="1"
+EOF
+: > "$CAP/sync.log"; : > "$WORK/cap-args"
+env PATH="$CAP:$PATH" XDG_CONFIG_HOME="$CAP/cfg" XDG_CACHE_HOME="$CAP/cache" \
+    CAP_ARGS="$WORK/cap-args" "$HOME/.local/bin/onedrive-sync" >/dev/null 2>&1 || true
+check "an inherited --force is called out in the log" \
+    grep -q -- "--force is set in BISYNC_ARGS" "$CAP/sync.log"
+
+# Two pairs naming one local path: guessing which listing belongs to this run
+# produced a denominator several times too large, so the size is called unknown
+# and the conservative cap is used instead.
+{ printf '# bisync listing v1\n'
+  for i in $(seq 1 3000); do printf -- '-        1 - - 2026-01-01T00:00:00.000000000+0000 "a%s"\n' "$i"; done
+} > "$CAP/cache/rclone/bisync/otherpair..$slug.path1.lst"
+cat > "$CAP/cfg/rclone-onedrive-tray/config" <<EOF
+REMOTE="capfake:Vault"
+LOCAL="$CAP/local"
+LOG="$CAP/sync.log"
+RCLONE="rclone"
+MAX_DELETE="100"
+RETRIES="1"
+EOF
+: > "$CAP/sync.log"; : > "$WORK/cap-args"
+env PATH="$CAP:$PATH" XDG_CONFIG_HOME="$CAP/cfg" XDG_CACHE_HOME="$CAP/cache" \
+    CAP_ARGS="$WORK/cap-args" "$HOME/.local/bin/onedrive-sync" >/dev/null 2>&1 || true
+check "two pairs on one local path are refused rather than guessed" \
+    grep -q "pairs share" "$CAP/sync.log"
+check "and the conservative cap is used" grep -q -- "--max-delete 5" "$WORK/cap-args"
+rm -f "$CAP/cache/rclone/bisync/otherpair..$slug.path1.lst"
 
 # The wrapper logs its own "--max-delete N%" line before every run, and an
 # earlier version of the hint matched that text, so every unrelated failure was
@@ -328,6 +368,136 @@ else
     ok "and the log has no delete-cap tag for it"
 fi
 
+# ---------------------------------------------------------------- the access check
+# rclone's --check-access aborts a run when a marker file is missing on one side,
+# which is the shape of a network, auth or mount failure. It is opt-in, because
+# switching it on changes what bisync demands of the tree: an existing install
+# must keep the command line it had until CHECK_ACCESS asks for the check. The
+# stub records each bisync argv verbatim, so the three configurations can be told
+# apart on the recorded command line.
+title "the access check"
+ACC="$WORK/access"
+mkdir -p "$ACC/cfg/rclone-onedrive-tray" "$ACC/cache" "$ACC/local" "$ACC/remote"
+cat > "$ACC/rclone" <<'STUB'
+#!/bin/bash
+# bisync appends; copyto and lsf are what onedrive-check-access calls. The
+# remote is a name rclone resolves (accessfake:Vault), not a path this stub can
+# write to, so copyto lands the file in $ACC_REMOTE, which is where an alias
+# remote would have put it.
+case "$1" in
+    bisync) printf '%s\n' "$*" >> "$ACC_ARGS" ;;
+    copyto) printf '%s\n' "$*" >> "$ACC_ARGS"
+            cp -- "$2" "$ACC_REMOTE/$(basename "$3")" ;;
+    lsf)    ls -1 "$ACC_REMOTE" 2>/dev/null || true ;;
+esac
+exit 0
+STUB
+chmod +x "$ACC/rclone"
+
+# CHECK_ACCESS is rewritten per case; the rest of the file stays put.
+access_case() {  # access_case <CHECK_ACCESS> <CHECK_FILENAME> -> the bits of argv asked about
+    cat > "$ACC/cfg/rclone-onedrive-tray/config" <<EOF
+REMOTE="accessfake:Vault"
+LOCAL="$ACC/local"
+LOG="$ACC/cache/sync.log"
+RCLONE="rclone"
+MAX_DELETE="0"
+RETRIES="1"
+CHECK_ACCESS="$1"
+CHECK_FILENAME="$2"
+EOF
+    : > "$WORK/access-args"
+    env PATH="$ACC:$PATH" XDG_CONFIG_HOME="$ACC/cfg" XDG_CACHE_HOME="$ACC/cache" \
+        ACC_ARGS="$WORK/access-args" "$HOME/.local/bin/onedrive-sync" >/dev/null 2>&1 || true
+    cat "$WORK/access-args" 2>/dev/null
+}
+
+# The key off is the default for every existing install, and it is the case that
+# has to be exactly as it was before: no flag, so rclone's own default applies.
+if access_case 0 "" | grep -q -- '--check-access'; then
+    bad "the check reached rclone with CHECK_ACCESS=0"
+else
+    ok "with the key off no access check reaches rclone"
+fi
+if access_case "" "" | grep -q -- '--check-access'; then
+    bad "an unset key still asked for the check"
+else
+    ok "an unset key leaves the command line alone too"
+fi
+
+# On, with no filename: the flag alone, and rclone falls back to RCLONE_TEST.
+args="$(access_case 1 "")"
+if grep -q -- '--check-access' <<<"$args"; then
+    ok "with the key on the flag reaches rclone"
+else
+    bad "CHECK_ACCESS=1 did not pass --check-access"
+fi
+if grep -q -- '--check-filename' <<<"$args"; then
+    bad "--check-filename was passed without a CHECK_FILENAME"
+else
+    ok "and nothing overrides rclone's own RCLONE_TEST default"
+fi
+
+# On with a filename: both flags, and the configured name is what is passed.
+# Upstream recommends a name already present in many places over one marker at
+# the root, so this is the setting for an existing tree.
+args="$(access_case 1 ".sync-id")"
+if grep -q -- '--check-filename .sync-id' <<<"$args"; then
+    ok "CHECK_FILENAME reaches rclone as --check-filename"
+else
+    bad "--check-filename .sync-id was not on the command line"
+fi
+if [ "$(printf '%s\n' "$args" | wc -l)" -eq 1 ]; then
+    ok "and it did not run twice"
+else
+    bad "the wrapper invoked rclone more than once for one run"
+fi
+
+# A filename on its own is not a request for the check. The marker file it names
+# is the user's own, and asking for it while the key is off would abort runs that
+# work today.
+if access_case 0 ".sync-id" | grep -q -- '--check-access'; then
+    bad "CHECK_FILENAME switched the check on by itself"
+else
+    ok "CHECK_FILENAME without CHECK_ACCESS changes nothing"
+fi
+
+# The script that creates what the check looks for. rclone will not create it, so
+# the tree it protects is broken by the check's introduction unless the file is
+# there on both sides before the key is turned on.
+title "onedrive-check-access"
+cat > "$ACC/cfg/rclone-onedrive-tray/config" <<EOF
+REMOTE="accessfake:Vault"
+LOCAL="$ACC/local"
+LOG="$ACC/cache/sync.log"
+RCLONE="rclone"
+MAX_DELETE="0"
+RETRIES="1"
+CHECK_ACCESS="0"
+CHECK_FILENAME=""
+EOF
+rm -f "$ACC/local/RCLONE_TEST" "$ACC/remote/RCLONE_TEST"
+: > "$WORK/access-args"
+run "the marker file is created on both sides" 0 "both present" \
+    env PATH="$ACC:$PATH" XDG_CONFIG_HOME="$ACC/cfg" XDG_CACHE_HOME="$ACC/cache" \
+        ACC_ARGS="$WORK/access-args" ACC_REMOTE="$ACC/remote" \
+        "$HOME/.local/bin/onedrive-check-access"
+check "the marker file reaches both sides" test "$(wc -l < "$WORK/access-args")" -eq 1
+check "it goes to one file at a time (copyto, not a tree copy)" \
+    grep -q '^copyto ' "$WORK/access-args"
+check "the local marker exists" test -f "$ACC/local/RCLONE_TEST"
+check "the remote marker exists" test -f "$ACC/remote/RCLONE_TEST"
+before="$(cat "$ACC/remote/RCLONE_TEST")"
+run "the script is safe to run twice" 0 "keeps" \
+    env PATH="$ACC:$PATH" XDG_CONFIG_HOME="$ACC/cfg" XDG_CACHE_HOME="$ACC/cache" \
+        ACC_ARGS="$WORK/access-args" ACC_REMOTE="$ACC/remote" \
+        "$HOME/.local/bin/onedrive-check-access"
+check "and the marker was left alone" test "$(cat "$ACC/remote/RCLONE_TEST")" = "$before"
+run "it says what it would do without touching anything" 0 "would write" \
+    env PATH="$ACC:$PATH" XDG_CONFIG_HOME="$ACC/cfg" XDG_CACHE_HOME="$ACC/cache" \
+        ACC_ARGS="$WORK/access-args" ACC_REMOTE="$ACC/remote" \
+        "$HOME/.local/bin/onedrive-check-access" --dry-run
+
 # ---------------------------------------------------------------- uninstall
 title "uninstall.sh"
 UNINSTALL_OUT="$(bash "$SRC_DIR/uninstall.sh" --prefix "$HOME/.local" 2>&1)"
@@ -340,7 +510,8 @@ else
 fi
 check_absent "removes the installed scripts" \
     "$HOME/.local/bin/onedrive-sync" "$HOME/.local/bin/onedrive-tray" \
-    "$HOME/.local/bin/onedrive-watch" "$HOME/.local/bin/onedrive-check"
+    "$HOME/.local/bin/onedrive-watch" "$HOME/.local/bin/onedrive-check" \
+    "$HOME/.local/bin/onedrive-check-access"
 check_absent "removes the units" \
     "$UNIT_DIR/$UNIT.service" "$UNIT_DIR/$UNIT.timer" "$UNIT_DIR/$UNIT-watch.service"
 check "keeps the configuration (documented; --purge removes it)" test -f "$CFG"

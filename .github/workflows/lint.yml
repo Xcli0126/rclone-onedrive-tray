@@ -17,7 +17,8 @@ jobs:
           shellcheck setup.sh install.sh uninstall.sh \
                      bin/onedrive-sync bin/onedrive-watch \
                      tests/dependency-matrix.sh tests/install-flow.sh \
-                     tests/filters.sh tests/docs.sh tests/lib/harness.sh \
+                     tests/filters.sh tests/tray.sh tests/docs.sh \
+                     tests/lib/harness.sh \
                      extras/networkmanager-dispatcher.sh \
                      extras/watch-issues.sh extras/install-issue-watch.sh
 
@@ -25,7 +26,7 @@ jobs:
         run: |
           for f in setup.sh install.sh uninstall.sh bin/onedrive-sync bin/onedrive-watch \
                    tests/dependency-matrix.sh tests/install-flow.sh tests/filters.sh \
-                   tests/docs.sh tests/lib/harness.sh \
+                   tests/tray.sh tests/docs.sh tests/lib/harness.sh \
                    extras/watch-issues.sh extras/install-issue-watch.sh; do
             bash -n "$f"
           done
@@ -55,7 +56,8 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq rclone inotify-tools python3-gi python3-cairo \
-            gir1.2-gtk-3.0 gir1.2-ayatanaappindicator3-0.1 gir1.2-notify-0.7
+            gir1.2-gtk-3.0 gir1.2-ayatanaappindicator3-0.1 gir1.2-notify-0.7 \
+            libgtk-3-bin
 
       - name: Report the environment under test
         run: |
@@ -77,3 +79,6 @@ jobs:
 
       - name: Documentation
         run: tests/docs.sh --verbose
+
+      - name: Tray menu
+        run: tests/tray.sh --verbose

@@ -203,6 +203,11 @@ LOCAL="$LOCAL_IN"
 UNIT_NAME="$UNIT_NAME"
 INTERVAL_MIN="$INTERVAL"
 MAX_DELETE="100"
+# The access check aborts a run when the marker file is missing on one side,
+# which is what a network or mount problem looks like from the other side. Off
+# until you create the markers: onedrive-check-access
+CHECK_ACCESS="0"
+CHECK_FILENAME=""
 BISYNC_ARGS="--resilient --recover --max-lock 2m --conflict-resolve none --conflict-loser num --stats 2s"
 FILTERS_FILE="$FILTERS_FILE"
 EXCLUDE_FOLDERS_FILE="$EXCLUDE_FOLDERS_FILE"

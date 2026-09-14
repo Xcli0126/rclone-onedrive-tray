@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+#
+# onedrive-check-access: create the marker files rclone's --check-access looks
+# for, one at the root of each side of the bisync pair.
+#
+# Why this exists:
+#   * --check-access aborts a run when a marker file is missing on one side,
+#     which is what a network, authorisation or mount problem looks like from
+#     the other side: an empty tree that bisync would otherwise read as
+#     "everything over there was deleted". It is the independent safety net
+#     beside MAX_DELETE.
+#   * rclone does not create the file. Upstream lists three ways to do it by
+#     hand, and warns that setting it up by running bisync once without the
+#     check is the one that invites user error.
+#   * With CHECK_FILENAME set to a name your tree already uses in many places,
+#     there is nothing to create here; the check looks for that name instead.
+#
+# The file goes at the root of Path1 (LOCAL) and of Path2 (REMOTE). Its contents
+# and timestamp carry no meaning to rclone, only the name and the location.
+#
+# Safe to run twice, and safe to run at any time:
+#   * the local file is only rewritten when it is missing or its contents differ
+#   * the remote copy goes through `rclone copyto`, which compares before it
+#     transfers, so a second run moves no data
+#   * nothing else is touched on either side
+#
+# Usage:
+#   onedrive-check-access              create the marker file on both sides
+#   onedrive-check-access --dry-run    say what it would do
+#   onedrive-check-access --help
+#
+# Configuration: ~/.config/rclone-onedrive-tray/config  (see config.example)
+#
+set -uo pipefail
+
+APP="onedrive-check-access"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/rclone-onedrive-tray"
+CONFIG_FILE="$CONFIG_DIR/config"
+
+DRY_RUN=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --dry-run|-n) DRY_RUN=1; shift ;;
+        -h|--help) sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *) printf '%s: unknown option: %s\n' "$APP" "$1" >&2
+           printf 'usage: %s [--dry-run]\n' "$APP" >&2
+           exit 2 ;;
+    esac
+done
+
+die() { printf '%s: %s\n' "$APP" "$*" >&2; exit 1; }
+
+[ -f "$CONFIG_FILE" ] || die "config not found: $CONFIG_FILE (run install.sh first)"
+# shellcheck source=/dev/null
+. "$CONFIG_FILE"
+
+: "${REMOTE:?REMOTE is not set in $CONFIG_FILE}"
+: "${LOCAL:?LOCAL is not set in $CONFIG_FILE}"
+
+RCLONE="${RCLONE:-rclone}"
+# Same default and the same meaning as the wrapper: the name rclone itself looks
+# for unless --check-filename says otherwise.
+CHECK_FILENAME="${CHECK_FILENAME:-RCLONE_TEST}"
+
+case "$CHECK_FILENAME" in
+    */*|*'..'*) die "CHECK_FILENAME='$CHECK_FILENAME' must be a bare file name, not a path" ;;
+    '') die "CHECK_FILENAME is empty; unset it to use RCLONE_TEST, or give a file name" ;;
+esac
+
+command -v "$RCLONE" >/dev/null 2>&1 || die "rclone not found in PATH"
+
+remote_check="${REMOTE%/}/$CHECK_FILENAME"
+local_check="${LOCAL%/}/$CHECK_FILENAME"
+
+say()  { printf '%s\n' "$*" >&2; }
+run()  { "$@" || die "command failed: $*"; }
+
+# ---------------------------------------------------------------- local side
+mkdir -p "$LOCAL" 2>/dev/null || die "cannot create $LOCAL"
+if [ "$DRY_RUN" -eq 1 ]; then
+    say "would write $local_check"
+elif [ -f "$local_check" ]; then
+    say "keeps $local_check"
+else
+    printf 'rclone access check file, placed by %s. Contents are not checked; only the name and its location matter.\n' "$APP" \
+        > "$local_check" || die "cannot write $local_check"
+    say "created $local_check"
+fi
+
+# ---------------------------------------------------------------- remote side
+# Preferred over hand-written API calls: rclone knows the backend, the escaping
+# and the retries. copyto is also what makes a second run a no-op.
+if [ "$DRY_RUN" -eq 1 ]; then
+    say "would copy $local_check to $remote_check"
+    say "next: set CHECK_ACCESS=\"1\" in $CONFIG_FILE (and run one --resync only if bisync asks for it)"
+    exit 0
+fi
+
+say "copying to $remote_check"
+run "$RCLONE" copyto "$local_check" "$remote_check"
+
+# ---------------------------------------------------------------- verify
+# The point of the exercise is that both sides can see the file. Reading it back
+# is one cheap call and turns a silent permission problem into a clear failure
+# here rather than a confusing abort on the next sync.
+if ! "$RCLONE" lsf "$REMOTE" --files-only --max-depth 1 2>/dev/null |
+        grep -qxF -- "$CHECK_FILENAME"; then
+    die "$remote_check was written but $REMOTE does not list it; check the remote and its permissions"
+fi
+
+say "done: $local_check and $remote_check both present"
+say "next: set CHECK_ACCESS=\"1\" in $CONFIG_FILE to make bisync demand them"

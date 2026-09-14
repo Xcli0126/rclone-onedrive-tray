@@ -273,6 +273,64 @@ onedrive-sync --force
 `--force` is passed straight to rclone and the log records that it was given. Raising `MAX_DELETE`
 in the config also works and keeps the cap for later runs.
 
+### The run aborts with an access check failure, and nothing was changed
+
+**Symptom:** the run stops with
+
+```
+ERROR : Access test failed: Path1 count 1, Path2 count 0 - RCLONE_TEST
+ERROR : -          Access test failed: Path1 file not found in Path2 - RCLONE_TEST
+ERROR : Bisync critical error: check file check failed
+```
+
+and rclone exits 7. The wrapper reports it with the `[access]` tag. No file is copied or deleted.
+
+**Cause:** this is rclone's own `--check-access`, switched on with `CHECK_ACCESS="1"`. It looks for
+a marker file in the same places on both sides before it changes anything. The failure it catches is
+the one this project cares most about: a network, authorisation or mount problem leaves one side
+looking empty, and bisync reads that as "everything over there was deleted". Measured on rclone
+1.75.1, the same state without the flag deletes the missing side's files from the readable side. It
+is the second safety net beside `MAX_DELETE`: the cap limits how much one run may remove, the access
+check refuses to run against a tree it cannot read at all.
+
+**Turn it on:**
+
+```bash
+onedrive-check-access                # creates the marker file on both sides
+# then set CHECK_ACCESS="1" in ~/.config/rclone-onedrive-tray/config
+onedrive-sync --resync               # once, because the flag set changed
+```
+
+`onedrive-check-access` is the file creation step: rclone never creates the marker itself. It writes
+`RCLONE_TEST` at the root of the local folder and copies it to the root of the remote with
+`rclone copyto`, so running it a second time transfers nothing. `--dry-run` says what it would do.
+
+The check is on `--resync` runs too, so `--resync` is not a way to set the files up. Set the key off,
+create them, and turn it back on.
+
+**A marker you already have:** `CHECK_FILENAME=".sync-id"` makes the check look for that name instead
+of `RCLONE_TEST`. Upstream recommends a file your tree already uses in many places: the check compares
+the count and the directories on both sides, so one marker at the root only proves the root is
+readable, while a name that is everywhere catches a half-readable tree. The tradeoff is that the
+script cannot create a file you already own, so keeping it present on both sides is yours.
+
+**An empty marker file counts as present.** Measured: rclone compares names and locations, never
+contents, so a zero-byte `RCLONE_TEST` passes and the run proceeds. The abort above means the file is
+missing entirely on one side.
+
+**Fix:** work out which side is unreadable instead of disarming the check.
+
+```bash
+rclone lsf --files-only --max-depth 1 onedrive:Vault | grep RCLONE_TEST   # does the remote see it?
+ls ~/OneDrive/Vault/RCLONE_TEST                                           # does the mount see it?
+onedrive-check-access                                                     # put it back on both sides
+```
+
+Do not answer this with `--resync` or `--force`. Both make the run proceed, the first uploads the
+readable side over the other and the second does the same for the deletion path, which is exactly the
+loss the check just prevented. With `--resilient`, which this project sets by default, the abort does
+not lock anything out: the next scheduled run retries on its own once the marker is readable again.
+
 ### Changing filters requires a resync
 
 Adding an `--exclude` to the filter file changes the baseline. Run `onedrive-sync --resync` once

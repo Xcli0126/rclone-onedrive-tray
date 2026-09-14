@@ -7,13 +7,14 @@ and a guess is not something you can plan an install around.
 
 ## The test suites
 
-Four scripts, none of which needs an rclone remote and all safe on a working setup:
+Five scripts, none of which needs an rclone remote and all safe on a working setup:
 
 ```bash
 tests/dependency-matrix.sh      # 31 cases: one missing dependency at a time, plus the tray
-tests/install-flow.sh           # 69 cases: the documented install path, end to end
+tests/install-flow.sh           # 89 cases: the documented install path, end to end
 tests/filters.sh                # 27 cases: the default filters still filter, plus the checker
-tests/docs.sh                   # 27 cases: the links and rules the docs depend on
+tests/tray.sh                   # 34 cases: the real GTK menu, driven with stubs
+tests/docs.sh                   # 29 cases: the links and rules the docs depend on
 ```
 
 Add `--verbose` to any of them to see each command and its output.
@@ -38,6 +39,13 @@ string the tray passes to its translator is English prose rather than a bare key
 every one has a Chinese entry, no dialog uses locale-dependent stock buttons, a
 disabled or unreadable timer unit is not reported as a pause, and a quoted
 `OPEN_APP_CMD` is split rather than passed through with its quotes.
+`tray.sh` starts GTK 3's Broadway backend on a private runtime directory, builds
+the real tray menu, and activates every handler against stub commands that record
+their arguments. It is the only suite that can see the interface at all: it
+catches a label that is still a bare translation key, a menu row that shows when
+it should be hidden, a pause that schedules the wrong duration, and a checkbox
+that disagrees with the file behind it. It skips with a message when `broadwayd`
+is missing, since that comes from `libgtk-3-bin`.
 `docs.sh` checks what the documentation claims about itself: every
 relative link between the markdown files resolves, no page has picked up an em
 dash, the scripts and unit templates the READMEs name are still in the tree, and

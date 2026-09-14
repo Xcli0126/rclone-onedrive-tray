@@ -138,7 +138,8 @@ interrupted, so it stays a decision you make rather than a side effect of answer
 Everything lands in your home directory, and neither script calls `sudo`.
 
 ```
-~/.local/bin/onedrive-sync, onedrive-tray, onedrive-watch, onedrive-check
+~/.local/bin/onedrive-sync, onedrive-tray, onedrive-watch, onedrive-check,
+             onedrive-check-access
 ~/.config/rclone-onedrive-tray/config, filters.txt, exclude-folders.txt
 ~/.config/systemd/user/onedrive-sync.{service,timer}
 ~/.config/systemd/user/onedrive-sync-watch.service
@@ -429,18 +430,20 @@ watch-issues.sh --forget    # report everything again next time
 
 ### Tests
 
-Four suites, none of which needs an rclone remote:
+Five suites, none of which needs an rclone remote:
 
 ```bash
 tests/dependency-matrix.sh      # hides one dependency at a time
 tests/install-flow.sh           # the documented install path, in a sandbox
 tests/filters.sh                # the default filters still filter
+tests/tray.sh                   # builds the real menu and drives every handler
 tests/docs.sh                   # internal links, writing rules, promised files
 ```
 
 The first two point `HOME` and the XDG directories at a temporary tree, replace rclone, systemctl
 and sudo with stubs, and use a probe unit name. `filters.sh` runs the real rclone over a fixture
-directory, and `docs.sh` only reads the repository. None of them can disturb a working install.
+directory, `tray.sh` builds the real GTK menu on a private Broadway display and activates
+every handler against stub commands, and `docs.sh` only reads the repository. None of them can disturb a working install.
 `--verbose` shows every command and its output. CI runs all four on `ubuntu-latest`, which is a
 different distribution, systemd and rclone from the machine they were written on.
 [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) records what they cover, the versions they have

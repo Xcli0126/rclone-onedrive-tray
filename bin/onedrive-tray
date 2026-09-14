@@ -213,6 +213,7 @@ STRINGS = {
         "resync": "同步基线失效，请运行 onedrive-sync --resync",
         "oldrclone": "rclone 版本过旧，不认识 BISYNC_ARGS 里的参数；--resilient/--recover 需要 1.65 或更新版本",
         "auth": "授权可能已过期，需要重新授权 rclone 远程",
+        "access": "访问检查在两侧没找到标记文件，本次没有改动任何东西；用 onedrive-check-access 建回标记，或先修好读不到的那一侧。不要为此跑 --resync",
         "Check file names": "检查文件名",
         "Checking file names…": "正在检查文件名…",
         "onedrive-check is not installed": "没有找到 onedrive-check 脚本",
@@ -1089,12 +1090,19 @@ class Tray:
 
         rc, out, _ = sh(f"systemctl --user is-enabled {self.timer}", timeout=30)
         answer = out.splitlines()[0].strip() if out.strip() else ""
-        if rc != 0 or not answer:
+        # The answer decides, not the exit status: `systemctl is-enabled` exits
+        # non-zero for a unit that exists and is disabled, and reading that as
+        # "unknown" hid a real state behind a vague message. An empty answer is
+        # what an unreadable or unknown unit looks like.
+        if not answer:
             timer = "unknown"
-        elif "enabled" in answer or answer in ("linked", "linked-runtime", "alias"):
+        elif answer.startswith(("enabled", "linked", "alias")):
             timer = "enabled"
-        else:
+        elif answer.startswith(("disabled", "masked", "static", "indirect",
+                                "generated", "transient", "bad")):
             timer = "off"
+        else:
+            timer = "unknown"
         return active, timer
 
     def poll(self):

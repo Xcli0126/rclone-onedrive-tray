@@ -38,6 +38,38 @@ INTERVAL_MIN="5"
 # a trip.
 MAX_DELETE="100"
 
+# Abort a run when a marker file is missing on either side of the pair. This is
+# rclone's own access check and a second, independent safety net beside
+# MAX_DELETE: a network, authorisation or mount problem leaves one side looking
+# empty, and without the check bisync reads that as "everything over there was
+# deleted". With it on, bisync looks for the marker file in the same places on
+# both sides before it changes anything.
+#
+# Off by default, so an existing run keeps the command line it had. Turning it on
+# is a configuration change, and the first run after that fails until the marker
+# files exist:
+#
+#     onedrive-check-access     # creates them, safe to run twice
+#
+# then set CHECK_ACCESS="1" and run one `onedrive-sync --resync`. The abort names
+# the side it could not read, and nothing is copied or deleted when it trips.
+# docs/TROUBLESHOOTING.md has the message and the recovery.
+CHECK_ACCESS="0"
+
+# Name of the marker file the check looks for. Empty means rclone's own default,
+# RCLONE_TEST, which bin/onedrive-check-access creates.
+#
+# Upstream recommends a filename your tree already uses in many places, because
+# the check compares the count and the directories on both sides: a name that is
+# everywhere makes a partial mount or a half-readable tree abort the run, while
+# one marker at the root only proves the root is readable. The tradeoff is that
+# this script cannot create a file you already own, so its contents, and where it
+# lives, become your problem: pick one that is already in the same places on both
+# sides and leave it alone. For example:
+#
+#     CHECK_FILENAME=".sync-id"
+CHECK_FILENAME=""
+
 # Extra arguments handed to `rclone bisync`.
 #   --resilient         retry after less-serious errors instead of demanding --resync
 #   --recover           auto-recover from an interrupted run  (needs rclone >= 1.65)
@@ -46,6 +78,8 @@ MAX_DELETE="100"
 #                       keep BOTH versions of a conflicting file (no data loss)
 #   --stats 2s          emit progress blocks often enough for the tray to show
 #                       a live percentage while a sync is running
+# Do not put --force in here. It bypasses rclone's own delete cap, which would leave
+# MAX_DELETE as the only guard left, and the log warns when it sees it.
 BISYNC_ARGS="--resilient --recover --max-lock 2m --conflict-resolve none --conflict-loser num --stats 2s"
 
 # rclone filter rules, one per line (rclone --filters-file syntax).

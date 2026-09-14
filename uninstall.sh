@@ -62,6 +62,7 @@ rm -f "$UNIT_DIR/$UNIT_NAME-watch.service"
 rm -f "$AUTOSTART"
 rm -f "$BIN_DIR/onedrive-sync" "$BIN_DIR/onedrive-tray" "$BIN_DIR/onedrive-watch"
 rm -f "$BIN_DIR/onedrive-check"
+rm -f "$BIN_DIR/onedrive-check-access"
 
 systemctl --user daemon-reload 2>/dev/null || \
     warn "run 'systemctl --user daemon-reload' after your next login"

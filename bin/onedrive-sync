@@ -17,6 +17,11 @@
 #
 # Configuration: ~/.config/rclone-onedrive-tray/config  (see config.example)
 #
+# The access check (CHECK_ACCESS) is the one setting that changes what bisync
+# demands of the tree rather than only how it behaves: with it on, a marker file
+# has to exist at the same place on both sides, and bin/onedrive-check-access
+# creates it. See docs/TROUBLESHOOTING.md.
+#
 set -uo pipefail
 
 APP="onedrive-sync"
@@ -38,6 +43,10 @@ LOG="${LOG:-$CACHE_DIR/sync.log}"
 FILTERS_FILE="${FILTERS_FILE:-$CONFIG_DIR/filters.txt}"
 EXCLUDE_FOLDERS_FILE="${EXCLUDE_FOLDERS_FILE:-$CONFIG_DIR/exclude-folders.txt}"
 MAX_DELETE="${MAX_DELETE:-100}"
+# Off unless the config asks for it, so an existing install keeps the command
+# line it had. See the access-check paragraph below.
+CHECK_ACCESS="${CHECK_ACCESS:-0}"
+CHECK_FILENAME="${CHECK_FILENAME:-}"
 MAX_LOG_BYTES="${MAX_LOG_BYTES:-5242880}"
 RETRIES="${RETRIES:-3}"
 RETRY_DELAY="${RETRY_DELAY:-60}"
@@ -109,14 +118,26 @@ pair_size() {
     # Only the right half is reliable: with an alias remote rclone resolves the
     # left half to the target path, so anchoring on the local side is what
     # matches in both cases. The -old and -err variants do not match at all.
-    local local_slug listing count best=0
+    local local_slug listing count best=0 left
+    local -a halves=()
     local_slug="$(pair_slug "$LOCAL")"
     for listing in "$RCLONE_CACHE"/bisync/*.."$local_slug".path1.lst; do
         [ -f "$listing" ] || continue
+        left="${listing##*/}"; left="${left%%..*}"
+        case " ${halves[*]:-} " in *" $left "*) ;; *) halves+=("$left") ;; esac
         count="$(grep -c '^-' "$listing" 2>/dev/null || true)"
         count="${count//[^0-9]/}"
         [ -n "$count" ] && [ "$count" -gt "$best" ] && best="$count"
     done
+    # More than one left half means more than one pair names this local path.
+    # Taking the largest count then produced a denominator several times too big
+    # in testing, which made a legitimate deletion look like a mass one, so the
+    # size is reported as unknown and the caller falls back to a small cap.
+    if [ "${#halves[@]}" -gt 1 ]; then
+        log_line "WARNING: ${#halves[@]} bisync pairs share $LOCAL, so the pair size cannot be told apart"
+        printf '0'
+        return
+    fi
     # The local tree is a second opinion, and the only one available before the
     # first run has written a listing. The larger of the two is used, so a small
     # local side cannot inflate the percentage into uselessness.
@@ -155,15 +176,60 @@ elif [ "$MAX_DELETE" -gt 0 ] 2>/dev/null; then
         log_line "NOTICE: delete cap MAX_DELETE=$MAX_DELETE with no known pair size, using --max-delete 5%"
     fi
 else
-    log_line "WARNING: MAX_DELETE='$MAX_DELETE' is not a number, using rclone's --max-delete default of 50%"
+    log_line "WARNING: MAX_DELETE='$MAX_DELETE' is not a usable count, using rclone's --max-delete default of 50%"
+fi
+
+# ---------------------------------------------------------------- access check
+# rclone's --check-access looks for a marker file with the same name in the same
+# places on both sides and aborts before changing anything if it is missing on
+# one of them. That is the failure this project cares most about: a network,
+# authorisation or mount problem leaves one side looking empty, which without the
+# check reads as "everything over there was deleted". Measured on rclone 1.75.1,
+# a missing RCLONE_TEST on Path2 aborts with
+#     "Access test failed: Path1 count 1, Path2 count 0 - RCLONE_TEST"
+#     "Bisync critical error: check file check failed"    (rc 7)
+# and nothing is copied or deleted. rclone never creates the file, hence
+# bin/onedrive-check-access. Off by default: turning it on mid-flight is a
+# configuration change, and a run whose marker files are missing would fail.
+#
+# Measured deviation from the obvious reading: rclone compares names and
+# locations, never contents, so an empty marker file passes. Only a missing one
+# aborts.
+case "${CHECK_ACCESS,,}" in
+    1|true|yes|on|enabled) check_access=1 ;;
+    ''|0|false|no|off|disabled) check_access=0 ;;
+    *) check_access=0
+       log_line "WARNING: CHECK_ACCESS='$CHECK_ACCESS' is not a yes/no value, leaving the access check off" ;;
+esac
+# CHECK_FILENAME only means anything together with the check. An empty value
+# leaves rclone on its own default, which upstream documents as RCLONE_TEST.
+check_filename=""
+if [ "$check_access" -eq 1 ]; then
+    if [ -n "$CHECK_FILENAME" ]; then
+        check_filename="$CHECK_FILENAME"
+        log_line "NOTICE: access check on with an explicit filename: $check_filename"
+    else
+        log_line "NOTICE: access check on, looking for RCLONE_TEST on both sides"
+    fi
 fi
 
 # ---------------------------------------------------------------- build argv
+# --force bypasses rclone's delete cap. Typed on the command line it is logged;
+# inherited from BISYNC_ARGS it used to pass silently, which made every other
+# guard in here look like it was still in force.
+case " $BISYNC_ARGS " in
+    *" --force "*)
+        log_line "WARNING: --force is set in BISYNC_ARGS, so the delete cap cannot stop this run" ;;
+esac
 read -r -a BISYNC_OPTS <<<"$BISYNC_ARGS"
 ARGS=(bisync "$REMOTE" "$LOCAL")
 ARGS+=("${BISYNC_OPTS[@]}")
 ARGS+=(--log-level INFO --log-file "$LOG")
 [ -n "$max_delete_pct" ] && ARGS+=(--max-delete "$max_delete_pct")
+if [ "$check_access" -eq 1 ]; then
+    ARGS+=(--check-access)
+    [ -n "$check_filename" ] && ARGS+=(--check-filename "$check_filename")
+fi
 if [ -n "$FILTERS_FILE" ] && [ -f "$FILTERS_FILE" ]; then
     ARGS+=(--filters-file "$FILTERS_FILE")
 fi
@@ -242,6 +308,12 @@ hint_for() {
     elif grep -qiE 'too many deletes|excessive deletes|deletion limit' <<<"$t"; then
         tag=maxdelete
         msg="more than MAX_DELETE=$MAX_DELETE files would be deleted; if that is intended run: onedrive-sync --force"
+    # Before the generic resync patterns: an access abort also ends with "Bisync
+    # aborted. Must run --resync to recover", and answering that with --resync
+    # sends the user to the one action that cannot fix a missing marker file.
+    elif grep -qiE 'access test failed|check file check failed' <<<"$t"; then
+        tag=access
+        msg="the access check did not find ${CHECK_FILENAME:-RCLONE_TEST} on both sides, so nothing was changed. Restore the file (onedrive-check-access) or fix the side that cannot be read. Do not run --resync for this"
     elif grep -qiE 'lookup .*:53|dial tcp|no such host|Temporary failure in name resolution|server misbehaving' <<<"$t"; then
         tag=network
         msg="network or DNS temporarily unavailable; will retry"

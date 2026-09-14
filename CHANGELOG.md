@@ -42,16 +42,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bookkeeping, not actions; the file counts on both sides stay the same.
   Since a folder that is present locally but no longer synced is a trap (edits in it go
   nowhere), the tray asks whether to delete the local copy when you untick one.
-- Four test suites, runnable with no OneDrive account and no risk to a working setup.
+- `tests/tray.sh`: the tray is a GUI, so this is the first suite that can see it. It starts GTK
+  3's Broadway backend on a private runtime directory, builds the real menu, and activates every
+  handler against stubs that record their arguments, covering both languages, the quota row, the
+  three pause durations, a disabled or unreadable timer, the folder checkboxes, the single-instance
+  lock and a quoted `OPEN_APP_CMD`. Against the tray from before the previous round it fails 11
+  cases. It skips with a message when `broadwayd` is missing, and CI installs `libgtk-3-bin` for it.
+- Five test suites, runnable with no OneDrive account and no risk to a working setup.
   `tests/dependency-matrix.sh` hides one dependency at a time and checks that the behaviour matches
   what `docs/DEPENDENCIES.md` promises. `tests/install-flow.sh` runs the documented install path,
   uninstall included, inside a sandbox and checks the files and the rclone command line it
   produces. `tests/filters.sh` runs rclone over a fixture tree to prove each default rule really
   filters. `tests/docs.sh` checks that the internal links resolve, that no page has picked up an em
   dash, that the files the READMEs name still exist, and that the prose does not contradict the
-  number of suites. All four are wired into CI.
+  number of suites. All five are wired into CI.
 - `docs/COMPATIBILITY.md`: the versions this was developed against, the behaviour measured on a
   real account, and an explicit list of what has never been tried.
+- An opt-in access check, `CHECK_ACCESS` and `CHECK_FILENAME`, which is rclone's own second safety
+  net beside `MAX_DELETE`: bisync looks for a marker file in the same places on both sides and
+  aborts before changing anything when one is missing, which is what a network, authorisation or
+  mount problem looks like from the other side. rclone never creates the file, so
+  `onedrive-check-access` does, at the root of both sides, safely twice. Verified with real rclone
+  1.75.1: with both markers present the run succeeds, with one missing it aborts and changes
+  nothing, and with the check off the same state silently deletes the local marker, which is the
+  loss the check prevents. Measured, and contrary to the obvious assumption, an empty marker file
+  passes: rclone compares names and locations, never contents. A missing marker gets its own
+  `[access]` hint rather than being reported as a resync problem, since `--resync` cannot fix it.
 - `onedrive-check`, a pre-flight walk of the local tree that reports names OneDrive will refuse,
   names rclone will silently rename on the way up, and paths that are too long. It exits non-zero
   when something will actually fail, so it can be scripted. `onedrive-sync --resync` runs it first
@@ -81,6 +97,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `--force` in `BISYNC_ARGS` bypassed the delete cap and said nothing, while the same flag typed on
+  the command line was logged. It is now reported either way, and the config example warns against
+  putting it there.
+- The delete cap's denominator could belong to a different pair. When two bisync pairs name the same
+  local directory, the wrapper picked the largest listing it found, which in testing made a
+  legitimate 100-file deletion on a 300-file pair compare against 3000 files and abort. More than
+  one candidate is now treated as an unknown size, with a warning, and the conservative 5% cap
+  applies instead of a number that is confidently wrong.
+- A timer unit that systemd reports as `disabled` was shown as `Automatic sync state unknown`,
+  because the exit status was consulted before the answer. `systemctl is-enabled` exits non-zero for
+  a unit that exists and is disabled, so the answer now decides the state and an empty answer means
+  unknown.
 - The delete cap had two edges that switched off rclone's own safety net. rclone reads
   `--max-delete` as a percentage and defaults to 50%, but the flag is only left at its default when
   it is absent, so a `MAX_DELETE` that was not a number, or one at least as large as the folder,

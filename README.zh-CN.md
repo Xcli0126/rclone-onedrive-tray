@@ -357,12 +357,13 @@ watch-issues.sh --forget    # 清空记录，下次全部重报
 
 ### 测试
 
-四个测试脚本都不需要真的 rclone 远程：
+五个测试脚本都不需要真的 rclone 远程：
 
 ```bash
 tests/dependency-matrix.sh      # 每次只藏起来一个依赖
 tests/install-flow.sh           # 在沙箱里走一遍文档里的安装流程
 tests/filters.sh                # 默认过滤规则真的能过滤
+tests/tray.sh                   # 真的把菜单建出来，逐个 handler 驱动
 tests/docs.sh                   # 文档互链、写字规矩、文档里点名的文件
 ```
 
