@@ -14,6 +14,9 @@
 # Usage:
 #   onedrive-sync              incremental sync (3 attempts, 60s apart)
 #   onedrive-sync --resync     rebuild the sync baseline
+#   onedrive-sync --dry-run    show what a run would do, change nothing
+#   onedrive-sync --verbose    pass --verbose through to rclone
+#   onedrive-sync --force      ignore the delete cap for this run
 #
 # Configuration: ~/.config/rclone-onedrive-tray/config  (see config.example)
 #
@@ -325,21 +328,27 @@ if [ -n "$EXCLUDE_FOLDERS_FILE" ] && [ -f "$EXCLUDE_FOLDERS_FILE" ]; then
     [ "$excluded" -gt 0 ] && log_line "NOTICE: ${excluded} folder(s) deselected"
 fi
 
+resync_wanted=0
 for arg in "$@"; do
     case "$arg" in
         --force)
             ARGS+=(--force)
             log_line "NOTICE: --force given, the delete cap will not stop this run" ;;
-        --resync|--dry-run|--verbose)
+        --resync)
+            resync_wanted=1
+            ARGS+=("$arg") ;;
+        --dry-run|--verbose)
             ARGS+=("$arg") ;;
         *)
             printf '%s: unknown option: %s\n' "$APP" "$arg" >&2
-            printf 'usage: %s [--resync] [--force]\n' "$APP" >&2
+            printf 'usage: %s [--resync] [--force] [--dry-run] [--verbose]\n' "$APP" >&2
             exit 2 ;;
     esac
 done
 
-if [ "${1:-}" = "--resync" ]; then
+# The flag, not $1: --resync used to be recognised in first position only, so
+# "onedrive-sync --force --resync" skipped the name check and the log line.
+if [ "$resync_wanted" -eq 1 ]; then
     # A name OneDrive refuses turns the first full upload into a retry loop, so
     # the tree is checked once, here, where the cost of a walk is nothing next to
     # the transfer that follows. It reports and carries on: the user may well

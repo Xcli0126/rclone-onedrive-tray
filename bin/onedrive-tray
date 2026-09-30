@@ -2147,6 +2147,7 @@ is already running, says so and exits.
                  land; when it is, the window opens on its own.
   --show-icon    write SHOW_ICON="1" to the config and exit
   --hide-icon    write SHOW_ICON="0" to the config and exit
+                 given both, the last one wins
   --version      print the version and exit
   --help         print this text and exit
 
@@ -2176,8 +2177,12 @@ def main(argv=None):
 
     if "--show-icon" in args or "--hide-icon" in args:
         # One value, one file, then out. A running tray picks it up the next time
-        # it starts, or from the settings dialog.
-        value = "1" if "--show-icon" in args else "0"
+        # it starts, or from the settings dialog. Given both flags, the last one
+        # wins: --show-icon used to win wherever it sat, which made a
+        # contradictory pair quietly mean "show".
+        last = max(i for i, arg in enumerate(args)
+                   if arg in ("--show-icon", "--hide-icon"))
+        value = "1" if args[last] == "--show-icon" else "0"
         try:
             update_config_file(CONFIG_FILE, {"SHOW_ICON": value})
         except OSError as exc:

@@ -44,7 +44,22 @@ say()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31m[x]\033[0m %s\n' "$*" >&2; exit 1; }
 
-usage() { sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; }
+# The config file is read back with `.` by onedrive-sync, so a value holding a
+# quote, a dollar or a backtick has to be escaped or it sources to something
+# else. bin/onedrive-tray escapes the same four characters when its settings
+# dialog writes the same file.
+config_quote() {
+    local text="$1"
+    text="${text//\\/\\\\}"
+    text="${text//\"/\\\"}"
+    text="${text//\$/\\\$}"
+    text="${text//\`/\\\`}"
+    printf '%s' "$text"
+}
+
+# The help is this file's header comment, up to the first line that is not a
+# comment, so it cannot go stale when the block changes size.
+usage() { sed -n '2,/^[^#]/p' "$0" | sed -e '$d' -e 's/^# \{0,1\}//'; }
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -198,9 +213,9 @@ esac
 
 cat > "$CONFIG_FILE" <<EOF
 # Written by setup.sh on $(date '+%Y-%m-%d %H:%M')
-REMOTE="$REMOTE"
-LOCAL="$LOCAL_IN"
-UNIT_NAME="$UNIT_NAME"
+REMOTE="$(config_quote "$REMOTE")"
+LOCAL="$(config_quote "$LOCAL_IN")"
+UNIT_NAME="$(config_quote "$UNIT_NAME")"
 INTERVAL_MIN="$INTERVAL"
 MAX_DELETE="100"
 # Bandwidth cap in rclone size syntax (1M, 500k, 1.5M). Empty means unlimited.
@@ -211,10 +226,10 @@ BW_LIMIT=""
 CHECK_ACCESS="0"
 CHECK_FILENAME=""
 BISYNC_ARGS="--resilient --recover --max-lock 2m --conflict-resolve none --conflict-loser num --stats 2s"
-FILTERS_FILE="$FILTERS_FILE"
-EXCLUDE_FOLDERS_FILE="$EXCLUDE_FOLDERS_FILE"
+FILTERS_FILE="$(config_quote "$FILTERS_FILE")"
+EXCLUDE_FOLDERS_FILE="$(config_quote "$EXCLUDE_FOLDERS_FILE")"
 
-LOG="$CACHE_DIR/sync.log"
+LOG="$(config_quote "$CACHE_DIR/sync.log")"
 OPEN_APP_CMD=""
 OPEN_APP_NAME="the app"
 UI_LANG=""
@@ -255,7 +270,10 @@ elif [ "$(ask 'Run it now? (Y/n)' 'y')" = "y" ]; then
     RUN_RESYNC=1
 fi
 if [ "$RUN_RESYNC" -eq 1 ]; then
-    "${BIN_DIR:-$HOME/.local/bin}/onedrive-sync" --resync
+    # The same prefix install.sh defaults to, and the one it was just called
+    # with. PREFIX is unset here, so this used to read a variable this script
+    # never defines.
+    "${PREFIX:-$HOME/.local}/bin/onedrive-sync" --resync
 fi
 
 echo

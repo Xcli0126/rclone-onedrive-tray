@@ -38,10 +38,16 @@ CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/rclone-onedrive-tray"
 CONFIG_FILE="$CONFIG_DIR/config"
 
 DRY_RUN=0
+
+# Print the whole header comment, whatever its length: a fixed range silently
+# truncates the help as soon as the comment grows, which is what it used to do
+# at the Configuration line.
+usage() { sed -n '2,/^[^#]/p' "$0" | sed -e '$d' -e 's/^# \{0,1\}//'; }
+
 while [ $# -gt 0 ]; do
     case "$1" in
         --dry-run|-n) DRY_RUN=1; shift ;;
-        -h|--help) sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) usage; exit 0 ;;
         *) printf '%s: unknown option: %s\n' "$APP" "$1" >&2
            printf 'usage: %s [--dry-run]\n' "$APP" >&2
            exit 2 ;;

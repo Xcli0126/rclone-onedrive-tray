@@ -17,12 +17,17 @@ PREFIX="${PREFIX:-$HOME/.local}"
 START_TRAY=1
 NM_DISPATCHER=0
 
+# The help is the comment block at the top of this file, up to the first line
+# that is not a comment. A fixed line range prints shell code the moment the
+# block grows or shrinks, which is what it used to do.
+usage() { sed -n '2,/^[^#]/p' "$0" | sed -e '$d' -e 's/^# \{0,1\}//'; }
+
 while [ $# -gt 0 ]; do
     case "$1" in
-        --prefix)   PREFIX="$2"; shift 2 ;;
+        --prefix)   PREFIX="${2:?--prefix needs a directory}"; shift 2 ;;
         --no-start) START_TRAY=0; shift ;;
         --with-nm-dispatcher) NM_DISPATCHER=1; shift ;;
-        -h|--help)  sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help)  usage; exit 0 ;;
         *)          echo "unknown option: $1" >&2; exit 2 ;;
     esac
 done

@@ -646,6 +646,41 @@ run "a refused token is an expired sign-in, and says what to click" 1 "[auth]" \
 run "and the message names the tray item and the command" 1 "config reconnect" \
     cap_env CAP_STDERR="$CAP_AUTH" CAP_RC=1 "$HOME/.local/bin/onedrive-sync"
 
+# ------------------------------------------------- the help text and the flags
+# Every script prints its own header comment as its help, extracted up to the
+# first line that is not a comment. Two of them used a fixed line range instead,
+# so their help ended with a line of bash. install.sh --prefix with nothing
+# after it also died inside bash, naming a variable rather than the missing
+# directory.
+title "the help text, and a flag with no value"
+for script in install.sh uninstall.sh setup.sh; do
+    help_out="$(bash "$SRC_DIR/$script" --help 2>&1)"
+    if grep -q '^set -' <<<"$help_out"; then
+        bad "$script --help ends in shell code: $(grep '^set -' <<<"$help_out")"
+    else
+        ok "$script --help stops at the comment block"
+    fi
+done
+run "onedrive-check-access --help says where the config is" 0 "Configuration:" \
+    "$SRC_DIR/bin/onedrive-check-access" --help
+run "install.sh --prefix with no value says what is missing" 1 \
+    "--prefix needs a directory" bash "$SRC_DIR/install.sh" --prefix
+
+# ------------------------------------------------------------ --resync anywhere
+# --resync used to be read from the first position only, so the same run with
+# its flags the other way round skipped the name check and left no NOTICE.
+title "--resync in any position"
+cap_config
+: > "$WORK/cap-args"
+: > "$CAP/sync.log"
+cap_env "$HOME/.local/bin/onedrive-sync" --force --resync >/dev/null 2>&1 || true
+resync_count="$(tr ' ' '\n' < "$WORK/cap-args" | grep -c '^--resync$' || true)"
+if [ "$resync_count" = 1 ] && grep -q 'NOTICE: --resync requested' "$CAP/sync.log"; then
+    ok "--force --resync checks the names, and --resync reaches rclone once"
+else
+    bad "--force --resync: $resync_count --resync on the command line, NOTICE $(grep -c 'NOTICE: --resync requested' "$CAP/sync.log" || true)"
+fi
+
 # ---------------------------------------------------------------- uninstall
 title "uninstall.sh"
 UNINSTALL_OUT="$(bash "$SRC_DIR/uninstall.sh" --prefix "$HOME/.local" 2>&1)"

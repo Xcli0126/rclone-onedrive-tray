@@ -1823,6 +1823,12 @@ PY
 run "--show-icon writes it back" 0 "SHOW_ICON=1" cli --show-icon
 check "and the value is in the file" \
     grep -q '^SHOW_ICON="1"$' "$CLI_HOME/rclone-onedrive-tray/config"
+# Both flags at once is a contradiction. --show-icon used to win wherever it
+# sat, so "hide then show" and the other order meant the same thing.
+run "given both icon flags, the last one wins: hide then show" \
+    0 "SHOW_ICON=1" cli --hide-icon --show-icon
+run "given both icon flags, the last one wins: show then hide" \
+    0 "SHOW_ICON=0" cli --show-icon --hide-icon
 
 title "--settings with and without a tray already running"
 if run_driver cli-settings; then

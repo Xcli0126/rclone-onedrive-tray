@@ -41,6 +41,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An unwritable log is reported before the run starts, with the path and the reason. The failure
   used to be silent: the directory creation hid its own error and the run could report success
   having recorded nothing.
+- Config values are quoted before they reach a shell. The tray ran `systemctl` through
+  `subprocess.run(..., shell=True)` with the unit name from the config pasted in unquoted, so a
+  name with a space broke every menu action and a name with a `;` was command injection. Every
+  argument goes through `shlex.quote` now.
+- `onedrive-sync --resync` passed `--resync` to rclone twice.
+- `onedrive-sync --force --resync` skipped the name check and wrote no `NOTICE` line, because the
+  flag was only recognised in the first position. The order no longer matters.
+- Every script takes its help from its own header comment, up to the first line that is not a
+  comment. `install.sh --help` and `setup.sh --help` used a fixed line range and ended with a line
+  of shell code; `onedrive-check-access --help` stopped one line short of saying where the config
+  is.
+- `install.sh --prefix` with no value after it failed inside bash, naming a variable rather than
+  the missing directory.
+- `setup.sh` wrote config values without escaping, so a remote or a path containing a quote, a `$`
+  or a backtick produced a file that sourced to something else. It escapes them the way the tray's
+  settings dialog does, and it runs the first sync from the same prefix `install.sh` defaults to
+  instead of from a variable it never set.
+- `onedrive-tray --show-icon --hide-icon` wrote `1` whichever order the two were given in. The last
+  flag now wins, and `--help` says so.
+- `docs/COMPATIBILITY.md` listed the case counts of two suites as they were several versions ago.
 
 ## [1.1.0] - 2026-09-30
 

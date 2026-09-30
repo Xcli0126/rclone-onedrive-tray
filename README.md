@@ -341,6 +341,8 @@ From a terminal:
 ```bash
 onedrive-sync                 # one incremental sync (3 attempts)
 onedrive-sync --resync        # rebuild the baseline
+onedrive-sync --dry-run       # show what a run would do, change nothing
+onedrive-sync --force         # ignore the delete cap for this run
 onedrive-check                # names and paths OneDrive will refuse
 systemctl --user list-timers onedrive-sync.timer
 systemctl --user start onedrive-sync.service     # sync now

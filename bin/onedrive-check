@@ -30,7 +30,7 @@ MAX_SHOWN=20
 
 # Print the whole header comment, whatever its length: a fixed range silently
 # truncates the help as soon as the comment grows.
-usage() { sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,/^[^#]/p' "$0" | sed -e '$d' -e 's/^# \{0,1\}//'; }
 
 die() { printf '%s: %s\n' "$APP" "$*" >&2; exit 2; }
 

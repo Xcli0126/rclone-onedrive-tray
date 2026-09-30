@@ -285,6 +285,8 @@ Quit
 ```bash
 onedrive-sync                 # 跑一次增量同步，最多 3 次尝试
 onedrive-sync --resync        # 重建同步基线
+onedrive-sync --dry-run       # 只显示这一轮会做什么，不改动任何东西
+onedrive-sync --force         # 这一轮无视删除上限
 onedrive-check                # 检查 OneDrive 会拒绝或改名的文件名和路径
 systemctl --user list-timers onedrive-sync.timer
 systemctl --user start onedrive-sync.service     # 立即同步

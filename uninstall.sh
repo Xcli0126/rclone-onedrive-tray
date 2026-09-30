@@ -16,11 +16,15 @@ XDG_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}"
 PURGE=0
 PREFIX_GIVEN=0
 
+# The help is this file's header comment, up to the first line that is not a
+# comment, so it cannot go stale when the block changes size.
+usage() { sed -n '2,/^[^#]/p' "$0" | sed -e '$d' -e 's/^# \{0,1\}//'; }
+
 while [ $# -gt 0 ]; do
     case "$1" in
         --prefix)   PREFIX="${2:?--prefix needs a directory}"; PREFIX_GIVEN=1; shift 2 ;;
         --purge)    PURGE=1; shift ;;
-        -h|--help)  sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help)  usage; exit 0 ;;
         *)          echo "unknown option: $1" >&2; exit 2 ;;
     esac
 done
