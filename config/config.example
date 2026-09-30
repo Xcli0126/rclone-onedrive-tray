@@ -82,6 +82,15 @@ CHECK_FILENAME=""
 # MAX_DELETE as the only guard left, and the log warns when it sees it.
 BISYNC_ARGS="--resilient --recover --max-lock 2m --conflict-resolve none --conflict-loser num --stats 2s"
 
+# Bandwidth cap for the whole run, in rclone size syntax: 1M, 500k, 1.5M. Empty
+# means no limit, which is what rclone does on its own.
+#
+# The cap covers the upload and the download together, so a sync on a slow line
+# stops competing with everything else on it. The tray's settings dialog writes
+# this key, and onedrive-sync refuses a value that is not a plain size, logging
+# why: a value rclone rejects would fail every scheduled run.
+BW_LIMIT=""
+
 # rclone filter rules, one per line (rclone --filters-file syntax).
 FILTERS_FILE="$HOME/.config/rclone-onedrive-tray/filters.txt"
 

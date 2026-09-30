@@ -94,9 +94,12 @@ check "writes the config" test -f "$CFG"
 check "writes the filters" test -f "$CFG_DIR/filters.txt"
 check "writes the exclude list" test -f "$CFG_DIR/exclude-folders.txt"
 for line in "REMOTE=\"$REMOTE\"" "LOCAL=\"$LOCAL_DIR\"" "UNIT_NAME=\"$UNIT\"" \
-            "INTERVAL_MIN=\"7\"" "WATCH=\"1\"" "MAX_DELETE=\"100\""; do
+            "INTERVAL_MIN=\"7\"" "WATCH=\"1\"" "MAX_DELETE=\"100\"" \
+            "BW_LIMIT=\"\""; do
     check "config holds $line" grep -qxF -- "$line" "$CFG"
 done
+check "config.example documents the same bandwidth key" \
+    grep -qxF -- 'BW_LIMIT=""' "$SRC_DIR/config/config.example"
 check "BISYNC_ARGS carries the recovery flags" \
     grep -q '^BISYNC_ARGS=".*--resilient.*--recover.*--max-lock 2m' "$CFG"
 if [ -s "$CALLS" ]; then
@@ -367,6 +370,164 @@ if grep -q 'maxdelete' "$CAP/sync.log"; then
 else
     ok "and the log has no delete-cap tag for it"
 fi
+
+# ---------------------------------------------------------------- the bandwidth limit
+# The tray's settings dialog writes BW_LIMIT. A value rclone cannot parse would
+# turn every scheduled run into a failure, and the tray has nothing to report but
+# "rclone failed", so the shape is judged here and an unusable value is dropped
+# into the log instead of onto the command line. The CAP stub already records the
+# argv verbatim, so one config rewrite per case is all this needs.
+title "the bandwidth limit"
+probe_config() {  # probe_config [extra config text]
+    cat > "$CAP/cfg/rclone-onedrive-tray/config" <<EOF
+REMOTE="capfake:Vault"
+LOCAL="$CAP/local"
+LOG="$CAP/sync.log"
+RCLONE="rclone"
+MAX_DELETE="100"
+RETRIES="1"
+${1:-}
+EOF
+}
+probe_run() {  # probe_run -> the argv the stub recorded
+    : > "$WORK/cap-args"; : > "$CAP/sync.log"
+    env PATH="$CAP:$PATH" XDG_CONFIG_HOME="$CAP/cfg" XDG_CACHE_HOME="$CAP/cache" \
+        CAP_ARGS="$WORK/cap-args" "$HOME/.local/bin/onedrive-sync" >/dev/null 2>&1 || true
+    cat "$WORK/cap-args" 2>/dev/null
+}
+probe_case() { probe_config "${1:-}"; probe_run; }
+
+for value in 1M 5M 10M 500k 1.5M; do
+    args="$(probe_case "BW_LIMIT=\"$value\"")"
+    check "BW_LIMIT=$value reaches rclone as --bwlimit" \
+        grep -qF -- "--bwlimit $value" <<<"$args"
+done
+
+# A settings dialog may hand the value over with space around it, or with quotes
+# as part of it. Both are stripped, and the size that reaches rclone is the bare
+# one, because "--bwlimit '  10M '" is not a size rclone would parse either.
+args="$(probe_case 'BW_LIMIT="  10M  "')"
+check "surrounding whitespace is trimmed" grep -qF -- '--bwlimit 10M' <<<"$args"
+args="$(probe_case 'BW_LIMIT="\"500k\""')"
+check "a value carrying quotes is unwrapped" grep -qF -- '--bwlimit 500k' <<<"$args"
+
+# Empty and absent both mean no limit, which is rclone's own default, so no flag
+# is passed and the command line stays as it was for every existing install.
+for absent in 'BW_LIMIT=""' ''; do
+    args="$(probe_case "$absent")"
+    if grep -q -- '--bwlimit' <<<"$args"; then
+        bad "'$absent' still passed --bwlimit"
+    else
+        ok "'$absent' means no limit, and no flag"
+    fi
+done
+
+# A value rclone would reject fails every run, so it is refused here with the
+# reason in the log. Each of these has the wrong shape for a different reason.
+for bad_value in '5M/1M' 'fast' 'M5' '1..5M' '5.' '-5M'; do
+    args="$(probe_case "BW_LIMIT=\"$bad_value\"")"
+    if grep -q -- '--bwlimit' <<<"$args"; then
+        bad "BW_LIMIT=$bad_value was passed to rclone anyway"
+    elif grep -qF "BW_LIMIT='$bad_value' is not a usable rclone size" "$CAP/sync.log"; then
+        ok "BW_LIMIT=$bad_value is refused, with the reason in the log"
+    else
+        bad "BW_LIMIT=$bad_value was dropped without a reason in the log"
+    fi
+done
+
+# ---------------------------------------------------------------- empty vs absent keys
+# BISYNC_ARGS="" used to read as "unset", so emptying it handed the full default
+# set back to somebody who had just asked for no extra flags. Whether the key is
+# in the config at all is what tells the two apart.
+title "an empty BISYNC_ARGS"
+args="$(probe_case 'BISYNC_ARGS=""')"
+if grep -q -- '--resilient' <<<"$args"; then
+    bad 'BISYNC_ARGS="" still brought the default flags back'
+else
+    ok "an explicitly empty BISYNC_ARGS passes no extra flags"
+fi
+check "and the log says the value was empty" \
+    grep -qF "BISYNC_ARGS is set but empty" "$CAP/sync.log"
+
+args="$(probe_case)"
+check "an absent key still gets the documented default" \
+    grep -qF -- '--resilient --recover --max-lock 2m' <<<"$args"
+check "and the log says where the flags came from" \
+    grep -qF "BISYNC_ARGS is not in the config" "$CAP/sync.log"
+
+args="$(probe_case 'BISYNC_ARGS="--resilient"')"
+check "a value that is set is used as written" grep -qF -- '--resilient' <<<"$args"
+if grep -qF -- '--conflict-resolve' <<<"$args"; then
+    bad "the default set leaked back in beside an explicit value"
+else
+    ok "and nothing from the default set is added to it"
+fi
+
+# ---------------------------------------------------------------- the exclude list
+# The tray's "Folders to sync" menu writes this file. A line holding only spaces
+# is not a folder, and it used to become --exclude "/   /**": rclone matched that
+# on every run.
+title "the exclude list"
+EXF="$WORK/exclude-folders.txt"
+printf 'Keep\n\n   \t \n# a comment\nDrop\r\n  Spaced  \n/root\n..\nEvil..Dir\n' > "$EXF"
+args="$(probe_case "EXCLUDE_FOLDERS_FILE=\"$EXF\"")"
+check "a plain name is excluded" grep -qF -- '--exclude /Keep/**' <<<"$args"
+check "a CRLF line is excluded without the CR" grep -qF -- '--exclude /Drop/**' <<<"$args"
+check "a name with space around it is trimmed" grep -qF -- '--exclude /Spaced/**' <<<"$args"
+check "exactly the three usable names reach rclone" \
+    test "$(grep -o -- '--exclude' <<<"$args" | wc -l)" -eq 3
+if grep -qE -- '--exclude /[[:space:]]+/\*\*' <<<"$args"; then
+    bad "a whitespace-only line still became an exclude rule"
+else
+    ok "a whitespace-only line is skipped"
+fi
+check "the log counts only the folders that were kept" \
+    grep -qF "3 folder(s) deselected" "$CAP/sync.log"
+# A slash or a .. would step outside the top level the tray offered, so the name
+# is refused with the reason rather than handed to rclone.
+check "a name with a slash is refused, and the log says so" \
+    grep -qF "ignoring exclude entry '/root'" "$CAP/sync.log"
+check "a name with .. is refused too" \
+    grep -qF "ignoring exclude entry 'Evil..Dir'" "$CAP/sync.log"
+check "and the bare .. entry with it" \
+    grep -qF "ignoring exclude entry '..'" "$CAP/sync.log"
+
+# ---------------------------------------------------------------- the log itself
+# mkdir -p with 2>/dev/null hid its own failure, so a run could report success
+# having written no log at all, and the failure hint then pointed at a file that
+# could not exist.
+title "a log that cannot be written"
+RO="$WORK/readonly"
+mkdir -p "$RO"
+chmod 500 "$RO"
+if [ -w "$RO" ]; then
+    skip "a 0500 directory is still writable here, so the log check was not exercised"
+else
+    probe_config "LOG=\"$RO/sync.log\""
+    : > "$WORK/cap-args"
+    run "a run whose log cannot be opened fails, naming the path" 1 "$RO/sync.log" \
+        env PATH="$CAP:$PATH" XDG_CONFIG_HOME="$CAP/cfg" XDG_CACHE_HOME="$CAP/cache" \
+            CAP_ARGS="$WORK/cap-args" "$HOME/.local/bin/onedrive-sync"
+    check "and it stopped before touching the remote" test ! -s "$WORK/cap-args"
+
+    # The same defect one level up: the directory cannot be created at all.
+    probe_config "LOG=\"$RO/nested/sync.log\""
+    : > "$WORK/cap-args"
+    out="$(env PATH="$CAP:$PATH" XDG_CONFIG_HOME="$CAP/cfg" XDG_CACHE_HOME="$CAP/cache" \
+        CAP_ARGS="$WORK/cap-args" "$HOME/.local/bin/onedrive-sync" 2>&1)"
+    rc=$?
+    if [ "$rc" -ne 0 ] && grep -qF "$RO/nested/sync.log" <<<"$out"; then
+        ok "a log directory that cannot be created is reported too"
+    else
+        bad "an uncreatable log directory passed silently (rc=$rc)"
+    fi
+    check "and that run stopped before touching the remote too" \
+        test ! -s "$WORK/cap-args"
+fi
+chmod 700 "$RO"
+
+# The sections below read the CAP log, so the config goes back to the plain one.
+probe_config
 
 # ---------------------------------------------------------------- the access check
 # rclone's --check-access aborts a run when a marker file is missing on one side,

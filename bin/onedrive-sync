@@ -50,7 +50,21 @@ CHECK_FILENAME="${CHECK_FILENAME:-}"
 MAX_LOG_BYTES="${MAX_LOG_BYTES:-5242880}"
 RETRIES="${RETRIES:-3}"
 RETRY_DELAY="${RETRY_DELAY:-60}"
-BISYNC_ARGS="${BISYNC_ARGS:---resilient --recover --max-lock 2m --conflict-resolve none --conflict-loser num --stats 2s}"
+# An absent key keeps the documented defaults. A key that is present and empty
+# means exactly that, no extra flags: somebody who empties it is asking for the
+# command line rclone would have built on its own. The old :- expansion could not
+# tell the two apart and handed the full default set to both.
+DEFAULT_BISYNC_ARGS="--resilient --recover --max-lock 2m --conflict-resolve none --conflict-loser num --stats 2s"
+if [ -n "${BISYNC_ARGS+x}" ]; then
+    bisync_args_origin="config"
+else
+    BISYNC_ARGS="$DEFAULT_BISYNC_ARGS"
+    bisync_args_origin="default"
+fi
+# Bandwidth cap for the whole run, in rclone size syntax. Empty or absent means
+# no limit at all. The tray's settings dialog writes this key, so the value is
+# read tolerantly here and its shape judged in the argv block further down.
+BW_LIMIT="${BW_LIMIT:-}"
 # The lock lives beside the state it protects, not in /tmp: a fixed /tmp name
 # would serialise every configuration on the machine against each other, and
 # /tmp is world-writable, so any local user could hold it and stall the timer.
@@ -66,7 +80,18 @@ command -v "$RCLONE" >/dev/null 2>&1 || die "rclone not found in PATH"
 command -v flock >/dev/null 2>&1 ||
     die "flock not found (it ships with util-linux); refusing to run without the lock"
 
-mkdir -p "$(dirname "$LOG")" "$LOCAL" "$CACHE_DIR" 2>/dev/null
+# An unwritable log directory used to be silent: the directory creation hid its
+# own failure, the run carried on and could "succeed" having recorded nothing,
+# and the failure hint then pointed at a file that could not exist. Open the log
+# for append here, before the run, and stop with the path if that fails.
+log_dir="$(dirname "$LOG")"
+mkdir -p "$log_dir" "$LOCAL" "$CACHE_DIR" 2>/dev/null || true
+if ! log_err="$({ : >>"$LOG"; } 2>&1)"; then
+    # bash's own message ends with the reason ("... : Permission denied").
+    log_err="${log_err##*: }"
+    [ -n "$log_err" ] || log_err="it could not be opened for append"
+    die "cannot write the log $LOG: $log_err (check that $log_dir is writable, or point LOG somewhere else in $CONFIG_FILE)"
+fi
 
 log_line() { printf '%s %s\n' "$(date '+%Y/%m/%d %H:%M:%S')" "$*" >>"$LOG"; }
 
@@ -214,6 +239,19 @@ if [ "$check_access" -eq 1 ]; then
 fi
 
 # ---------------------------------------------------------------- build argv
+# Which of the two BISYNC_ARGS cases this run is in, said out loud: an empty
+# value is a decision, and it should be possible to tell it apart in the log from
+# a config that never had the key.
+case "$bisync_args_origin" in
+    config)
+        if [ -n "$BISYNC_ARGS" ]; then
+            log_line "NOTICE: BISYNC_ARGS is set, using it: $BISYNC_ARGS"
+        else
+            log_line "NOTICE: BISYNC_ARGS is set but empty, so no extra flags are passed to rclone"
+        fi ;;
+    default)
+        log_line "NOTICE: BISYNC_ARGS is not in the config, using the built-in defaults" ;;
+esac
 # --force bypasses rclone's delete cap. Typed on the command line it is logged;
 # inherited from BISYNC_ARGS it used to pass silently, which made every other
 # guard in here look like it was still in force.
@@ -226,6 +264,28 @@ ARGS=(bisync "$REMOTE" "$LOCAL")
 ARGS+=("${BISYNC_OPTS[@]}")
 ARGS+=(--log-level INFO --log-file "$LOG")
 [ -n "$max_delete_pct" ] && ARGS+=(--max-delete "$max_delete_pct")
+
+# The tray's settings dialog writes BW_LIMIT. A value rclone cannot parse turns
+# every scheduled run into a failure, and the tray has no way to say why, so the
+# shape is checked here: digits and letters with at most one dot, starting with a
+# digit. The value is read tolerantly, since a dialog may hand it over with
+# whitespace or a pair of quotes around it.
+bw_limit="${BW_LIMIT#"${BW_LIMIT%%[![:space:]]*}"}"
+bw_limit="${bw_limit%"${bw_limit##*[![:space:]]}"}"
+case "$bw_limit" in
+    \"*\") bw_limit="${bw_limit#\"}"; bw_limit="${bw_limit%\"}" ;;
+    \'*\') bw_limit="${bw_limit#\'}"; bw_limit="${bw_limit%\'}" ;;
+esac
+bw_limit="${bw_limit#"${bw_limit%%[![:space:]]*}"}"
+bw_limit="${bw_limit%"${bw_limit##*[![:space:]]}"}"
+if [ -n "$bw_limit" ]; then
+    if [[ "$bw_limit" =~ ^[0-9][0-9A-Za-z]*(\.[0-9A-Za-z]+)?$ ]]; then
+        ARGS+=(--bwlimit "$bw_limit")
+        log_line "NOTICE: bandwidth limit $bw_limit, passed as --bwlimit"
+    else
+        log_line "WARNING: BW_LIMIT='$BW_LIMIT' is not a usable rclone size (for example 1M, 500k, 1.5M), so no --bwlimit is passed"
+    fi
+fi
 if [ "$check_access" -eq 1 ]; then
     ARGS+=(--check-access)
     [ -n "$check_filename" ] && ARGS+=(--check-filename "$check_filename")
@@ -245,7 +305,20 @@ if [ -n "$EXCLUDE_FOLDERS_FILE" ] && [ -f "$EXCLUDE_FOLDERS_FILE" ]; then
     excluded=0
     while IFS= read -r folder || [ -n "$folder" ]; do
         folder="${folder%%$'\r'}"                 # tolerate CRLF
+        # Trim, so a line that holds nothing but spaces is nothing. It used to
+        # become --exclude "/   /**", which is not a folder and not a no-op
+        # either: rclone tried to match it on every run.
+        folder="${folder#"${folder%%[![:space:]]*}"}"
+        folder="${folder%"${folder##*[![:space:]]}"}"
         case "$folder" in ''|'#'*) continue ;; esac
+        # One top-level folder name per line. A slash or a .. would escape the
+        # top level and exclude a subtree the tray never offered, so it is
+        # refused here with the reason rather than handed to rclone.
+        case "$folder" in
+            */*|*..*)
+                log_line "WARNING: ignoring exclude entry '$folder': a folder name here must not contain '/' or '..'"
+                continue ;;
+        esac
         ARGS+=(--exclude "/${folder}/**")
         excluded=$((excluded + 1))
     done < "$EXCLUDE_FOLDERS_FILE"

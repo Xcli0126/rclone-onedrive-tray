@@ -85,6 +85,8 @@ except ImportError:
 
 APP_ID = "rclone-onedrive-tray"
 APP_NAME = "OneDrive"
+VERSION = "1.2.0"
+PROJECT_URL = "https://github.com/Xcli0126/rclone-onedrive-tray"
 
 CONFIG_DIR = os.path.join(os.environ.get("XDG_CONFIG_HOME") or
                           os.path.expanduser("~/.config"), "rclone-onedrive-tray")
@@ -97,6 +99,12 @@ ICON_DIR = os.path.join(os.environ.get("XDG_DATA_HOME") or
 AUTOSTART = os.path.join(os.environ.get("XDG_CONFIG_HOME") or
                          os.path.expanduser("~/.config"), "autostart",
                          "rclone-onedrive-tray.desktop")
+# The interval lives in a drop-in beside the unit rather than in the unit file,
+# so a later install.sh (which rewrites the unit from its template) cannot undo
+# the setting. Resolved the same way systemd resolves it.
+SYSTEMD_USER_DIR = os.path.join(os.environ.get("XDG_CONFIG_HOME") or
+                                os.path.expanduser("~/.config"),
+                                "systemd", "user")
 LOCK_FILE = os.path.join(os.environ.get("TMPDIR") or "/tmp",
                          "rclone-onedrive-tray.lock")
 
@@ -107,12 +115,44 @@ PAUSE_STAMP = os.path.join(CACHE_DIR, "paused-until")
 
 STATES = ("synced", "syncing", "error", "paused", "unknown")
 CLOUD_COLOR = (0.20, 0.51, 0.89)
+# A darker blue so the silhouette keeps an edge on a light panel without turning
+# into a black blob on a dark one.
+CLOUD_OUTLINE = (0.10, 0.28, 0.54)
 BADGE_COLORS = {
     "synced": (0.18, 0.66, 0.31),
     "syncing": (0.95, 0.62, 0.11),
     "error": (0.86, 0.21, 0.18),
     "paused": (0.55, 0.56, 0.58),
+    "unknown": (0.55, 0.56, 0.58),
 }
+
+# What the settings dialog edits, and the value each key has when the config does
+# not mention it. Kept in one place so the dialog, the CLI flags and the tray all
+# agree on what "unset" means.
+SETTINGS_DEFAULTS = {
+    "UI_LANG": "",
+    "SHOW_ICON": "1",
+    "INTERVAL_MIN": "5",
+    "WATCH": "1",
+    "NOTIFY_ON_SUCCESS": "1",
+    "MAX_DELETE": "100",
+    "BW_LIMIT": "",
+    "CHECK_ACCESS": "0",
+}
+# An rclone size string, or "" for no limit. onedrive-sync turns the value into
+# --bwlimit.
+BANDWIDTH_CHOICES = ("", "1M", "5M", "10M", "20M")
+# The combo needs a real id for the empty choice: GTK treats an empty id as
+# "nothing selected".
+BW_UNLIMITED = "unlimited"
+
+
+def bw_id(value: str) -> str:
+    return value or BW_UNLIMITED
+
+
+def bw_value(combo_id) -> str:
+    return "" if combo_id in (None, BW_UNLIMITED) else str(combo_id)
 
 
 # ---------------------------------------------------------------- configuration
@@ -138,9 +178,178 @@ def load_config() -> dict:
     cfg.setdefault("LOG", os.path.join(CACHE_DIR, "sync.log"))
     cfg.setdefault("OPEN_APP_CMD", "")
     cfg.setdefault("OPEN_APP_NAME", "the app")
-    cfg.setdefault("UI_LANG", "")
     cfg.setdefault("EXCLUDE_FOLDERS_FILE", os.path.join(CONFIG_DIR, "exclude-folders.txt"))
+    for key, value in SETTINGS_DEFAULTS.items():
+        cfg.setdefault(key, value)
     return cfg
+
+
+def truthy(value) -> bool:
+    """Read a 1/0 config value the way the settings dialog writes it."""
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def shell_quote_value(value) -> str:
+    """Quote a config value the way the config file has it: KEY="value".
+
+    Backslashes, quotes, dollars and backticks are escaped, so `onedrive-sync`
+    can source the file and get back exactly the string that was written.
+    """
+    text = str(value)
+    for ch in ("\\", '"', "$", "`"):
+        text = text.replace(ch, "\\" + ch)
+    return f'"{text}"'
+
+
+KEY_RE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=")
+
+
+def update_config_file(path: str, changes: dict) -> list:
+    """Set keys in an existing config file, leaving everything else alone.
+
+    The file is a hand-edited document with comments and keys this tray knows
+    nothing about (CHECK_FILENAME, RETRIES, ...), and install.sh hands the user
+    the same file. Rewriting it from a template would delete both, so only the
+    lines whose keys are being changed are replaced and keys that are missing are
+    appended at the end.
+
+    Returns the keys that had to be appended. Raises OSError when the file cannot
+    be read or written.
+    """
+    with open(path, encoding="utf-8") as fh:
+        text = fh.read()
+
+    wanted = dict(changes)
+    lines = text.split("\n")
+    trailing = lines.pop() if lines and lines[-1] == "" else None
+
+    for index, line in enumerate(lines):
+        found = KEY_RE.match(line)
+        if not found:
+            continue
+        key = found.group(1)
+        if key in wanted:
+            lines[index] = f"{key}={shell_quote_value(wanted.pop(key))}"
+
+    appended = sorted(wanted)
+    if appended:
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines.append("# Added by the tray's settings dialog.")
+    for key in appended:
+        lines.append(f"{key}={shell_quote_value(wanted[key])}")
+
+    out = "\n".join(lines)
+    if trailing is not None or not out.endswith("\n"):
+        out += "\n"
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(out)
+    return appended
+
+
+# ---------------------------------------------------------------- settings actions
+# Each of these returns an error message, or "" when it worked. The settings
+# dialog shows every message it gets back: a systemd or autostart action that
+# fails silently would leave the dialog claiming a change that never happened.
+def timer_dropin_path(unit: str) -> str:
+    """Where systemd looks for the interval override of <unit>.timer."""
+    return os.path.join(SYSTEMD_USER_DIR, f"{unit}.timer.d", "interval.conf")
+
+
+def write_timer_dropin(unit: str, minutes: int) -> str:
+    """Set the sync interval through a drop-in, never by rewriting the unit.
+
+    install.sh writes <unit>.timer from systemd/onedrive-sync.timer.in on every
+    run, so anything put in the unit file itself is lost at the next update. A
+    drop-in is the documented way to override one directive and it survives.
+    """
+    try:
+        minutes = int(minutes)
+        if minutes < 1:
+            return "the interval must be at least 1 minute"
+        path = timer_dropin_path(unit)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("# Set by the tray's settings dialog. A drop-in, so a later\n"
+                     "# install.sh can rewrite the unit file without losing it.\n"
+                     "[Timer]\n"
+                     f"OnUnitInactiveSec={minutes}min\n")
+    except (OSError, TypeError, ValueError) as exc:
+        return str(exc)
+    rc, _, err = sh("systemctl --user daemon-reload", timeout=30)
+    if rc != 0:
+        return err or f"systemctl --user daemon-reload exited {rc}"
+    return ""
+
+
+def set_watch_unit(unit: str, enable: bool) -> str:
+    """Turn the realtime-sync unit on or off, and say so when that fails."""
+    action = "enable --now" if enable else "disable --now"
+    rc, out, err = sh(f"systemctl --user {action} {unit}-watch.service", timeout=60)
+    if rc != 0:
+        return err or out or f"systemctl --user {action} exited {rc}"
+    return ""
+
+
+def autostart_contents() -> str:
+    return ("[Desktop Entry]\n"
+            "Type=Application\n"
+            f"Name={APP_NAME} status icon\n"
+            "Comment=rclone bisync tray icon\n"
+            f"Exec={os.path.realpath(__file__)}\n"
+            "Terminal=false\n"
+            "X-GNOME-Autostart-enabled=true\n")
+
+
+def write_autostart(enable: bool) -> str:
+    """Create or remove the autostart entry; "" when it worked.
+
+    The same file the "Start tray at login" checkbox writes, so the two cannot
+    disagree about what is installed.
+    """
+    try:
+        if enable:
+            os.makedirs(os.path.dirname(AUTOSTART), exist_ok=True)
+            with open(AUTOSTART, "w", encoding="utf-8") as fh:
+                fh.write(autostart_contents())
+            os.chmod(AUTOSTART, 0o644)
+        elif os.path.exists(AUTOSTART):
+            os.remove(AUTOSTART)
+    except OSError as exc:
+        return str(exc)
+    return ""
+
+
+def marker_file_path(cfg: dict) -> str:
+    """The local marker rclone's --check-access looks for.
+
+    An empty CHECK_FILENAME means rclone's own default, RCLONE_TEST; the file of
+    the same name has to exist at the root of both sides.
+    """
+    name = (cfg.get("CHECK_FILENAME") or "RCLONE_TEST").strip() or "RCLONE_TEST"
+    return os.path.join(cfg.get("LOCAL") or "", name)
+
+
+def check_access_command() -> str:
+    """onedrive-check-access beside this script, or on PATH."""
+    beside = os.path.join(os.path.dirname(os.path.realpath(__file__)),
+                          "onedrive-check-access")
+    if os.path.exists(beside):
+        return beside
+    return shutil.which("onedrive-check-access") or ""
+
+
+def run_check_access() -> tuple:
+    """Create the marker files. Returns (ok, message); slow, so: worker thread."""
+    cmd = check_access_command()
+    if not cmd:
+        return False, "onedrive-check-access"
+    try:
+        proc = subprocess.run([cmd], capture_output=True, text=True, timeout=900)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, str(exc)
+    report = (proc.stdout + proc.stderr).strip()
+    return proc.returncode == 0, report
 
 
 # ---------------------------------------------------------------- localisation
@@ -231,6 +440,39 @@ STRINGS = {
         "Nothing needs fixing.": "没有需要处理的名字。",
         "These will fail or be renamed:": "下面这些会失败或被改名：",
         "Close": "关闭",
+        "Settings…": "设置…",
+        "Settings": "设置",
+        "Save": "保存",
+        "About": "关于",
+        "Language": "语言",
+        "Follow the system": "跟随系统",
+        "A tray icon that shows and drives an rclone bisync pair.":
+            "一个显示 rclone bisync 同步状态并直接操作它的托盘图标。",
+        "Version {version}": "版本 {version}",
+        "Config file: {path}": "配置文件：{path}",
+        "Show the icon in the panel": "在面板上显示图标",
+        "Sync interval (minutes)": "同步间隔（分钟）",
+        "Realtime sync": "实时同步",
+        "Tell me when a sync succeeds": "同步成功时通知我",
+        "Delete cap (files)": "删除上限（文件数）",
+        "Bandwidth limit": "带宽限制",
+        "Unlimited": "不限速",
+        "Access check": "访问检查",
+        "Create the marker files": "创建标记文件",
+        "Creating the marker files…": "正在创建标记文件…",
+        "The marker files are there.": "标记文件已就位。",
+        "Could not create the marker files: {why}": "无法创建标记文件：{why}",
+        "The markers rclone's access check looks for are missing, so the next "
+        "sync will fail until they exist. This side needs {path}, and the same "
+        "name on the remote.":
+            "rclone 的访问检查找不到标记文件，在它们存在之前下一次同步会失败。\n"
+            "本机这一侧需要 {path}，云端需要同名的文件。",
+        "Could not write the config file: {why}": "无法写入配置文件：{why}",
+        "Could not apply the sync interval: {why}": "无法应用同步间隔：{why}",
+        "Could not change the realtime sync unit: {why}":
+            "无法修改实时同步服务：{why}",
+        "Could not change the login setting: {why}":
+            "无法修改开机自启动设置：{why}",
         "other": "详见同步日志",
     },
 }
@@ -273,8 +515,44 @@ def icon_dir_ok() -> bool:
 
 
 # ---------------------------------------------------------------- icon drawing
+# Each icon is a 64x64 cloud with one badge, because a panel draws it at about
+# 22px: the cloud keeps a visible outline at that size and every badge glyph is a
+# stroke at least 3px thick at 64, which is what survives the downscale.
+ICON_SIZE = 64
+BADGE_CENTER = (46.5, 46.5)
+BADGE_RADIUS = 14.0
+GLYPH_SCALE = BADGE_RADIUS / 15.0
+
+
+def _rounded_rect(cr, x, y, w, h, r):
+    """Add a rounded rectangle as its own sub-path."""
+    r = min(r, w / 2.0, h / 2.0)
+    cr.new_sub_path()
+    cr.arc(x + w - r, y + r, r, -math.pi / 2, 0)
+    cr.arc(x + w - r, y + h - r, r, 0, math.pi / 2)
+    cr.arc(x + r, y + h - r, r, math.pi / 2, math.pi)
+    cr.arc(x + r, y + r, r, math.pi, 1.5 * math.pi)
+    cr.close_path()
+
+
+def _cloud_path(cr, grow=0.0):
+    """Add the cloud silhouette to the current path.
+
+    A rounded base with three bumps over it, as separate sub-paths filled in one
+    go: the union has no seams and no stray lines, which drawing each circle and
+    stroking it separately cannot manage. `grow` inflates every part by the same
+    amount, and that is how the outline is made: the inflated silhouette is
+    filled in the darker blue first, then the cloud itself on top of it.
+    """
+    _rounded_rect(cr, 11.0 - grow, 22.0 - grow,
+                  35.0 + 2 * grow, 17.0 + 2 * grow, 8.0 + grow)
+    for cx, cy, r in ((20.0, 27.0, 8.5), (30.0, 21.5, 10.0), (40.0, 26.5, 7.0)):
+        cr.new_sub_path()
+        cr.arc(cx, cy, r + grow, 0, 2 * math.pi)
+
+
 def _check(cr, cx, cy, s=1.0):
-    cr.set_line_width(3.4 * s)
+    cr.set_line_width(3.6 * s)
     cr.set_line_cap(cairo.LINE_CAP_ROUND)
     cr.set_line_join(cairo.LINE_JOIN_ROUND)
     cr.move_to(cx - 5.5 * s, cy + 0.5 * s)
@@ -284,7 +562,7 @@ def _check(cr, cx, cy, s=1.0):
 
 
 def _exclaim(cr, cx, cy, s=1.0):
-    cr.set_line_width(3.4 * s)
+    cr.set_line_width(3.6 * s)
     cr.set_line_cap(cairo.LINE_CAP_ROUND)
     cr.move_to(cx, cy - 6.0 * s)
     cr.line_to(cx, cy + 1.5 * s)
@@ -294,73 +572,124 @@ def _exclaim(cr, cx, cy, s=1.0):
 
 
 def _pause(cr, cx, cy, s=1.0):
-    cr.rectangle(cx - 4.6 * s, cy - 5.0 * s, 3.2 * s, 10 * s)
+    # Two bars wide enough to survive the downscale to a panel: at 3.2 they wash
+    # out to a grey smudge at 22px.
+    cr.rectangle(cx - 5.2 * s, cy - 5.2 * s, 4.0 * s, 10.4 * s)
     cr.fill()
-    cr.rectangle(cx + 1.4 * s, cy - 5.0 * s, 3.2 * s, 10 * s)
+    cr.rectangle(cx + 1.2 * s, cy - 5.2 * s, 4.0 * s, 10.4 * s)
     cr.fill()
 
 
-def _spin(cr, cx, cy, s=1.0):
+def _arrows(cr, cx, cy, s=1.0):
+    """Two arrows chasing each other: the badge for a run in progress."""
     cr.set_line_width(3.2 * s)
     cr.set_line_cap(cairo.LINE_CAP_ROUND)
-    cr.arc(cx, cy, 5.0 * s, math.radians(-40), math.radians(215))
+    cr.set_line_join(cairo.LINE_JOIN_ROUND)
+    for direction in (-1, 1):
+        y = cy + direction * 3.9 * s
+        tip = cx + direction * 6.2 * s
+        cr.move_to(cx - direction * 5.6 * s, y)
+        cr.line_to(tip - direction * 4.4 * s, y)
+        cr.stroke()
+        cr.move_to(tip, y)
+        cr.line_to(tip - direction * 5.0 * s, y - 2.9 * s)
+        cr.line_to(tip - direction * 5.0 * s, y + 2.9 * s)
+        cr.close_path()
+        cr.fill()
+
+
+def _question(cr, cx, cy, s=1.0):
+    """A question mark drawn as paths, not text: no font is required."""
+    cr.set_line_width(3.6 * s)
+    cr.set_line_cap(cairo.LINE_CAP_ROUND)
+    cr.set_line_join(cairo.LINE_JOIN_ROUND)
+    cr.move_to(cx - 4.6 * s, cy - 3.4 * s)
+    cr.curve_to(cx - 4.6 * s, cy - 9.4 * s,
+                cx + 4.8 * s, cy - 9.4 * s,
+                cx + 4.8 * s, cy - 3.0 * s)
+    cr.curve_to(cx + 4.8 * s, cy + 0.6 * s,
+                cx, cy - 0.6 * s,
+                cx, cy + 1.4 * s)
     cr.stroke()
-    a = math.radians(-40)
-    ax, ay = cx + 5.0 * s * math.cos(a), cy + 5.0 * s * math.sin(a)
-    cr.move_to(ax + 3.4 * s, ay - 0.4 * s)
-    cr.line_to(ax - 1.6 * s, ay - 3.4 * s)
-    cr.line_to(ax - 1.0 * s, ay + 2.6 * s)
-    cr.close_path()
+    cr.arc(cx, cy + 5.0 * s, 1.9 * s, 0, 2 * math.pi)
     cr.fill()
 
 
-def draw_icon(path: str, state: str) -> None:
-    """Render a 64x64 cloud with a status badge ('unknown' gets no badge)."""
+def _progress(cr, cx, cy, pct, s=1.0):
+    """An arc for the percentage rclone last reported."""
+    pct = max(0.0, min(100.0, float(pct)))
+    radius = 8.2 * s
+    cr.set_line_width(3.4 * s)
+    cr.set_line_cap(cairo.LINE_CAP_ROUND)
+    # The track first, faintly: an arc at 3% would otherwise be a dot.
+    cr.set_source_rgba(1, 1, 1, 0.35)
+    cr.arc(cx, cy, radius, 0, 2 * math.pi)
+    cr.stroke()
+    cr.set_source_rgb(1, 1, 1)
+    start = -math.pi / 2
+    cr.arc(cx, cy, radius, start, start + 2 * math.pi * pct / 100.0)
+    cr.stroke()
+
+
+def draw_icon(path: str, state: str, pct=None) -> None:
+    """Render a 64x64 cloud with the badge for `state`.
+
+    `pct` is the percentage the log last reported, and only the syncing icon has
+    a use for it: with a number the badge becomes an arc, without one it keeps
+    the two arrows.
+    """
     if cairo is None:
         return
-    size = 64
-    surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, size, size)
+    surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, ICON_SIZE, ICON_SIZE)
     cr = cairo.Context(surf)
     cr.set_source_rgba(0, 0, 0, 0)
     cr.paint()
 
+    _cloud_path(cr, 1.5)
+    cr.set_source_rgb(*CLOUD_OUTLINE)
+    cr.fill()
+    _cloud_path(cr)
     cr.set_source_rgb(*CLOUD_COLOR)
-    for x, y, r in ((25, 26, 11.5), (39, 28, 9.0), (31, 34, 10.5)):
-        cr.arc(x, y, r, 0, 2 * math.pi)
-        cr.fill()
-    cr.rectangle(19, 26, 21, 12)
-    cr.fill()
-    cr.rectangle(16, 31, 27, 8)
     cr.fill()
 
-    if state == "unknown":
-        surf.write_to_png(path)
-        return
-
-    bx = by = 45.0
-    br = 15.0
-    cr.arc(bx, by, br + 2.6, 0, 2 * math.pi)
+    bx, by = BADGE_CENTER
+    # The white ring is what keeps the badge readable where it sits on the
+    # cloud, and what gives it an edge on a white panel.
     cr.set_source_rgb(1, 1, 1)
+    cr.arc(bx, by, BADGE_RADIUS + 2.4, 0, 2 * math.pi)
     cr.fill()
-    cr.arc(bx, by, br, 0, 2 * math.pi)
-    cr.set_source_rgb(*BADGE_COLORS.get(state, BADGE_COLORS["synced"]))
+    cr.set_source_rgb(*BADGE_COLORS.get(state, BADGE_COLORS["unknown"]))
+    cr.arc(bx, by, BADGE_RADIUS, 0, 2 * math.pi)
     cr.fill()
 
     cr.set_source_rgb(1, 1, 1)
+    s = GLYPH_SCALE
     if state == "synced":
-        _check(cr, bx, by)
+        _check(cr, bx, by, s)
     elif state == "error":
-        _exclaim(cr, bx, by)
+        _exclaim(cr, bx, by, s)
     elif state == "paused":
-        _pause(cr, bx, by)
+        _pause(cr, bx, by, s)
+    elif state == "syncing" and pct is not None:
+        _progress(cr, bx, by, pct, s)
+    elif state == "syncing":
+        _arrows(cr, bx, by, s)
     else:
-        _spin(cr, bx, by)
+        _question(cr, bx, by, s)
 
     surf.write_to_png(path)
 
 
 def ensure_icons() -> dict:
-    """Redraw every start so the icons always match the code."""
+    """Redraw every icon, always from the same five states.
+
+    Nothing here depends on the clock or on the machine, so running it again
+    writes byte-identical files; the suite checks that. The directory is made
+    here as well as in main(): write_to_png() cannot create it, and a caller
+    that built a Tray without going through main() (the test suite, for one)
+    would otherwise get five paths to files that do not exist.
+    """
+    icon_dir_ok()
     icons = {}
     for state in STATES:
         path = os.path.join(ICON_DIR, f"{state}.png")
@@ -584,6 +913,7 @@ class Tray:
         # The path most recently handed to the indicator. Indicator.new() has
         # already set the "unknown" icon, so that is what is on screen now.
         self.shown_icon = self.icons["unknown"]
+        self.sync_pct = None       # percentage last drawn into the syncing icon
         self.was_syncing = False
         self.notified_error_at = None
         self.manual_requested = False
@@ -597,6 +927,8 @@ class Tray:
         self.folders_seen = None
         self.building_folders = False
         self.check_busy = False
+        self.settings_dialog = None
+        self.icon_visible = truthy(self.cfg.get("SHOW_ICON", "1"))
 
         if Notify is not None:
             Notify.init(APP_ID)
@@ -608,7 +940,13 @@ class Tray:
         self.ind = AppIndicator.Indicator.new(
             APP_ID, self.icons["unknown"],
             AppIndicator.IndicatorCategory.APPLICATION_STATUS)
-        self.ind.set_status(AppIndicator.IndicatorStatus.ACTIVE)
+        # An icon can be asked to stay out of the panel from the settings dialog
+        # (or by --hide-icon). PASSIVE is what hides it; the process keeps
+        # running either way, so the timer, the watcher and the notifications are
+        # unaffected.
+        self.ind.set_status(AppIndicator.IndicatorStatus.ACTIVE
+                            if self.icon_visible
+                            else AppIndicator.IndicatorStatus.PASSIVE)
 
         self._build_menu()
         self.ind.set_menu(self.menu)
@@ -909,7 +1247,19 @@ class Tray:
 
     # -------------------------------------------------- menu
     def _build_menu(self):
+        """Build the whole menu, from the current language and config.
+
+        The settings dialog calls this again after a language change: the
+        indicator is handed a new menu in the new language, and nothing has to
+        restart for the labels to follow.
+        """
         self.menu = Gtk.Menu()
+
+        # A header, so the version is one hover away from the item that opens
+        # the About window and there is something naming the app at the top.
+        self.item_header = Gtk.MenuItem(label=f"{APP_NAME} {VERSION}")
+        self.item_header.set_sensitive(False)
+        self.menu.append(self.item_header)
 
         self.item_status = Gtk.MenuItem(label=self.t("Reading status…"))
         self.item_status.set_sensitive(False)
@@ -958,6 +1308,10 @@ class Tray:
         self._add(self.t("Check file names"), self._check_names)
         self._add(self.t("Re-authorise OneDrive…"), self.on_reauth)
         self._add(self.t("Rebuild sync baseline (resync)…"), self.on_resync)
+
+        self.menu.append(Gtk.SeparatorMenuItem())
+        self._add(self.t("Settings…"), self.on_settings)
+        self._add(self.t("About"), self.on_about)
         self._add(self.t("Quit"), lambda *_: Gtk.main_quit())
 
         self.menu.show_all()
@@ -1010,6 +1364,73 @@ class Tray:
             os.remove(PAUSE_STAMP)
         except OSError:
             pass
+
+    # -------------------------------------------------- settings
+    def set_icon_visible(self, visible: bool):
+        """Show or hide the panel icon without stopping the process.
+
+        Only the indicator's status changes. The timer, the watcher and the
+        notifications carry on, so hiding the icon is not a way to stop syncing.
+        """
+        self.icon_visible = bool(visible)
+        self.ind.set_status(AppIndicator.IndicatorStatus.ACTIVE
+                            if self.icon_visible
+                            else AppIndicator.IndicatorStatus.PASSIVE)
+
+    def set_language(self, pref: str):
+        """Switch language and re-label every item, without a restart."""
+        self.cfg["UI_LANG"] = pref or ""
+        self.t = make_translator(resolve_lang(self.cfg))
+        self._build_menu()
+        self.ind.set_menu(self.menu)
+
+    def apply_settings(self, values: dict):
+        """Put the settings the dialog just saved into effect.
+
+        The two that can be applied to a running process are the language and
+        whether the icon is in the panel. Everything else is read when it is
+        used: NOTIFY_ON_SUCCESS and MAX_DELETE are properties of the config, the
+        interval and the watcher are systemd's, and the access check is
+        rclone's.
+        """
+        was_visible = self.icon_visible
+        was_lang = resolve_lang(self.cfg)
+        self.cfg.update(values)
+        if truthy(values.get("SHOW_ICON", "1")) != was_visible:
+            self.set_icon_visible(truthy(values["SHOW_ICON"]))
+        if resolve_lang(self.cfg) != was_lang:
+            self.set_language(values.get("UI_LANG", ""))
+
+    def on_settings(self, *_):
+        """Open the settings window; it applies its changes to this tray."""
+        dialog = SettingsDialog(self)
+        self.settings_dialog = dialog
+        dialog.show_all()
+        dialog.run()
+        dialog.destroy()
+        self.settings_dialog = None
+
+    def show_settings_now(self):
+        """Open the settings window from an idle callback (--settings)."""
+        self.on_settings()
+        return False
+
+    def about_text(self) -> str:
+        return "\n".join([
+            self.t("A tray icon that shows and drives an rclone bisync pair."),
+            self.t("Version {version}", version=VERSION),
+            self.t("Config file: {path}", path=CONFIG_FILE),
+            PROJECT_URL,
+        ])
+
+    def on_about(self, *_):
+        dialog = Gtk.MessageDialog(
+            transient_for=None, flags=0, message_type=Gtk.MessageType.INFO,
+            buttons=Gtk.ButtonsType.NONE, text=f"{APP_NAME} {VERSION}")
+        dialog.format_secondary_text(self.about_text())
+        dialog.add_button(self.t("Close"), Gtk.ResponseType.CLOSE)
+        dialog.run()
+        dialog.destroy()
 
     # -------------------------------------------------- actions
     def on_sync_now(self, *_):
@@ -1110,30 +1531,14 @@ class Tray:
         return False
 
     def on_toggle_boot(self, item):
-        if item.get_active():
-            try:
-                os.makedirs(os.path.dirname(AUTOSTART), exist_ok=True)
-                with open(AUTOSTART, "w", encoding="utf-8") as fh:
-                    fh.write(
-                        "[Desktop Entry]\n"
-                        "Type=Application\n"
-                        f"Name={APP_NAME} status icon\n"
-                        "Comment=rclone bisync tray icon\n"
-                        f"Exec={os.path.realpath(__file__)}\n"
-                        "Terminal=false\n"
-                        "X-GNOME-Autostart-enabled=true\n")
-                os.chmod(AUTOSTART, 0o644)
-            except OSError:
-                # The click has already ticked the box, so swallowing the error
-                # left the menu claiming autostart was on while no file existed.
-                self.notify(APP_NAME, self.t("Could not change the login setting"))
-                item.set_active(False)
-        elif os.path.exists(AUTOSTART):
-            try:
-                os.remove(AUTOSTART)
-            except OSError:
-                self.notify(APP_NAME, self.t("Could not change the login setting"))
-                item.set_active(True)
+        """The menu checkbox and the settings dialog write the same file."""
+        err = write_autostart(item.get_active())
+        if err:
+            # The click has already moved the tick, so swallowing the error left
+            # the menu claiming autostart was on while no file existed.
+            self.notify(APP_NAME, self.t("Could not change the login setting: {why}",
+                                         why=err[:120]))
+            item.set_active(not item.get_active())
 
     def open_app(self, *_):
         # The command is quoted shell-style ("my app" --flag), so it needs the
@@ -1178,6 +1583,26 @@ class Tray:
             return
         self.shown_icon = path
         self.ind.set_icon_full(path, APP_NAME)
+
+    def _set_sync_progress(self, pct):
+        """Redraw the syncing icon with the percentage rclone last reported.
+
+        The badge becomes an arc for the run in progress, so the icon says how
+        far along it is without the menu being opened. pct is None between runs,
+        and the plain arrows come back.
+        """
+        if pct == self.sync_pct:
+            return
+        self.sync_pct = pct
+        try:
+            draw_icon(self.icons["syncing"], "syncing", pct)
+        except OSError:
+            return
+        if self.state == "syncing":
+            # The path is unchanged, so _set_icon would skip the hand-off even
+            # though the file it points at has just been redrawn.
+            self.shown_icon = None
+            self._set_icon(self.icons["syncing"])
 
     def unit_states(self):
         """Return (service_active, timer_state).
@@ -1289,14 +1714,17 @@ class Tray:
                     self.notify(self.t("{app} sync failed", app=APP_NAME),
                                 hint or self.t("see the sync log"))
             elif self.manual_requested:
-                self.notify(APP_NAME, self.t("Sync finished {when}", when=when))
+                # The setting is about the good news only: a failure is always
+                # worth a notification.
+                if truthy(self.cfg.get("NOTIFY_ON_SUCCESS", "1")):
+                    self.notify(APP_NAME, self.t("Sync finished {when}", when=when))
                 self.manual_requested = False
         if kind != "error":
             self.notified_error_at = None
         self.was_syncing = syncing
 
+        prog = read_progress(self.log) if syncing else None
         if syncing:
-            prog = read_progress(self.log)
             if prog:
                 text = f"{self.t('Syncing…')} {prog['pct']}%"
                 if prog["speed"]:
@@ -1319,6 +1747,7 @@ class Tray:
             text = self.t("No sync recorded yet")
 
         self.item_status.set_label(text)
+        self._set_sync_progress(prog["pct"] if prog else None)
 
         if self.quota:
             used, total = self.quota
@@ -1335,6 +1764,290 @@ class Tray:
             self._build_folder_menu()
 
         return False
+
+
+# ---------------------------------------------------------------- settings dialog
+def _as_int(value, fallback: int) -> int:
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return fallback
+
+
+class SettingsDialog(Gtk.Dialog):
+    """The settings window.
+
+    Widget values are read on the main loop; the config write, the systemctl
+    calls and the access-check script all run on a worker thread and come back
+    through GLib.idle_add(). Any of them can take seconds, and a frozen window is
+    worse than a slow one. Failures are collected and shown in the window: a
+    systemd or autostart action that failed silently would leave the window
+    claiming a change that never happened.
+
+    `tray` may be None. That is the --settings case where another process owns
+    the icon: the config, systemd and autostart changes still go through, and
+    the two live ones (language, icon) have nothing to apply to here.
+    """
+
+    def __init__(self, tray=None, cfg=None, translate=None):
+        source = cfg if cfg is not None else (
+            tray.cfg if tray is not None else load_config())
+        if translate is None:
+            translate = (tray.t if tray is not None
+                         else make_translator(resolve_lang(source)))
+        super().__init__(title=translate("Settings"), parent=None, flags=0)
+        self.tray = tray
+        self.cfg = dict(source)
+        self.t = translate
+        self.original = {key: str(self.cfg.get(key, default))
+                         for key, default in SETTINGS_DEFAULTS.items()}
+        self.original_boot = os.path.exists(AUTOSTART)
+        self.failures: list = []
+        self.done = False
+        self.busy = False
+        self.markers_busy = False
+        self.set_modal(True)
+        self._build()
+
+    # -------------------------------------------------- widgets
+    def _build(self):
+        box = self.get_content_area()
+        box.set_spacing(10)
+        box.set_border_width(12)
+
+        grid = Gtk.Grid()
+        grid.set_row_spacing(8)
+        grid.set_column_spacing(14)
+        box.pack_start(grid, False, False, 0)
+
+        def row(index, text, widget):
+            label = Gtk.Label(label=text)
+            label.set_xalign(0)
+            grid.attach(label, 0, index, 1, 1)
+            if widget is not None:
+                grid.attach(widget, 1, index, 1, 1)
+
+        self.combo_lang = Gtk.ComboBoxText()
+        for value, text in (("", self.t("Follow the system")),
+                            ("en", "English"), ("zh", "中文")):
+            self.combo_lang.append(value, text)
+        self.combo_lang.set_active_id(self.original["UI_LANG"] or "")
+        row(0, self.t("Language"), self.combo_lang)
+
+        self.check_show = Gtk.CheckButton(label=self.t("Show the icon in the panel"))
+        self.check_show.set_active(truthy(self.original["SHOW_ICON"]))
+        grid.attach(self.check_show, 0, 1, 2, 1)
+
+        self.check_boot = Gtk.CheckButton(label=self.t("Start tray at login"))
+        self.check_boot.set_active(self.original_boot)
+        grid.attach(self.check_boot, 0, 2, 2, 1)
+
+        self.spin_interval = Gtk.SpinButton.new_with_range(1, 1440, 1)
+        self.spin_interval.set_value(_as_int(self.original["INTERVAL_MIN"], 5))
+        row(3, self.t("Sync interval (minutes)"), self.spin_interval)
+
+        self.check_watch = Gtk.CheckButton(label=self.t("Realtime sync"))
+        self.check_watch.set_active(truthy(self.original["WATCH"]))
+        grid.attach(self.check_watch, 0, 4, 2, 1)
+
+        self.check_notify = Gtk.CheckButton(
+            label=self.t("Tell me when a sync succeeds"))
+        self.check_notify.set_active(truthy(self.original["NOTIFY_ON_SUCCESS"]))
+        grid.attach(self.check_notify, 0, 5, 2, 1)
+
+        self.spin_delete = Gtk.SpinButton.new_with_range(0, 1000000, 1)
+        self.spin_delete.set_value(_as_int(self.original["MAX_DELETE"], 100))
+        row(6, self.t("Delete cap (files)"), self.spin_delete)
+
+        self.combo_bw = Gtk.ComboBoxText()
+        for value in BANDWIDTH_CHOICES:
+            self.combo_bw.append(bw_id(value),
+                                 self.t("Unlimited") if not value else value)
+        self.combo_bw.set_active_id(bw_id(self.original["BW_LIMIT"]))
+        row(7, self.t("Bandwidth limit"), self.combo_bw)
+
+        self.check_access = Gtk.CheckButton(label=self.t("Access check"))
+        self.check_access.set_active(truthy(self.original["CHECK_ACCESS"]))
+        self.check_access.connect("toggled", self.on_access_toggled)
+        self.button_markers = Gtk.Button(label=self.t("Create the marker files"))
+        self.button_markers.connect("clicked", self.on_create_markers)
+        access_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        access_row.pack_start(self.check_access, False, False, 0)
+        access_row.pack_start(self.button_markers, False, False, 0)
+        grid.attach(access_row, 0, 8, 2, 1)
+
+        self.label_notice = Gtk.Label()
+        self.label_notice.set_xalign(0)
+        self.label_notice.set_line_wrap(True)
+        self.label_notice.set_max_width_chars(64)
+        self.label_notice.set_no_show_all(True)
+        box.pack_start(self.label_notice, False, False, 0)
+
+        self.label_status = Gtk.Label()
+        self.label_status.set_xalign(0)
+        self.label_status.set_line_wrap(True)
+        self.label_status.set_max_width_chars(64)
+        self.label_status.set_no_show_all(True)
+        box.pack_start(self.label_status, False, False, 0)
+
+        self.label_config = Gtk.Label(
+            label=self.t("Config file: {path}", path=CONFIG_FILE))
+        self.label_config.set_xalign(0)
+        self.label_config.set_selectable(True)
+        box.pack_start(self.label_config, False, False, 0)
+
+        self.cancel_button = Gtk.Button(label=self.t("Cancel"))
+        self.cancel_button.connect("clicked", self.on_cancel)
+        self.add_action_widget(self.cancel_button, Gtk.ResponseType.CANCEL)
+        self.save_button = Gtk.Button(label=self.t("Save"))
+        self.save_button.connect("clicked", self.on_save)
+        self.add_action_widget(self.save_button, Gtk.ResponseType.OK)
+
+        self.notice_check_access()
+
+    def values(self) -> dict:
+        """The config values the widgets hold right now."""
+        return {
+            "UI_LANG": self.combo_lang.get_active_id() or "",
+            "SHOW_ICON": "1" if self.check_show.get_active() else "0",
+            "INTERVAL_MIN": str(int(self.spin_interval.get_value())),
+            "WATCH": "1" if self.check_watch.get_active() else "0",
+            "NOTIFY_ON_SUCCESS": "1" if self.check_notify.get_active() else "0",
+            "MAX_DELETE": str(int(self.spin_delete.get_value())),
+            "BW_LIMIT": bw_value(self.combo_bw.get_active_id()),
+            "CHECK_ACCESS": "1" if self.check_access.get_active() else "0",
+        }
+
+    def set_status(self, text):
+        self.label_status.set_text(text or "")
+        self.label_status.set_visible(bool(text))
+
+    def set_notice(self, text):
+        self.label_notice.set_text(text or "")
+        self.label_notice.set_visible(bool(text))
+
+    def notice_check_access(self):
+        """Warn before the switch is saved, not after the sync has failed."""
+        if not self.check_access.get_active():
+            self.set_notice("")
+            return
+        marker = marker_file_path(self.cfg)
+        if os.path.exists(marker):
+            self.set_notice("")
+            return
+        self.set_notice(self.t(
+            "The markers rclone's access check looks for are missing, so the "
+            "next sync will fail until they exist. This side needs {path}, and "
+            "the same name on the remote.", path=marker))
+
+    # -------------------------------------------------- actions
+    def on_access_toggled(self, *_):
+        self.notice_check_access()
+
+    def on_cancel(self, *_):
+        self.response(Gtk.ResponseType.CANCEL)
+
+    def on_save(self, *_):
+        if self.busy:
+            return
+        self.busy = True
+        self.save_button.set_sensitive(False)
+        self.set_status("")
+        # Read the widgets here: GTK is not thread safe, so nothing below may
+        # touch them from the worker.
+        values = self.values()
+        boot = self.check_boot.get_active()
+        threading.Thread(target=self._worker, args=(values, boot),
+                         daemon=True).start()
+
+    def _unit(self) -> str:
+        return self.cfg.get("UNIT_NAME") or "onedrive-sync"
+
+    def _worker(self, values, boot):
+        failures = []
+        changed = {key: value for key, value in values.items()
+                   if self.original.get(key) != value}
+        if changed:
+            try:
+                update_config_file(CONFIG_FILE, changed)
+            except OSError as exc:
+                failures.append(self.t("Could not write the config file: {why}",
+                                       why=str(exc)))
+        if values["INTERVAL_MIN"] != self.original["INTERVAL_MIN"]:
+            err = write_timer_dropin(self._unit(), values["INTERVAL_MIN"])
+            if err:
+                failures.append(self.t("Could not apply the sync interval: {why}",
+                                       why=err[:160]))
+        if values["WATCH"] != self.original["WATCH"]:
+            err = set_watch_unit(self._unit(), values["WATCH"] == "1")
+            if err:
+                failures.append(self.t(
+                    "Could not change the realtime sync unit: {why}",
+                    why=err[:160]))
+        if boot != self.original_boot:
+            err = write_autostart(boot)
+            if err:
+                failures.append(self.t(
+                    "Could not change the login setting: {why}", why=err[:160]))
+        GLib.idle_add(self._finish, values, failures)
+        return False
+
+    def _finish(self, values, failures):
+        self.busy = False
+        self.failures = failures
+        if failures:
+            # Stay open with the reasons on screen, rather than closing over a
+            # failure the user would never see.
+            self.set_status("\n".join(failures))
+            self.save_button.set_sensitive(True)
+            return False
+        self.done = True
+        if self.tray is not None:
+            self.tray.apply_settings(values)
+        self.response(Gtk.ResponseType.OK)
+        return False
+
+    def on_create_markers(self, *_):
+        if self.markers_busy:
+            return
+        self.markers_busy = True
+        self.button_markers.set_sensitive(False)
+        self.set_status(self.t("Creating the marker files…"))
+        threading.Thread(target=self._markers_worker, daemon=True).start()
+
+    def _markers_worker(self):
+        ok, report = run_check_access()
+        GLib.idle_add(self._markers_done, ok, report)
+
+    def _markers_done(self, ok, report):
+        self.markers_busy = False
+        self.button_markers.set_sensitive(True)
+        self.markers = report
+        if ok:
+            text = (report + "\n") if report else ""
+            self.set_status(text + self.t("The marker files are there."))
+        else:
+            self.set_status(self.t("Could not create the marker files: {why}",
+                                   why=(report or "?")[:300]))
+        # Either way the warning follows the file system, not the attempt: a
+        # failed creation leaves the next sync failing as it did before.
+        self.notice_check_access()
+        return False
+
+
+def show_settings_standalone():
+    """Show the settings window in a process that does not own the tray icon.
+
+    This is the --settings case where a tray is already running: it holds the
+    single-instance lock, and hiding its icon does not stop it. There is no
+    indicator here, so the language and icon switches have nothing to apply to;
+    the config file is what carries every change to the running tray.
+    """
+    dialog = SettingsDialog(None)
+    dialog.show_all()
+    response = dialog.run()
+    dialog.destroy()
+    return response
 
 
 def acquire_lock():
@@ -1371,7 +2084,56 @@ def release_lock(handle):
         pass
 
 
-def main():
+USAGE = f"""usage: {APP_ID} [--settings] [--show-icon | --hide-icon] [--version] [--help]
+
+The rclone bisync status icon. With no arguments it starts the icon and, if one
+is already running, says so and exits.
+
+  --settings     open the settings window. Starts the icon as well when it is
+                 not already running, so the two live settings have somewhere to
+                 land; when it is, the window opens on its own.
+  --show-icon    write SHOW_ICON="1" to the config and exit
+  --hide-icon    write SHOW_ICON="0" to the config and exit
+  --version      print the version and exit
+  --help         print this text and exit
+
+Configuration: {CONFIG_FILE}
+"""
+
+
+def main(argv=None):
+    args = list(sys.argv[1:] if argv is None else argv)
+
+    # --version and --help are the two answers that have to work where the tray
+    # itself cannot run: over SSH, from a script, on a machine with no session.
+    # They are therefore settled before the display guard below.
+    if "--version" in args:
+        print(f"{APP_ID} {VERSION}")
+        return 0
+    if "--help" in args or "-h" in args:
+        print(USAGE, end="")
+        return 0
+
+    known = ("--settings", "--show-icon", "--hide-icon")
+    unknown = [arg for arg in args if arg not in known]
+    if unknown:
+        print(f"{APP_ID}: unknown option: {unknown[0]}\n"
+              f"Try '{APP_ID} --help'.", file=sys.stderr)
+        return 2
+
+    if "--show-icon" in args or "--hide-icon" in args:
+        # One value, one file, then out. A running tray picks it up the next time
+        # it starts, or from the settings dialog.
+        value = "1" if "--show-icon" in args else "0"
+        try:
+            update_config_file(CONFIG_FILE, {"SHOW_ICON": value})
+        except OSError as exc:
+            print(f"{APP_ID}: could not write {CONFIG_FILE}: {exc}",
+                  file=sys.stderr)
+            return 1
+        print(f"SHOW_ICON={value} written to {CONFIG_FILE}")
+        return 0
+
     # Checked here rather than at import time, so a headless machine still gets
     # the dependency report first: which package is missing is the more useful
     # answer when both are wrong. GTK does not fail politely in this situation,
@@ -1386,15 +2148,24 @@ def main():
               file=sys.stderr)
         return 1
 
+    settings = "--settings" in args
     try:
         lock = acquire_lock()
     except OSError as exc:
-        print(f"Could not create the lock file {LOCK_FILE}: {exc}\n"
-              f"Check that TMPDIR points at a directory that exists and is "
-              f"writable.", file=sys.stderr)
-        return 1
+        if not settings:
+            print(f"Could not create the lock file {LOCK_FILE}: {exc}\n"
+                  f"Check that TMPDIR points at a directory that exists and is "
+                  f"writable.", file=sys.stderr)
+            return 1
+        lock = None
     if lock is None:
-        print("rclone-onedrive-tray is already running.", file=sys.stderr)
+        if not settings:
+            print("rclone-onedrive-tray is already running.", file=sys.stderr)
+            return 0
+        # A tray is already running, which is exactly who --settings is for: it
+        # may be running with its icon hidden. There is no second icon here, and
+        # the config file carries the changes to the process that has one.
+        show_settings_standalone()
         return 0
 
     # Everything past this point owns the lock file, so every return path
@@ -1410,7 +2181,11 @@ def main():
             print("Warning: cannot write icons, the tray icon may be blank.",
                   file=sys.stderr)
 
-        Tray(cfg)
+        tray = Tray(cfg)
+        if settings:
+            # Straight away, before the first poll has even answered: someone
+            # whose icon is hidden asked for the window, not for the icon.
+            GLib.idle_add(tray.show_settings_now)
         Gtk.main()
     finally:
         release_lock(lock)

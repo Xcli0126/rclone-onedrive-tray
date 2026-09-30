@@ -203,6 +203,8 @@ LOCAL="$LOCAL_IN"
 UNIT_NAME="$UNIT_NAME"
 INTERVAL_MIN="$INTERVAL"
 MAX_DELETE="100"
+# Bandwidth cap in rclone size syntax (1M, 500k, 1.5M). Empty means unlimited.
+BW_LIMIT=""
 # The access check aborts a run when the marker file is missing on one side,
 # which is what a network or mount problem looks like from the other side. Off
 # until you create the markers: onedrive-check-access
