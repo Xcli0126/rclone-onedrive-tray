@@ -1222,7 +1222,7 @@ fi
 
 if run_driver menus TRAY_LANG=zh; then
     check "the Chinese menu has the expected labels" \
-        json_expr "all(x in d['menu_labels'] for x in ['立即同步', '打开同步文件夹', '查看同步日志', '同步的文件夹', '暂停自动同步', '开机自动启动图标', '检查文件名', '重新登录 OneDrive…', '设置…', '关于', '退出', '30 分钟', '2 小时', '8 小时', '立即恢复'])"
+        json_expr "all(x in d['menu_labels'] for x in ['立即同步', '打开同步文件夹', '查看同步日志', '同步的文件夹', '暂停自动同步', '开机自动启动托盘', '检查文件名', '重新登录 OneDrive…', '设置…', '关于', '退出', '30 分钟', '2 小时', '8 小时', '立即恢复'])"
     check "no Chinese label is left in English" json_py '
 left = [x for x in d["menu_labels"]
         if x in ("Sync now", "View sync log", "Quit", "Resume now", "Settings…",

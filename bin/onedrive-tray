@@ -383,7 +383,7 @@ STRINGS = {
         "Automatic sync paused (click to resume)": "已暂停（点击恢复）",
         "Automatic sync is off": "已关闭自动同步",
         "Automatic sync state unknown": "无法读取自动同步状态",
-        "Start tray at login": "开机自动启动图标",
+        "Start tray at login": "开机自动启动托盘",
         "Rebuild sync baseline (resync)…": "重建同步基线（resync）…",
         "Quit": "退出",
         "Rebuild the sync baseline?": "重建同步基线？",
