@@ -151,6 +151,16 @@ section comes from rclone's documentation and the error strings themselves.
 
 ## When the token dies
 
+The tray has a **Re-authorise OneDrive…** item that runs the command below in a
+terminal, so the sign-in URL and any error from Microsoft stay visible. It also
+polls the remote afterwards and starts a sync once it answers.
+
+One thing worth knowing before you reach for it: a network problem looks like an
+expired sign-in in rclone's own words, because the message is about a token it
+could not fetch. Since 2026-09-30 the wrapper tells the two apart, and
+`[network]` means the credentials are fine and the connection is not.
+
+
 An rclone remote that goes unused for 90 days loses its refresh token, and every
 sync then fails with an authorisation error the wrapper reports as `[auth]`.
 Re-authorising keeps the remote and its settings:

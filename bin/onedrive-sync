@@ -295,37 +295,66 @@ fi
 # ---------------------------------------------------------------- failure hints
 # Turn rclone's noise into one actionable sentence, prefixed with a stable tag.
 # The tag lets a UI localise the message without pattern-matching English text.
+# One definition per failure class, used both to pick the newest relevant line
+# and to name it. Two copies of these patterns would drift apart.
+RE_LOCK='prior lock file found'
+RE_MAXDELETE='too many deletes|excessive deletes|deletion limit'
+RE_ACCESS='access test failed|check file check failed'
+# Anything that failed before the service answered belongs here, including a
+# token refresh that never reached Microsoft. That case used to match the auth
+# pattern below, because its message contains the word "token", and sent people
+# to re-authorise a remote whose credentials were fine. Measured on 2026-09-30: a
+# dead proxy produced
+#   couldn't fetch token: Post ".../oauth2/v2.0/token": EOF
+# and this said "authorisation may have expired" for 90 minutes.
+RE_NETWORK='lookup .*:53|dial tcp|no such host|Temporary failure in name resolution|server misbehaving|couldn.t fetch token|connection reset|connection refused|i/o timeout|: EOF|unexpected EOF|no route to host|network is unreachable|TLS handshake|proxyconnect|context deadline exceeded'
+RE_OLD='unknown flag|flag provided but not defined|unknown shorthand flag'
+RE_RESYNC='must run --resync|resync required|prior listings|critical error'
+# A genuine refusal from Microsoft.
+RE_AUTH='invalid_grant|401 Unauthorized|403 Forbidden|invalid_token|token expired|AADSTS'
+ALL_HINTS="$RE_LOCK|$RE_MAXDELETE|$RE_ACCESS|$RE_NETWORK|$RE_OLD|$RE_RESYNC|$RE_AUTH"
+
 hint_for() {
-    local t tag msg
+    local t tag msg newest
     t=$(tail -n 60 "$LOG" 2>/dev/null)
 
-    if grep -qiE 'prior lock file found' <<<"$t"; then
+    # Classify the most recent relevant line. A log holds an hour of failures, and
+    # the first branch that matched used to win no matter which line it came from:
+    # a network failure followed by a real refusal was reported as the network
+    # one, which is the wrong advice at the wrong moment.
+    newest="$(printf '%s\n' "$t" | grep -iE "$ALL_HINTS" | tail -1)"
+    [ -n "$newest" ] && t="$newest"
+
+    if grep -qiE "$RE_LOCK" <<<"$t"; then
         tag=lock
         msg="a sync lock is still held; if this repeats, delete the *.lck files in ~/.cache/rclone/bisync"
     # Deliberately not matching the bare word max-delete: this wrapper logs its
     # own "--max-delete N%" conversion line just before the run, and matching it
     # tagged every unrelated failure as a delete-cap abort.
-    elif grep -qiE 'too many deletes|excessive deletes|deletion limit' <<<"$t"; then
+    elif grep -qiE "$RE_MAXDELETE" <<<"$t"; then
         tag=maxdelete
         msg="more than MAX_DELETE=$MAX_DELETE files would be deleted; if that is intended run: onedrive-sync --force"
     # Before the generic resync patterns: an access abort also ends with "Bisync
     # aborted. Must run --resync to recover", and answering that with --resync
     # sends the user to the one action that cannot fix a missing marker file.
-    elif grep -qiE 'access test failed|check file check failed' <<<"$t"; then
+    elif grep -qiE "$RE_ACCESS" <<<"$t"; then
         tag=access
         msg="the access check did not find ${CHECK_FILENAME:-RCLONE_TEST} on both sides, so nothing was changed. Restore the file (onedrive-check-access) or fix the side that cannot be read. Do not run --resync for this"
-    elif grep -qiE 'lookup .*:53|dial tcp|no such host|Temporary failure in name resolution|server misbehaving' <<<"$t"; then
+    elif grep -qiE "$RE_NETWORK" <<<"$t"; then
         tag=network
-        msg="network or DNS temporarily unavailable; will retry"
-    elif grep -qiE 'unknown flag|flag provided but not defined|unknown shorthand flag' <<<"$t"; then
+        msg="network problem reaching the remote, so nothing was changed; the next run will retry"
+    elif grep -qiE "$RE_OLD" <<<"$t"; then
         tag=oldrclone
         msg="this rclone does not know the flags in BISYNC_ARGS; --resilient/--recover need rclone >= 1.65 (check: rclone version)"
-    elif grep -qiE 'must run --resync|resync required|prior listings|critical error' <<<"$t"; then
+    elif grep -qiE "$RE_RESYNC" <<<"$t"; then
         tag=resync
         msg="sync baseline is invalid; run: onedrive-sync --resync"
-    elif grep -qiE 'invalid_grant|401 Unauthorized|403 Forbidden|token' <<<"$t"; then
+    # The remote name is derived here so the message can name the exact command;
+    # the tray offers the same thing as a menu item, which is what most people
+    # should use.
+    elif grep -qiE "$RE_AUTH" <<<"$t"; then
         tag=auth
-        msg="authorisation may have expired; re-authorise the rclone remote"
+        msg="the sign-in was refused or has expired; use the tray's 'Re-authorise OneDrive' item, or run: rclone config reconnect ${REMOTE%%:*}:"
     else
         tag=other
         msg="see log: $LOG"

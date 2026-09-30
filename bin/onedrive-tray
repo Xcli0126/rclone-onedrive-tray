@@ -196,6 +196,17 @@ STRINGS = {
         "Local copy deleted": "本地副本已删除",
         "Could not delete the local copy": "无法删除本地副本",
         "Could not save the folder list": "无法保存文件夹清单",
+        "Re-authorise OneDrive…": "重新登录 OneDrive…",
+        "Sign in again?": "要重新登录吗？",
+        "This opens a terminal and your browser so you can sign in to "
+        "Microsoft again for {remote}. The sync keeps using the current "
+        "credentials until it finishes.": (
+            "这会打开一个终端和浏览器，让你重新为 {remote} 登录 Microsoft。\n\n"
+            "在完成之前，同步仍在使用现有的凭据。"),
+        "Sign in again": "重新登录",
+        "Waiting for the sign-in to finish…": "正在等待登录完成…",
+        "Signed in. Syncing now.": "已重新登录，开始同步。",
+        "The sign-in did not finish: {why}": "登录没有完成：{why}",
         "{app} sync failed": "{app} 同步失败",
         "see the sync log": "请查看同步日志",
         "Sync finished {when}": "同步完成 {when}",
@@ -392,6 +403,23 @@ def spawn(argv) -> bool:
         return True
     except Exception:  # noqa: BLE001
         return False
+
+
+def terminal_command(script: str):
+    """Wrap an interactive command in this desktop's terminal, if it has one.
+
+    rclone's OAuth flow asks one question before it opens the browser, and a
+    process started from a tray item has no terminal to ask it in. Running it in
+    one also keeps the sign-in URL and any message from Microsoft visible, which
+    is the difference between "nothing happened" and a readable error.
+    """
+    for name, prefix in (("xdg-terminal-exec", []), ("ptyxis", ["--"]),
+                         ("gnome-terminal", ["--"]), ("konsole", ["-e"]),
+                         ("xfce4-terminal", ["-x"]), ("xterm", ["-e"])):
+        path = shutil.which(name)
+        if path:
+            return [path] + prefix + ["sh", "-c", script]
+    return None
 
 
 def tail_text(path: str, max_bytes: int = 64 * 1024) -> str:
@@ -675,6 +703,71 @@ class Tray:
     def _start_service(self):
         sh(f"systemctl --user start --no-block {self.service}", timeout=30)
 
+    def on_reauth(self, *_):
+        """Re-run rclone's sign-in for this remote.
+
+        Until now the tray could only tell the user that authorisation had
+        expired, leaving them to find `rclone config reconnect` themselves. The
+        flow needs one answer and a browser, so it gets a terminal when there is
+        one: the URL and Microsoft's own error text stay on screen.
+        """
+        remote = self.remote.split(":", 1)[0] + ":"
+        dialog = Gtk.MessageDialog(
+            transient_for=None, flags=0, message_type=Gtk.MessageType.QUESTION,
+            buttons=Gtk.ButtonsType.NONE,
+            text=self.t("Sign in again?"))
+        dialog.format_secondary_text(self.t(
+            "This opens a terminal and your browser so you can sign in to "
+            "Microsoft again for {remote}. The sync keeps using the current "
+            "credentials until it finishes.", remote=remote))
+        dialog.add_button(self.t("Cancel"), Gtk.ResponseType.CANCEL)
+        dialog.add_button(self.t("Sign in again"), Gtk.ResponseType.OK)
+        response = dialog.run()
+        dialog.destroy()
+        if response != Gtk.ResponseType.OK:
+            return
+        self.notify(APP_NAME, self.t("Waiting for the sign-in to finish…"))
+        threading.Thread(target=self._reauth_worker, args=(remote,),
+                         daemon=True).start()
+
+    def _reauth_worker(self, remote):
+        quoted = shlex.quote(remote)
+        reconnect = f"printf 'y\\n' | rclone config reconnect {quoted}"
+        script = (f"{reconnect}; printf '\\nDone. You can close this window.\\n'; "
+                  "read -r _ || true")
+        term = terminal_command(script)
+        if term and spawn(term):
+            # The terminal owns the exit status, so success is decided by asking
+            # the remote again rather than by reading a return code.
+            if self._wait_for_remote(remote):
+                self._reauth_finished(True)
+            return
+        rc, out, err = sh(reconnect, timeout=900)
+        self._reauth_finished(rc == 0, (err or out).strip())
+
+    def _wait_for_remote(self, remote, tries: int = 36) -> bool:
+        """Poll until the remote answers again, or give up quietly."""
+        for _ in range(tries):
+            rc, _, _ = sh(f"rclone lsd {shlex.quote(remote)} --max-depth 1",
+                          timeout=30)
+            if rc == 0:
+                return True
+            time.sleep(5)
+        return False
+
+    def _reauth_finished(self, ok: bool, detail: str = ""):
+        def report():
+            if ok:
+                self.notify(APP_NAME, self.t("Signed in. Syncing now."))
+                self.state = None
+                self.notified_error_at = None
+                threading.Thread(target=self._start_service, daemon=True).start()
+            else:
+                self.notify(APP_NAME, self.t("The sign-in did not finish: {why}",
+                                             why=(detail or "?")[:120]))
+            return False
+        GLib.idle_add(report)
+
     def _offer_local_delete(self, name):
         """Offer to reclaim the space a deselected folder occupies.
 
@@ -783,6 +876,11 @@ class Tray:
         dialog.destroy()
         return False
 
+    def _refresh_now(self):
+        """Run one state refresh from an idle callback, exactly once."""
+        self.poll()
+        return False
+
     def refresh_quota(self):
         """Query the account quota off the main loop; never block the menu."""
         if not self.quota_busy:
@@ -793,6 +891,16 @@ class Tray:
                     result = read_quota(self.remote)
                     if result:
                         self.quota = result
+                        # Show it now rather than at the next poll tick, which is
+                        # up to three seconds later. The suite caught this as a
+                        # flaky assertion: the query had finished but the label
+                        # had not been applied when the test looked.
+                        #
+                        # poll() returns True because it is also a repeating
+                        # GLib timeout, and an idle callback that returns True is
+                        # called again forever. The wrapper is what makes this a
+                        # one-shot.
+                        GLib.idle_add(self._refresh_now)
                 finally:
                     self.quota_busy = False
 
@@ -848,6 +956,7 @@ class Tray:
 
         self.menu.append(Gtk.SeparatorMenuItem())
         self._add(self.t("Check file names"), self._check_names)
+        self._add(self.t("Re-authorise OneDrive…"), self.on_reauth)
         self._add(self.t("Rebuild sync baseline (resync)…"), self.on_resync)
         self._add(self.t("Quit"), lambda *_: Gtk.main_quit())
 

@@ -498,6 +498,24 @@ run "it says what it would do without touching anything" 0 "would write" \
         ACC_ARGS="$WORK/access-args" ACC_REMOTE="$ACC/remote" \
         "$HOME/.local/bin/onedrive-check-access" --dry-run
 
+# ---------------------------------------------------------------- hint tags
+# A failure that happens before Microsoft answers is a network problem, however
+# much its message talks about tokens. rclone says:
+#   couldn't fetch token: Post ".../oauth2/v2.0/token": EOF
+# and that used to be reported as an expired sign-in.
+title "network failures and expired sign-ins"
+CAP_EOF='2026/01/01 00:00:00 CRITICAL: failed to get root: Get "https://graph.microsoft.com/v1.0/drives/X/root": couldn'"'"'t fetch token: Post "https://login.microsoftonline.com/common/oauth2/v2.0/token": EOF'
+CAP_AUTH='2026/01/01 00:00:00 CRITICAL: Failed to refresh token: oauth2: cannot fetch token: 400 Bad Request: {"error":"invalid_grant","error_description":"AADSTS70043: The refresh token has expired"}'
+run "a token fetch that never reached Microsoft is a network problem" 1 "[network]" \
+    env PATH="$CAP:$PATH" XDG_CONFIG_HOME="$CAP/cfg" XDG_CACHE_HOME="$CAP/cache" \
+        CAP_ARGS="$WORK/cap-args" CAP_STDERR="$CAP_EOF" CAP_RC=1 "$HOME/.local/bin/onedrive-sync"
+run "a refused token is an expired sign-in, and says what to click" 1 "[auth]" \
+    env PATH="$CAP:$PATH" XDG_CONFIG_HOME="$CAP/cfg" XDG_CACHE_HOME="$CAP/cache" \
+        CAP_ARGS="$WORK/cap-args" CAP_STDERR="$CAP_AUTH" CAP_RC=1 "$HOME/.local/bin/onedrive-sync"
+run "and the message names the tray item and the command" 1 "config reconnect" \
+    env PATH="$CAP:$PATH" XDG_CONFIG_HOME="$CAP/cfg" XDG_CACHE_HOME="$CAP/cache" \
+        CAP_ARGS="$WORK/cap-args" CAP_STDERR="$CAP_AUTH" CAP_RC=1 "$HOME/.local/bin/onedrive-sync"
+
 # ---------------------------------------------------------------- uninstall
 title "uninstall.sh"
 UNINSTALL_OUT="$(bash "$SRC_DIR/uninstall.sh" --prefix "$HOME/.local" 2>&1)"

@@ -138,6 +138,17 @@ printf 'onedrive-sync %s\n' "\$*" >> "$WORK/calls/calls"
 exit 0
 STUB
 
+# The re-authorise item opens a terminal when the desktop has one, and this
+# machine does (ptyxis, xdg-terminal-exec). Stub them so the suite records the
+# command instead of putting a window on somebody's screen.
+for term in xdg-terminal-exec ptyxis gnome-terminal konsole xfce4-terminal xterm; do
+cat > "$WORK/stubs/$term" <<STUB
+#!/bin/sh
+printf 'terminal %s\n' "\$*" >> "$WORK/calls/calls"
+exit 0
+STUB
+done
+
 chmod +x "$WORK/stubs"/*
 
 # ------------------------------------------------------------- the driver
@@ -465,6 +476,50 @@ def scenario_lock_second():
     return {"exit_code": 0}
 
 
+def scenario_reauth():
+    """The re-authorise item must run rclone's sign-in for the right remote.
+
+    The handler asks for confirmation first, so Gtk.MessageDialog is replaced by
+    something that answers yes; the rest of the path is untouched.
+    """
+    tray = build()
+    clear_calls()
+    asked = {}
+
+    class FakeDialog:
+        def __init__(self, *a, **k):
+            asked["text"] = k.get("text", "")
+            asked["buttons"] = []
+
+        def format_secondary_text(self, text):
+            asked["body"] = text
+
+        def add_button(self, label, response):
+            asked["buttons"].append(label)
+
+        def run(self):
+            return MODULE.Gtk.ResponseType.OK
+
+        def destroy(self):
+            pass
+
+    real = MODULE.Gtk.MessageDialog
+    MODULE.Gtk.MessageDialog = FakeDialog
+    try:
+        find_at(tray.menu, "Re-authorise OneDrive…").activate()
+        asked["reconnect"] = wait_for(
+            lambda: any("config reconnect" in line for line in call_lines()), 8.0)
+        asked["started"] = wait_for(
+            lambda: any("start --no-block ztraytest.service" in line
+                        for line in call_lines()), 8.0)
+    finally:
+        MODULE.Gtk.MessageDialog = real
+    pump(0.3)
+    asked.update(labels_from(tray.menu))
+    asked["calls"] = call_lines()
+    return asked
+
+
 SCENARIOS = {
     "menus": scenario_menus,
     "quota": scenario_quota,
@@ -475,6 +530,7 @@ SCENARIOS = {
     "openapp": scenario_openapp,
     "lock-hold": scenario_lock_hold,
     "lock-second": scenario_lock_second,
+    "reauth": scenario_reauth,
 }
 
 
@@ -593,7 +649,7 @@ raise SystemExit(0 if ok else 1)
 
 if ! gtk_probe; then
     skip "broadwayd did not come up on the private display (port ${PORT:-?}); GTK 3 cannot be initialised here"
-    summary
+summary
     exit 0
 fi
 
@@ -617,7 +673,7 @@ if len(labels) != len(set(labels)):
     raise SystemExit(1)
 '
     check "the English menu has the expected labels" \
-        json_expr "all(x in d['menu_labels'] for x in ['Sync now', 'Open sync folder', 'View sync log', 'Folders to sync', 'Pause automatic sync', 'Start tray at login', 'Check file names', 'Rebuild sync baseline (resync)…', 'Quit', 'Docs', 'Music', '.config', '30 minutes', '2 hours', '8 hours', 'Resume now'])"
+        json_expr "all(x in d['menu_labels'] for x in ['Sync now', 'Open sync folder', 'View sync log', 'Folders to sync', 'Pause automatic sync', 'Start tray at login', 'Check file names', 'Re-authorise OneDrive…', 'Rebuild sync baseline (resync)…', 'Quit', 'Docs', 'Music', '.config', '30 minutes', '2 hours', '8 hours', 'Resume now'])"
     check "the English menu contains no Chinese" json_py '
 if any(any("\u4e00" <= c <= "\u9fff" for c in x) for x in d["menu_labels"]):
     print("Chinese label under UI_LANG=en: %r" % d["menu_labels"])
@@ -627,7 +683,7 @@ fi
 
 if run_driver menus TRAY_LANG=zh; then
     check "the Chinese menu has the expected labels" \
-        json_expr "all(x in d['menu_labels'] for x in ['立即同步', '打开同步文件夹', '查看同步日志', '同步的文件夹', '暂停自动同步', '开机自动启动图标', '检查文件名', '退出', '30 分钟', '2 小时', '8 小时', '立即恢复'])"
+        json_expr "all(x in d['menu_labels'] for x in ['立即同步', '打开同步文件夹', '查看同步日志', '同步的文件夹', '暂停自动同步', '开机自动启动图标', '检查文件名', '重新登录 OneDrive…', '退出', '30 分钟', '2 小时', '8 小时', '立即恢复'])"
     check "no Chinese label is left in English" json_py '
 left = [x for x in d["menu_labels"]
         if x in ("Sync now", "View sync log", "Quit", "Resume now")]
@@ -789,6 +845,18 @@ else
     bad "the first process never took the lock"
     kill "$HOLDER" 2>/dev/null
     wait "$HOLDER" 2>/dev/null
+fi
+
+title "Signing in again"
+if run_driver reauth; then
+    check "the confirm dialog names the remote and offers both buttons" \
+        json_expr "'traytest-remote:' in d['body'] and d['buttons'] == ['Cancel', 'Sign in again']"
+    check "confirming runs rclone's sign-in for the same remote" \
+        json_expr "d['reconnect'] and any('config reconnect traytest-remote:' in x for x in d['calls'])"
+    check "and it opens a terminal rather than a windowless process" \
+        json_expr "any(x.startswith('terminal ') and 'config reconnect' in x for x in d['calls'])"
+    check "a completed sign-in starts a sync" \
+        json_expr "d['started'] and any('start --no-block ztraytest.service' in x for x in d['calls'])"
 fi
 
 summary

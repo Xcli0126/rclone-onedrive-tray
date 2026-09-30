@@ -80,6 +80,35 @@ crawls at ~900 B/s for a 100 MB file.
 
 ---
 
+### Re-authorising, and telling an expiry from a network failure
+
+Two things used to make this harder than it is.
+
+**A network failure looked like an expiry.** rclone's message when it cannot reach
+Microsoft is `couldn't fetch token: Post ".../oauth2/v2.0/token": EOF`, and the
+wrapper matched the word `token`, so it reported `[auth]` and told you to
+re-authorise a remote whose credentials were fine. Measured on 2026-09-30: a dead
+proxy produced that message for 90 minutes and every run was reported as an
+expired sign-in. Anything that fails before Microsoft answers is now `[network]`,
+and `[auth]` is reserved for a real refusal (`invalid_grant`, 401, 403, an
+`AADSTS` code).
+
+**There was nothing to click.** The tray now has a **Re-authorise OneDrive…**
+item. It asks for confirmation, opens a terminal and the browser, and runs
+
+```bash
+rclone config reconnect <remote>:
+```
+
+which is the same command documented below. rclone asks one question first
+("Token already configured - replace it?"), which is why the terminal is used
+rather than a background process: you can see the sign-in URL and anything
+Microsoft says back. The tray polls the remote afterwards and, once it answers,
+starts a sync and says so.
+
+If you would rather do it by hand, the command is the same one; the tray item is
+a wrapper around it.
+
 ## 2. rclone + OneDrive
 
 ### `ObjectHandle is Invalid` / `invalidRequest` when rclone touches the remote

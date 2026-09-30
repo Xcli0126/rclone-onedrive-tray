@@ -11,9 +11,9 @@ Five scripts, none of which needs an rclone remote and all safe on a working set
 
 ```bash
 tests/dependency-matrix.sh      # 31 cases: one missing dependency at a time, plus the tray
-tests/install-flow.sh           # 89 cases: the documented install path, end to end
+tests/install-flow.sh           # 92 cases: the documented install path, end to end
 tests/filters.sh                # 27 cases: the default filters still filter, plus the checker
-tests/tray.sh                   # 34 cases: the real GTK menu, driven with stubs
+tests/tray.sh                   # 38 cases: the real GTK menu, driven with stubs
 tests/docs.sh                   # 29 cases: the links and rules the docs depend on
 ```
 

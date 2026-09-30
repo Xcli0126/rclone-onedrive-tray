@@ -58,6 +58,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   number of suites. All five are wired into CI.
 - `docs/COMPATIBILITY.md`: the versions this was developed against, the behaviour measured on a
   real account, and an explicit list of what has never been tried.
+- A **Re-authorise OneDrive…** item in the tray, for when the sign-in really has expired. It
+  confirms, opens a terminal running `rclone config reconnect <remote>:` so the sign-in URL and any
+  error stay visible, polls the remote until it answers, and then starts a sync. Before this the
+  tray could only say that authorisation had expired, leaving the user to find the command in the
+  documentation.
 - An opt-in access check, `CHECK_ACCESS` and `CHECK_FILENAME`, which is rclone's own second safety
   net beside `MAX_DELETE`: bisync looks for a marker file in the same places on both sides and
   aborts before changing anything when one is missing, which is what a network, authorisation or
@@ -97,6 +102,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The failure hint classified by whichever pattern matched first in the last sixty log lines, so a
+  network failure an hour old could label a fresh refusal as a network problem and send the user to
+  the wrong action. Each class now has one pattern shared by the classifier and the message, and the
+  newest matching line decides.
+- A network failure was reported as an expired sign-in. rclone says
+  `couldn't fetch token: Post ".../oauth2/v2.0/token": EOF` when it cannot reach Microsoft, the
+  wrapper matched the word `token`, and the tray told the user to re-authorise a remote whose
+  credentials were fine. On 2026-09-30 a dead proxy produced exactly that for 90 minutes. Failures
+  that happen before Microsoft answers are now `[network]`; `[auth]` means a real refusal
+  (`invalid_grant`, 401, 403, `AADSTS`), and its message names the tray item and the command.
+- The quota row appeared up to three seconds after the query returned, because only the three-second
+  poll applied it. `tests/tray.sh` caught it as a flaky assertion before anyone saw it as a
+  slow menu.
 - `--force` in `BISYNC_ARGS` bypassed the delete cap and said nothing, while the same flag typed on
   the command line was logged. It is now reported either way, and the config example warns against
   putting it there.
