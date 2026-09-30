@@ -146,6 +146,11 @@ BANDWIDTH_CHOICES = ("", "1M", "5M", "10M", "20M")
 # "nothing selected".
 BW_UNLIMITED = "unlimited"
 
+# The pause durations the menu offers, each with the string it is called by. One
+# table, so the submenu and the notification that follows it cannot drift apart.
+PAUSE_CHOICES = ((30, "30 minutes"), (120, "2 hours"), (480, "8 hours"))
+PAUSE_LABELS = dict(PAUSE_CHOICES)
+
 
 def bw_id(value: str) -> str:
     return value or BW_UNLIMITED
@@ -285,7 +290,9 @@ def write_timer_dropin(unit: str, minutes: int) -> str:
 def set_watch_unit(unit: str, enable: bool) -> str:
     """Turn the realtime-sync unit on or off, and say so when that fails."""
     action = "enable --now" if enable else "disable --now"
-    rc, out, err = sh(f"systemctl --user {action} {unit}-watch.service", timeout=60)
+    # The unit name is a config value, so it is quoted for the shell sh() starts.
+    rc, out, err = sh(f"systemctl --user {action} {shlex.quote(unit)}-watch.service",
+                      timeout=60)
     if rc != 0:
         return err or out or f"systemctl --user {action} exited {rc}"
     return ""
@@ -330,26 +337,35 @@ def marker_file_path(cfg: dict) -> str:
     return os.path.join(cfg.get("LOCAL") or "", name)
 
 
-def check_access_command() -> str:
-    """onedrive-check-access beside this script, or on PATH."""
-    beside = os.path.join(os.path.dirname(os.path.realpath(__file__)),
-                          "onedrive-check-access")
+def sibling_script(name: str) -> str:
+    """The helper beside this script, or on PATH; "" when neither is there.
+
+    The sibling wins, so an upgraded checkout is not held back by an older copy
+    of the same helper that happens to be earlier on PATH.
+    """
+    beside = os.path.join(os.path.dirname(os.path.realpath(__file__)), name)
     if os.path.exists(beside):
         return beside
-    return shutil.which("onedrive-check-access") or ""
+    return shutil.which(name) or ""
+
+
+def run_script(cmd: str, timeout: int = 900):
+    """Run a helper script and return (ok, its stdout+stderr). Slow, so every
+    caller runs it on a worker thread."""
+    try:
+        proc = subprocess.run([cmd], capture_output=True, text=True,
+                              timeout=timeout)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, str(exc)
+    return proc.returncode == 0, (proc.stdout + proc.stderr).strip()
 
 
 def run_check_access() -> tuple:
     """Create the marker files. Returns (ok, message); slow, so: worker thread."""
-    cmd = check_access_command()
+    cmd = sibling_script("onedrive-check-access")
     if not cmd:
         return False, "onedrive-check-access"
-    try:
-        proc = subprocess.run([cmd], capture_output=True, text=True, timeout=900)
-    except (OSError, subprocess.SubprocessError) as exc:
-        return False, str(exc)
-    report = (proc.stdout + proc.stderr).strip()
-    return proc.returncode == 0, report
+    return run_script(cmd)
 
 
 # ---------------------------------------------------------------- localisation
@@ -705,10 +721,9 @@ def ensure_icons() -> dict:
 def sh(cmd: str, timeout: int = 30):
     """Run a short command and capture its output.
 
-    Used for systemctl, systemd-run and the two read-only rclone queries. Every
-    call has a timeout, and callers that run on the GTK main loop must not use
-    this at all: a slow or hung command would freeze the tray (see poll() and
-    the *_async handlers).
+    Used for systemctl, systemd-run and the read-only rclone queries. Callers on
+    the GTK main loop must not use this at all: a slow or hung command would
+    freeze the tray (see poll() and the handlers behind it).
     """
     try:
         res = subprocess.run(cmd, shell=True, capture_output=True,
@@ -722,8 +737,8 @@ def spawn(argv) -> bool:
     """Launch a GUI program fully detached.
 
     Never use subprocess.run() with capture_output for this: the child inherits
-    the pipes and run() blocks until every descendant closes them, freezing the
-    GTK main loop.
+    the pipes, so run() blocks until every descendant closes them and the GTK
+    main loop freezes with it.
     """
     try:
         subprocess.Popen(argv, stdin=subprocess.DEVNULL,
@@ -739,8 +754,7 @@ def terminal_command(script: str):
 
     rclone's OAuth flow asks one question before it opens the browser, and a
     process started from a tray item has no terminal to ask it in. Running it in
-    one also keeps the sign-in URL and any message from Microsoft visible, which
-    is the difference between "nothing happened" and a readable error.
+    one also keeps the sign-in URL, and any message from Microsoft, on screen.
     """
     for name, prefix in (("xdg-terminal-exec", []), ("ptyxis", ["--"]),
                          ("gnome-terminal", ["--"]), ("konsole", ["-e"]),
@@ -768,14 +782,15 @@ TS_RE = re.compile(r"^(\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2})")
 HINT_RE = re.compile(r"\[(\w+)\]\s*(.*)$")
 
 
-def read_last_result(log_path: str):
-    """Return (state, 'HH:MM', tag, raw_hint) parsed from the sync log.
+def read_last_result(text: str):
+    """Return (state, 'HH:MM', tag, raw_hint) parsed from the tail of the log.
 
     The sync wrapper prefixes its hint with a stable [tag] so the caller can
-    localise it without matching English text; raw_hint is the fallback.
+    localise it without matching English text; raw_hint is the fallback. The
+    caller passes the text, so one poll reads the log once rather than twice.
     """
     kind, when, tag, raw = "unknown", "", "", ""
-    for line in tail_text(log_path).splitlines():
+    for line in text.splitlines():
         match = TS_RE.match(line)
         if not match:
             continue
@@ -860,14 +875,13 @@ BUSY_RE = re.compile(r"^\s*\*\s+(.+?):\s", re.M)
 STAMP_RE = re.compile(r"^(\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2})", re.M)
 
 
-def read_progress(log_path: str, max_age: int = 30):
-    """Summarise the most recent stats block.
+def read_progress(text: str, max_age: int = 30):
+    """Summarise the most recent stats block in the tail of the log.
 
     Returns None when there is no block, or when the newest one is older than
     max_age seconds. Without that age check an idle tray reports the final
     numbers of the previous run as if a transfer were in flight.
     """
-    text = tail_text(log_path)
     last = None
     for match in PROG_RE.finditer(text):
         last = match
@@ -892,6 +906,13 @@ def read_progress(log_path: str, max_age: int = 30):
 
 # ---------------------------------------------------------------- tray
 class Tray:
+    """The status icon and the menu that drives one bisync pair.
+
+    Every slow query (systemctl, rclone) runs on a worker thread and comes back
+    through GLib.idle_add(); the *_busy flags stop a second query from stacking
+    up behind a first one that has not answered yet.
+    """
+
     def __init__(self, cfg: dict):
         self.cfg = cfg
         self.unit = cfg["UNIT_NAME"]
@@ -918,6 +939,8 @@ class Tray:
         self.notified_error_at = None
         self.manual_requested = False
         self.busy = False
+        # One flag per piece of state a worker fills in. Each is set before the
+        # thread starts and cleared on the main loop when its answer lands.
         self.quota = None          # (used, total) once a query has succeeded
         self.quota_busy = False
         self.auto_seen = None      # "on" / "off" / "paused" / "unknown"
@@ -927,7 +950,6 @@ class Tray:
         self.folders_seen = None
         self.building_folders = False
         self.check_busy = False
-        self.settings_dialog = None
         self.icon_visible = truthy(self.cfg.get("SHOW_ICON", "1"))
 
         if Notify is not None:
@@ -1038,8 +1060,33 @@ class Tray:
         # to happen. systemctl runs in a worker: it can take seconds to answer.
         threading.Thread(target=self._start_service, daemon=True).start()
 
+    def _sc(self, *args, timeout: int = 30):
+        """Run `systemctl --user`, every argument quoted for sh()'s shell.
+
+        The unit names come from the hand-edited config; unquoted, one is a
+        word-splitting bug at best and a command injection at worst.
+        """
+        return sh("systemctl --user "
+                  + " ".join(shlex.quote(str(a)) for a in args), timeout=timeout)
+
     def _start_service(self):
-        sh(f"systemctl --user start --no-block {self.service}", timeout=30)
+        self._sc("start", "--no-block", self.service)
+
+    def _confirm(self, kind, text, body, cancel: str, confirm: str) -> bool:
+        """Ask a question; True when the second button was chosen.
+
+        The labels are explicit, not Gtk.ButtonsType.*: the stock ones follow the
+        system locale, so an English dialog on a Chinese desktop read 取消/确定.
+        """
+        dialog = Gtk.MessageDialog(
+            transient_for=None, flags=0, message_type=kind,
+            buttons=Gtk.ButtonsType.NONE, text=text)
+        dialog.format_secondary_text(body)
+        dialog.add_button(cancel, Gtk.ResponseType.CANCEL)
+        dialog.add_button(confirm, Gtk.ResponseType.OK)
+        response = dialog.run()
+        dialog.destroy()
+        return response == Gtk.ResponseType.OK
 
     def on_reauth(self, *_):
         """Re-run rclone's sign-in for this remote.
@@ -1050,19 +1097,13 @@ class Tray:
         one: the URL and Microsoft's own error text stay on screen.
         """
         remote = self.remote.split(":", 1)[0] + ":"
-        dialog = Gtk.MessageDialog(
-            transient_for=None, flags=0, message_type=Gtk.MessageType.QUESTION,
-            buttons=Gtk.ButtonsType.NONE,
-            text=self.t("Sign in again?"))
-        dialog.format_secondary_text(self.t(
-            "This opens a terminal and your browser so you can sign in to "
-            "Microsoft again for {remote}. The sync keeps using the current "
-            "credentials until it finishes.", remote=remote))
-        dialog.add_button(self.t("Cancel"), Gtk.ResponseType.CANCEL)
-        dialog.add_button(self.t("Sign in again"), Gtk.ResponseType.OK)
-        response = dialog.run()
-        dialog.destroy()
-        if response != Gtk.ResponseType.OK:
+        if not self._confirm(
+                Gtk.MessageType.QUESTION,
+                self.t("Sign in again?"),
+                self.t("This opens a terminal and your browser so you can sign in to "
+                       "Microsoft again for {remote}. The sync keeps using the current "
+                       "credentials until it finishes.", remote=remote),
+                self.t("Cancel"), self.t("Sign in again")):
             return
         self.notify(APP_NAME, self.t("Waiting for the sign-in to finish…"))
         threading.Thread(target=self._reauth_worker, args=(remote,),
@@ -1110,9 +1151,8 @@ class Tray:
         """Offer to reclaim the space a deselected folder occupies.
 
         bisync leaves the local copy alone when a folder stops being synced,
-        which turns it into a trap: edits there go nowhere. Deleting it is
-        therefore useful, but it is a delete, so it only ever happens on an
-        explicit click here and the remote is never involved.
+        which turns it into a trap: edits there go nowhere. It is a delete, so it
+        only happens on an explicit click, and the remote is never involved.
         """
         if not name or name.startswith("/") or ".." in name.split("/"):
             return
@@ -1122,27 +1162,20 @@ class Tray:
         if os.path.realpath(target) == os.path.realpath(self.local):
             return
 
-        dialog = Gtk.MessageDialog(
-            transient_for=None, flags=0, message_type=Gtk.MessageType.QUESTION,
-            buttons=Gtk.ButtonsType.NONE,
-            text=self.t("Delete the local copy of {name}?", name=name))
-        dialog.format_secondary_text(self.t(
-            "The folder stays in OneDrive. Only the copy on this machine is "
-            "deleted, and ticking the folder again downloads it back."))
-        dialog.add_button(self.t("Keep local copy"), Gtk.ResponseType.CANCEL)
-        dialog.add_button(self.t("Delete local copy"), Gtk.ResponseType.OK)
-        response = dialog.run()
-        dialog.destroy()
-        if response != Gtk.ResponseType.OK:
+        if not self._confirm(
+                Gtk.MessageType.QUESTION,
+                self.t("Delete the local copy of {name}?", name=name),
+                self.t("The folder stays in OneDrive. Only the copy on this machine "
+                       "is deleted, and ticking the folder again downloads it back."),
+                self.t("Keep local copy"), self.t("Delete local copy")):
             return
         self._delete_local(target)
 
     def _delete_local(self, target):
         """Delete a local copy off the main loop, then report what happened.
 
-        shutil.rmtree() over a large tree takes long enough that running it here
-        froze the whole menu, so it runs in a worker and only the result comes
-        back through the main loop.
+        shutil.rmtree() over a large tree would freeze the menu, so it runs in a
+        worker and only the result comes back through the main loop.
         """
         def worker():
             try:
@@ -1159,16 +1192,12 @@ class Tray:
     def _check_names(self, *_):
         """Look for names OneDrive will refuse, without freezing the menu.
 
-        The check reads every path under the sync folder, which on a large tree
-        takes long enough that the menu would visibly hang, so it runs in a
-        thread and reports through a dialog.
+        It reads every path under the sync folder, so it runs in a thread and
+        reports through a dialog.
         """
         if self.check_busy:
             return
-        cmd = os.path.join(os.path.dirname(os.path.realpath(__file__)),
-                           "onedrive-check")
-        if not os.path.exists(cmd):
-            cmd = shutil.which("onedrive-check")
+        cmd = sibling_script("onedrive-check")
         if not cmd:
             self.notify(APP_NAME, self.t("onedrive-check is not installed"))
             return
@@ -1177,14 +1206,8 @@ class Tray:
         self.notify(APP_NAME, self.t("Checking file names…"))
 
         def worker():
-            try:
-                proc = subprocess.run([cmd], capture_output=True, text=True,
-                                      timeout=900)
-                report = (proc.stdout + proc.stderr).strip()
-                clean = proc.returncode == 0
-            except (OSError, subprocess.SubprocessError) as exc:
-                report, clean = str(exc), False
-            GLib.idle_add(self._show_check, report, clean)
+            ok, report = run_script(cmd)
+            GLib.idle_add(self._show_check, report, ok)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1229,15 +1252,11 @@ class Tray:
                     result = read_quota(self.remote)
                     if result:
                         self.quota = result
-                        # Show it now rather than at the next poll tick, which is
-                        # up to three seconds later. The suite caught this as a
-                        # flaky assertion: the query had finished but the label
-                        # had not been applied when the test looked.
-                        #
-                        # poll() returns True because it is also a repeating
-                        # GLib timeout, and an idle callback that returns True is
-                        # called again forever. The wrapper is what makes this a
-                        # one-shot.
+                        # Show it now, not at the next poll tick up to three
+                        # seconds later: the suite once caught that gap as a
+                        # flaky assertion. poll() returns True because it is also
+                        # a repeating GLib timeout, so this needs a one-shot
+                        # wrapper rather than an idle_add(poll) of its own.
                         GLib.idle_add(self._refresh_now)
                 finally:
                     self.quota_busy = False
@@ -1254,7 +1273,20 @@ class Tray:
         restart for the labels to follow.
         """
         self.menu = Gtk.Menu()
+        self._build_status_items()
+        self._build_pause_item()
+        self._build_action_items()
 
+        self.menu.show_all()
+        # show_all() re-shows the quota row even though there is nothing to put
+        # in it. no_show_all keeps the row out of the layout until poll() has a
+        # quota line and asks for it explicitly.
+        self.item_quota.set_no_show_all(True)
+        self.item_quota.set_visible(bool(self.quota))
+        self._refresh_checks()
+
+    def _build_status_items(self):
+        """Header, status, quota and folder rows, and the commands under them."""
         # A header, so the version is one hover away from the item that opens
         # the About window and there is something naming the app at the top.
         self.item_header = Gtk.MenuItem(label=f"{APP_NAME} {VERSION}")
@@ -1284,9 +1316,11 @@ class Tray:
 
         self.menu.append(Gtk.SeparatorMenuItem())
 
+    def _build_pause_item(self):
+        """The pause row and its submenu of durations."""
         self.item_pause = Gtk.MenuItem(label=self.t("Pause automatic sync"))
         pause_menu = Gtk.Menu()
-        for minutes, key in ((30, "30 minutes"), (120, "2 hours"), (480, "8 hours")):
+        for minutes, key in PAUSE_CHOICES:
             entry = Gtk.MenuItem(label=self.t(key))
             entry.connect("activate",
                           lambda *_, m=minutes: self.pause_for(m))
@@ -1299,6 +1333,8 @@ class Tray:
         self.item_pause.set_submenu(pause_menu)
         self.menu.append(self.item_pause)
 
+    def _build_action_items(self):
+        """The rows below the pause entry: boot, the two dialogs, and the rest."""
         self.item_boot = Gtk.CheckMenuItem(label=self.t("Start tray at login"))
         self.item_boot.set_active(os.path.exists(AUTOSTART))
         self.item_boot.connect("activate", self.on_toggle_boot)
@@ -1313,14 +1349,6 @@ class Tray:
         self._add(self.t("Settings…"), self.on_settings)
         self._add(self.t("About"), self.on_about)
         self._add(self.t("Quit"), lambda *_: Gtk.main_quit())
-
-        self.menu.show_all()
-        # show_all() re-shows the quota row even though there is nothing to put
-        # in it. no_show_all keeps the row out of the layout until poll() has a
-        # quota line and asks for it explicitly.
-        self.item_quota.set_no_show_all(True)
-        self.item_quota.set_visible(bool(self.quota))
-        self._refresh_checks()
 
     def _add(self, label, handler):
         item = Gtk.MenuItem(label=label)
@@ -1396,19 +1424,18 @@ class Tray:
         was_visible = self.icon_visible
         was_lang = resolve_lang(self.cfg)
         self.cfg.update(values)
-        if truthy(values.get("SHOW_ICON", "1")) != was_visible:
-            self.set_icon_visible(truthy(values["SHOW_ICON"]))
+        visible = truthy(values.get("SHOW_ICON", "1"))
+        if visible != was_visible:
+            self.set_icon_visible(visible)
         if resolve_lang(self.cfg) != was_lang:
             self.set_language(values.get("UI_LANG", ""))
 
     def on_settings(self, *_):
         """Open the settings window; it applies its changes to this tray."""
         dialog = SettingsDialog(self)
-        self.settings_dialog = dialog
         dialog.show_all()
         dialog.run()
         dialog.destroy()
-        self.settings_dialog = None
 
     def show_settings_now(self):
         """Open the settings window from an idle callback (--settings)."""
@@ -1446,35 +1473,30 @@ class Tray:
             if mode == "resync":
                 sh(f"{shlex.quote(self.sync_script)} --resync", timeout=3600)
             else:
-                sh(f"systemctl --user start {self.service}", timeout=3600)
+                self._sc("start", self.service, timeout=3600)
         finally:
             self.busy = False
 
     def on_resync(self, *_):
-        dialog = Gtk.MessageDialog(
-            transient_for=None, flags=0, message_type=Gtk.MessageType.WARNING,
-            buttons=Gtk.ButtonsType.NONE,
-            text=self.t("Rebuild the sync baseline?"))
-        dialog.format_secondary_text(self.t(
-            "The next run compares both sides from scratch and rebuilds the "
-            "baseline. On a large folder it takes a while and must not be "
-            "interrupted."))
         # Explicit buttons, not Gtk.ButtonsType.*: the stock ones follow the
         # system locale, so an English dialog on a Chinese desktop read 取消/确定.
-        dialog.add_button(self.t("Cancel"), Gtk.ResponseType.CANCEL)
-        dialog.add_button(self.t("Rebuild"), Gtk.ResponseType.OK)
-        response = dialog.run()
-        dialog.destroy()
-        if response != Gtk.ResponseType.OK or self.busy:
+        confirmed = self._confirm(
+            Gtk.MessageType.WARNING,
+            self.t("Rebuild the sync baseline?"),
+            self.t("The next run compares both sides from scratch and rebuilds the "
+                   "baseline. On a large folder it takes a while and must not be "
+                   "interrupted."),
+            self.t("Cancel"), self.t("Rebuild"))
+        if not confirmed or self.busy:
             return
         self.busy = True
         self.notify(APP_NAME, self.t("Rebuilding sync baseline…"))
         threading.Thread(target=self._run, args=("resync",), daemon=True).start()
 
-    def _set_units(self, action: str):
-        """start/stop the timer and the watcher together."""
+    def _set_units(self, *action):
+        """start/stop/enable the timer and the watcher together."""
         for unit in (self.timer, self.watch):
-            sh(f"systemctl --user {action} {unit}", timeout=30)
+            self._sc(*action, unit)
 
     def pause_for(self, minutes: int):
         """Stop syncing for a while and let systemd bring it back by itself.
@@ -1486,12 +1508,13 @@ class Tray:
         """
         def worker():
             self._set_units("stop")
-            sh(f"systemctl --user disable {self.timer} {self.watch}", timeout=30)
+            self._sc("disable", self.timer, self.watch)
             sh(f"systemctl --user stop {PAUSE_UNIT}.timer {PAUSE_UNIT}.service "
                f"2>/dev/null", timeout=30)
             _, _, err = sh(
                 f"systemd-run --user --on-active={minutes}min --unit={PAUSE_UNIT} "
-                f"systemctl --user enable --now {self.timer} {self.watch}",
+                f"systemctl --user enable --now "
+                f"{shlex.quote(self.timer)} {shlex.quote(self.watch)}",
                 timeout=30)
             GLib.idle_add(self._after_pause, minutes, err)
 
@@ -1507,8 +1530,7 @@ class Tray:
                     fh.write(str(int(time.time()) + minutes * 60))
             except OSError:
                 pass
-            key = {30: "30 minutes", 120: "2 hours", 480: "8 hours"}.get(
-                minutes, f"{minutes} min")
+            key = PAUSE_LABELS.get(minutes, f"{minutes} min")
             self.notify(APP_NAME, self.t("Paused for {n}", n=self.t(key)))
             self.auto_seen = "paused"
         self._refresh_checks()
@@ -1518,7 +1540,7 @@ class Tray:
         def worker():
             sh(f"systemctl --user stop {PAUSE_UNIT}.timer {PAUSE_UNIT}.service "
                f"2>/dev/null", timeout=30)
-            self._set_units("enable --now")
+            self._set_units("enable", "--now")
             GLib.idle_add(self._after_resume)
 
         threading.Thread(target=worker, daemon=True).start()
@@ -1571,13 +1593,12 @@ class Tray:
     def _set_icon(self, path):
         """Hand a new icon to the indicator, and only a new one.
 
-        set_icon_full() makes libayatana-appindicator look up the scale factor
-        of an internal widget. In a session with no StatusNotifier host (this
-        machine has none) that widget does not exist, so the call can print
+        set_icon_full() makes libayatana-appindicator look up the scale factor of
+        an internal widget, which does not exist without a StatusNotifier host
+        (this machine has none), so the call can print
         `gtk_widget_get_scale_factor: assertion 'GTK_IS_WIDGET (widget)' failed`.
-        That critical may well be specific to this fallback mode. It is not
-        silenced by touching GLib log handlers; calling this only on a real
-        change keeps it to at most one message per state change.
+        Touching GLib log handlers does not silence it; calling this only on a
+        real change keeps it to at most one message per state change.
         """
         if path == self.shown_icon:
             return
@@ -1587,9 +1608,9 @@ class Tray:
     def _set_sync_progress(self, pct):
         """Redraw the syncing icon with the percentage rclone last reported.
 
-        The badge becomes an arc for the run in progress, so the icon says how
-        far along it is without the menu being opened. pct is None between runs,
-        and the plain arrows come back.
+        The badge becomes an arc, so the icon says how far along the run is
+        without the menu being opened. pct is None between runs, and the plain
+        arrows come back.
         """
         if pct == self.sync_pct:
             return
@@ -1612,17 +1633,19 @@ class Tray:
         the unit). The last one used to be reported as a pause, which invented a
         pause that never happened.
 
-        Note: `systemctl is-active` reports "activating" (not "active") while a
-        Type=oneshot service runs, so both must be accepted. It also exits
-        non-zero when any of the named units is inactive, which is a normal
-        answer here and not a failure.
+        `systemctl is-active` reports "activating" (not "active") while a
+        Type=oneshot service runs, so both are accepted, and it exits non-zero
+        when any named unit is inactive, which is a normal answer and not a
+        failure here.
         """
-        _, out, _ = sh(
-            f"systemctl --user is-active {self.service} {self.timer}", timeout=30)
+        _, out, _ = sh("systemctl --user is-active "
+                       f"{shlex.quote(self.service)} {shlex.quote(self.timer)}",
+                       timeout=30)
         lines = [line.strip() for line in out.splitlines() if line.strip()]
         active = bool(lines) and lines[0] in ("active", "activating")
 
-        rc, out, _ = sh(f"systemctl --user is-enabled {self.timer}", timeout=30)
+        rc, out, _ = sh(f"systemctl --user is-enabled {shlex.quote(self.timer)}",
+                        timeout=30)
         answer = out.splitlines()[0].strip() if out.strip() else ""
         # The answer decides, not the exit status: `systemctl is-enabled` exits
         # non-zero for a unit that exists and is disabled, and reading that as
@@ -1642,8 +1665,7 @@ class Tray:
     def poll(self):
         """Ask for the state in the background and return at once.
 
-        Every query shells out to systemctl, which can take seconds (or hang)
-        when the user manager is busy. Doing that here froze the whole tray, so
+        systemctl can take seconds, or hang, when the user manager is busy, so
         the subprocess work happens in a worker and _apply_state() runs back on
         the main loop through GLib.idle_add().
         """
@@ -1664,12 +1686,13 @@ class Tray:
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _apply_state(self, syncing, timer_state):
-        self.state_busy = False
+    def _auto_state(self, timer_state) -> str:
+        """"on", "off", "paused" or "unknown", from systemctl's own answer.
 
-        # "off" is a real answer (automatic sync was turned off); "unknown" is
-        # the absence of an answer. Only a stamp left by pause_for() means the
-        # tray itself paused the units.
+        "off" is an answer (automatic sync was turned off); "unknown" is the
+        absence of one. Only a stamp from pause_for() means the tray paused the
+        units itself, and the stamp goes when the timer brings them back.
+        """
         if timer_state == "enabled":
             auto = "on"
         elif timer_state == "unknown":
@@ -1678,35 +1701,17 @@ class Tray:
             auto = "paused"
         else:
             auto = "off"
-
-        # A timed pause ends when the transient timer re-enables the units.
-        # Drop the stamp then, and re-label the menu whenever the state flips.
         if auto != "paused" and os.path.exists(PAUSE_STAMP):
             self._clear_stamp()
-        if auto != self.auto_seen:
-            self.auto_seen = auto
-            self._refresh_checks()
+        return auto
 
-        kind, when, tag, raw = read_last_result(self.log)
+    def _hint(self, tag, raw) -> str:
+        """The localised failure hint, or the log line when the tag has none."""
         hint = self.t(tag)
-        if hint == tag:            # this tag has no translation
-            hint = raw
+        return raw if hint == tag else hint
 
-        if syncing:
-            state = "syncing"
-        elif auto in ("paused", "off"):
-            state = "paused"
-        elif kind == "error":
-            state = "error"
-        elif kind == "synced":
-            state = "synced"
-        else:
-            state = "unknown"
-
-        if state != self.state:
-            self.state = state
-            self._set_icon(self.icons[state])
-
+    def _announce_finish(self, syncing, kind, when, hint):
+        """Notify once when a run ends: a failure always, a success on request."""
         if self.was_syncing and not syncing:
             if kind == "error":
                 if when != self.notified_error_at:
@@ -1723,46 +1728,87 @@ class Tray:
             self.notified_error_at = None
         self.was_syncing = syncing
 
-        prog = read_progress(self.log) if syncing else None
+    def _status_text(self, syncing, prog, auto, kind, when, hint) -> str:
+        """The sentence under the header: what is happening, and when it last did."""
         if syncing:
-            if prog:
-                text = f"{self.t('Syncing…')} {prog['pct']}%"
-                if prog["speed"]:
-                    text += f" · {prog['speed']}"
-                if prog["file"]:
-                    text += f" · {prog['file'][:34]}"
-            else:
-                text = self.t("Syncing…")
-        elif auto == "paused":
-            text = self.t("Automatic sync paused · last {when}", when=when or "—")
-        elif auto == "off":
-            text = self.t("Automatic sync is off · last {when}", when=when or "—")
-        elif kind == "error":
+            if not prog:
+                return self.t("Syncing…")
+            text = f"{self.t('Syncing…')} {prog['pct']}%"
+            if prog["speed"]:
+                text += f" · {prog['speed']}"
+            if prog["file"]:
+                text += f" · {prog['file'][:34]}"
+            return text
+        if auto == "paused":
+            return self.t("Automatic sync paused · last {when}", when=when or "—")
+        if auto == "off":
+            return self.t("Automatic sync is off · last {when}", when=when or "—")
+        if kind == "error":
             text = self.t("⚠ Sync failed {when}", when=when)
-            if hint:
-                text += f" · {hint[:40]}"
-        elif kind == "synced":
-            text = self.t("Last sync {when}", when=when)
-        else:
-            text = self.t("No sync recorded yet")
+            return text + (f" · {hint[:40]}" if hint else "")
+        if kind == "synced":
+            return self.t("Last sync {when}", when=when)
+        return self.t("No sync recorded yet")
 
-        self.item_status.set_label(text)
-        self._set_sync_progress(prog["pct"] if prog else None)
+    def _show_quota(self):
+        """Put the usage line in the menu, or leave the row hidden without one."""
+        if not self.quota:
+            return
+        used, total = self.quota
+        pct = int(used * 100 / total) if total else 0
+        self.item_quota.set_label(self.t(
+            "{used} of {total} used ({pct}%)",
+            used=fmt_size(used), total=fmt_size(total), pct=pct))
+        self.item_quota.set_visible(True)
 
-        if self.quota:
-            used, total = self.quota
-            pct = int(used * 100 / total) if total else 0
-            self.item_quota.set_label(self.t(
-                "{used} of {total} used ({pct}%)",
-                used=fmt_size(used), total=fmt_size(total), pct=pct))
-            self.item_quota.set_visible(True)
-
-        # Rebuild only when the listing actually changed. Rebuilding on every
-        # poll would fight with a menu the user has open.
+    def _show_folders(self):
+        """Rebuild the folder submenu when, and only when, the listing changed."""
         if self.folders != self.folders_seen:
             self.folders_seen = self.folders
             self._build_folder_menu()
 
+    def _apply_state(self, syncing, timer_state):
+        """Put one worker's answer on screen, on the main loop.
+
+        Must return False: GLib.idle_add() re-calls an idle callback that
+        returns True, forever.
+        """
+        self.state_busy = False
+
+        auto = self._auto_state(timer_state)
+        if auto != self.auto_seen:
+            self.auto_seen = auto
+            self._refresh_checks()
+
+        log_tail = tail_text(self.log)
+        kind, when, tag, raw = read_last_result(log_tail)
+        hint = self._hint(tag, raw)
+
+        # The order decides: a run in progress outranks everything, then a pause
+        # the tray itself arranged, then the last result in the log.
+        if syncing:
+            state = "syncing"
+        elif auto in ("paused", "off"):
+            state = "paused"
+        elif kind == "error":
+            state = "error"
+        elif kind == "synced":
+            state = "synced"
+        else:
+            state = "unknown"
+        if state != self.state:
+            self.state = state
+            self._set_icon(self.icons[state])
+
+        self._announce_finish(syncing, kind, when, hint)
+
+        prog = read_progress(log_tail) if syncing else None
+        self.item_status.set_label(
+            self._status_text(syncing, prog, auto, kind, when, hint))
+        self._set_sync_progress(prog["pct"] if prog else None)
+
+        self._show_quota()
+        self._show_folders()
         return False
 
 
@@ -1814,7 +1860,13 @@ class SettingsDialog(Gtk.Dialog):
         box = self.get_content_area()
         box.set_spacing(10)
         box.set_border_width(12)
+        self._build_options(box)
+        self._build_labels(box)
+        self._build_buttons()
+        self.notice_check_access()
 
+    def _build_options(self, box):
+        """The grid of controls, one row each, in the order they are shown."""
         grid = Gtk.Grid()
         grid.set_row_spacing(8)
         grid.set_column_spacing(14)
@@ -1876,6 +1928,8 @@ class SettingsDialog(Gtk.Dialog):
         access_row.pack_start(self.button_markers, False, False, 0)
         grid.attach(access_row, 0, 8, 2, 1)
 
+    def _build_labels(self, box):
+        """The two message rows, and the path of the file being edited."""
         self.label_notice = Gtk.Label()
         self.label_notice.set_xalign(0)
         self.label_notice.set_line_wrap(True)
@@ -1896,14 +1950,14 @@ class SettingsDialog(Gtk.Dialog):
         self.label_config.set_selectable(True)
         box.pack_start(self.label_config, False, False, 0)
 
+    def _build_buttons(self):
+        """Cancel and Save. Each closes the window through its own response."""
         self.cancel_button = Gtk.Button(label=self.t("Cancel"))
         self.cancel_button.connect("clicked", self.on_cancel)
         self.add_action_widget(self.cancel_button, Gtk.ResponseType.CANCEL)
         self.save_button = Gtk.Button(label=self.t("Save"))
         self.save_button.connect("clicked", self.on_save)
         self.add_action_widget(self.save_button, Gtk.ResponseType.OK)
-
-        self.notice_check_access()
 
     def values(self) -> dict:
         """The config values the widgets hold right now."""
@@ -2022,7 +2076,6 @@ class SettingsDialog(Gtk.Dialog):
     def _markers_done(self, ok, report):
         self.markers_busy = False
         self.button_markers.set_sensitive(True)
-        self.markers = report
         if ok:
             text = (report + "\n") if report else ""
             self.set_status(text + self.t("The marker files are there."))
@@ -2053,10 +2106,10 @@ def show_settings_standalone():
 def acquire_lock():
     """Take the single-instance lock.
 
-    Returns the file object, or raises OSError. Callers need to tell "another
-    tray has it" apart from "the lock file cannot be created at all": both used
-    to print the same sentence, so an unwritable TMPDIR looked like a running
-    tray and exited 0.
+    Returns the file object, or None when another tray already holds it. Raises
+    OSError when the file cannot be created at all: callers need to tell those
+    two apart, because both used to print the same sentence, so an unwritable
+    TMPDIR looked like a running tray and exited 0.
     """
     handle = open(LOCK_FILE, "w")
     try:

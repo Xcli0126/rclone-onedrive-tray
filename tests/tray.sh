@@ -126,23 +126,14 @@ printf 'systemd-run %s\n' "\$*" >> "$WORK/calls/calls"
 exit 0
 STUB
 
-cat > "$WORK/stubs/xdg-open" <<STUB
+# These three only have to record that they were asked and with what.
+for name in xdg-open onedrive-check onedrive-sync; do
+cat > "$WORK/stubs/$name" <<STUB
 #!/bin/sh
-printf 'xdg-open %s\n' "\$*" >> "$WORK/calls/calls"
+printf '$name %s\n' "\$*" >> "$WORK/calls/calls"
 exit 0
 STUB
-
-cat > "$WORK/stubs/onedrive-check" <<STUB
-#!/bin/sh
-printf 'onedrive-check %s\n' "\$*" >> "$WORK/calls/calls"
-exit 0
-STUB
-
-cat > "$WORK/stubs/onedrive-sync" <<STUB
-#!/bin/sh
-printf 'onedrive-sync %s\n' "\$*" >> "$WORK/calls/calls"
-exit 0
-STUB
+done
 
 # The re-authorise item opens a terminal when the desktop has one, and this
 # machine does (ptyxis, xdg-terminal-exec). Stub them so the suite records the
@@ -547,6 +538,37 @@ def scenario_lock_second():
     return {"exit_code": 0}
 
 
+def fake_message_dialog(store, response):
+    """A drop-in for Gtk.MessageDialog that records what a handler put in it.
+
+    The tray's confirmation and information windows are built, written to and
+    run, and that is all the assertions here need to see: replacing the class
+    keeps the handler's own code on the path under test, where rebuilding the
+    window afterwards would only test the reconstruction. `store` collects the
+    title, the secondary text and the button labels; `response` is what run()
+    answers with.
+    """
+
+    class FakeDialog:
+        def __init__(self, *a, **k):
+            store["text"] = k.get("text", "")
+            store["buttons"] = []
+
+        def format_secondary_text(self, text):
+            store["body"] = text
+
+        def add_button(self, label, response):
+            store["buttons"].append(label)
+
+        def run(self):
+            return response
+
+        def destroy(self):
+            pass
+
+    return FakeDialog
+
+
 def scenario_reauth():
     """The re-authorise item must run rclone's sign-in for the right remote.
 
@@ -557,25 +579,9 @@ def scenario_reauth():
     clear_calls()
     asked = {}
 
-    class FakeDialog:
-        def __init__(self, *a, **k):
-            asked["text"] = k.get("text", "")
-            asked["buttons"] = []
-
-        def format_secondary_text(self, text):
-            asked["body"] = text
-
-        def add_button(self, label, response):
-            asked["buttons"].append(label)
-
-        def run(self):
-            return MODULE.Gtk.ResponseType.OK
-
-        def destroy(self):
-            pass
-
     real = MODULE.Gtk.MessageDialog
-    MODULE.Gtk.MessageDialog = FakeDialog
+    MODULE.Gtk.MessageDialog = fake_message_dialog(
+        asked, MODULE.Gtk.ResponseType.OK)
     try:
         find_at(tray.menu, "Re-authorise OneDrive…").activate()
         asked["reconnect"] = wait_for(
@@ -756,25 +762,8 @@ def scenario_about():
     tray = build()
     seen = {}
 
-    class FakeDialog:
-        def __init__(self, *a, **k):
-            seen["text"] = k.get("text", "")
-            seen["buttons"] = []
-
-        def format_secondary_text(self, text):
-            seen["body"] = text
-
-        def add_button(self, label, response):
-            seen["buttons"].append(label)
-
-        def run(self):
-            return 0
-
-        def destroy(self):
-            pass
-
     real = MODULE.Gtk.MessageDialog
-    MODULE.Gtk.MessageDialog = FakeDialog
+    MODULE.Gtk.MessageDialog = fake_message_dialog(seen, 0)
     try:
         find_at(tray.menu, "About").activate()
     finally:
@@ -1087,28 +1076,12 @@ PYEOF
 # ------------------------------------------------------------- running it
 LAST_JSON="$WORK/last.json"
 DRIVER_ERR="$WORK/driver.err"
-DRIVER_ALLERR="$WORK/driver-all.err"
 
-# driver SCENARIO [VAR=VALUE...]
-#
-# The tray's own chatter (GTK warnings from a display with no StatusNotifier
-# host, for one) is noise the assertions do not want. run_driver folds it into
-# DRIVER_ERR; driver_both leaves stderr alone, because the second instance of
-# the tray writes its refusal there and the harness's run() only reads stdout.
-driver_quiet() {
-    local name="$1"; shift
-    env -i PATH="$WORK/stubs:/usr/bin:/bin" HOME="$WORK" TMPDIR="$WORK/cache" \
-        XDG_RUNTIME_DIR="$WORK/run" \
-        XDG_CONFIG_HOME="$WORK/config" XDG_CACHE_HOME="$WORK/cache" \
-        XDG_DATA_HOME="$WORK/data" XDG_STATE_HOME="$WORK/state" \
-        GDK_BACKEND=broadway BROADWAY_DISPLAY=:9 DISPLAY=:77 \
-        LANG=C.UTF-8 LC_ALL=C.UTF-8 \
-        TRAY_RECORDS="$WORK/records" TRAY_CALLS="$WORK/calls" \
-        "$@" \
-        python3 "$DRIVER" "$name" "$TRAY" 2>"$DRIVER_ERR"
-}
-
-driver_both() {
+# driver_env SCENARIO [VAR=VALUE...] -- the driver, in the one environment every
+# scenario runs in: a private runtime directory, a PATH holding the stubs, the
+# private Broadway display, and a fixed UTF-8 locale so a desktop configured with
+# another one cannot change what is measured.
+driver_env() {
     local name="$1"; shift
     env -i PATH="$WORK/stubs:/usr/bin:/bin" HOME="$WORK" TMPDIR="$WORK/cache" \
         XDG_RUNTIME_DIR="$WORK/run" \
@@ -1120,6 +1093,13 @@ driver_both() {
         "$@" \
         python3 "$DRIVER" "$name" "$TRAY"
 }
+
+# The tray's own chatter (GTK warnings from a display with no StatusNotifier
+# host, for one) is noise the assertions do not want. driver_quiet folds it into
+# DRIVER_ERR; driver_both leaves stderr alone, because the second instance of the
+# tray writes its refusal there and the harness's run() only reads stdout.
+driver_quiet() { driver_env "$@" 2>"$DRIVER_ERR"; }
+driver_both()  { driver_env "$@"; }
 
 # run_driver SCENARIO [VAR=VALUE...] -- the whole output becomes LAST_JSON, and
 # a scenario that cannot even build the tray is a failure, not a crash.
@@ -1133,39 +1113,50 @@ run_driver() {
     fi
     if [ "$rc" -ne 0 ] || [ -z "$out" ]; then
         bad "the tray could not be driven for '$1' (exit $rc)"
-        cat "$DRIVER_ERR" >> "$DRIVER_ALLERR"
         grep -v -e WARNING -e '^$' "$DRIVER_ERR" | head -4 | sed 's/^/        /'
         return 1
     fi
     return 0
 }
 
-# json_py SNIPPET -- run a snippet over LAST_JSON, where `d` is the parsed
-# object. Anything the snippet prints becomes the failure detail.
-json_py() {
-    python3 - "$LAST_JSON" "$1" <<'PY'
+# json_run MODE SNIPPET -- run a snippet over LAST_JSON, where `d` is the parsed
+# object. MODE=exec treats the snippet as statements; MODE=eval treats it as one
+# expression and reports the expression and the data when it is false. Anything
+# the snippet prints becomes the failure detail.
+json_run() {
+    python3 - "$LAST_JSON" "$1" "$2" <<'PY'
 import json
 import sys
 
 with open(sys.argv[1], encoding="utf-8") as fh:
     d = json.load(fh)
-exec(sys.argv[2])
+snippet = sys.argv[3]
+if sys.argv[2] == "exec":
+    exec(snippet)
+elif not eval(snippet):            # noqa: S307 - the suite's own expression
+    print("expression false: %s" % snippet)
+    print("data: %s" % json.dumps(d, ensure_ascii=False)[:600])
+    raise SystemExit(1)
 PY
 }
 
-# json_expr EXPRESSION -- the same, for one-liners. Exits non-zero, with the
-# expression and the data on stdout, when the expression is false.
-json_expr() {
-    python3 - "$LAST_JSON" "$1" <<'PY'
-import json
+json_py()   { json_run exec "$1"; }
+json_expr() { json_run eval "$1"; }
+
+# set_config KEY VALUE -- set one key in the sandbox config, leaving every other
+# line where it is. The tray reads this file, so the scenarios that need a value
+# the suite did not write at startup patch it here rather than rewriting the file.
+set_config() {
+    python3 - "$WORK/config/rclone-onedrive-tray/config" "$1" "$2" <<'PY'
 import sys
 
-with open(sys.argv[1], encoding="utf-8") as fh:
-    d = json.load(fh)
-if not eval(sys.argv[2]):          # noqa: S307 - the suite's own expression
-    print("expression false: %s" % sys.argv[2])
-    print("data: %s" % json.dumps(d, ensure_ascii=False)[:600])
-    raise SystemExit(1)
+path, key, value = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(path, encoding="utf-8") as fh:
+    lines = fh.read().splitlines()
+out = ["%s=%s" % (key, value) if line.startswith(key + "=") else line
+       for line in lines]
+with open(path, "w", encoding="utf-8") as fh:
+    fh.write("\n".join(out) + "\n")
 PY
 }
 
@@ -1303,29 +1294,28 @@ if run_driver pause-durations; then
 fi
 
 title "A disabled timer is not a pause"
-printf 'Docs/\nMusic/\n' > "$WORK/calls/folders"
-printf 'x\n' > "$WORK/calls/timer-disabled"
-if run_driver timer-state TRAY_EXPECT_AUTO=off; then
-    check "systemctl answering disabled is not reported as a pause" json_py '
+# Both timer-state scenarios ask this of a different systemctl answer: does
+# anything on screen claim a pause that never happened?
+PAUSE_CLAIM='
 claims = [x for x in d["menu_labels"] + [d["status"], d["pause_label"]]
           if "paused" in x.lower() or "暂停" in x]
 if claims:
     print("a pause was claimed: %r" % claims)
     raise SystemExit(1)
 '
+printf 'Docs/\nMusic/\n' > "$WORK/calls/folders"
+printf 'x\n' > "$WORK/calls/timer-disabled"
+if run_driver timer-state TRAY_EXPECT_AUTO=off; then
+    check "systemctl answering disabled is not reported as a pause" \
+        json_py "$PAUSE_CLAIM"
     check "the state the tray reports is one it can name" json_expr "d['auto_seen'] in ('off', 'unknown')"
 fi
 
 rm -f "$WORK/calls/timer-disabled"
 printf 'x\n' > "$WORK/calls/notimer"
 if run_driver timer-state TRAY_EXPECT_AUTO=unknown; then
-    check "systemctl answering nothing is not reported as a pause" json_py '
-claims = [x for x in d["menu_labels"] + [d["status"], d["pause_label"]]
-          if "paused" in x.lower() or "暂停" in x]
-if claims:
-    print("a pause was claimed: %r" % claims)
-    raise SystemExit(1)
-'
+    check "systemctl answering nothing is not reported as a pause" \
+        json_py "$PAUSE_CLAIM"
     check "an unreadable state is named as unreadable" \
         json_expr "d['auto_seen'] == 'unknown'"
 fi
@@ -1347,37 +1337,17 @@ cat > "$WORK/stubs/probing-stub" <<STUB
 printf '%s\n' "\$@" > "$WORK/calls/openapp"
 STUB
 chmod +x "$WORK/stubs/probing-stub"
-python3 - "$WORK" <<'PY'
-import sys
-work = sys.argv[1]
-path = work + "/config/rclone-onedrive-tray/config"
-with open(path, encoding="utf-8") as fh:
-    text = fh.read()
-# The command holds a quoted argument, which is the case that used to be split
-# on whitespace and passed through with its quotes intact. Single quotes are
-# used so that no backslash survives into the config file.
-value = "%s/stubs/probing-stub 'probe arg' --flag" % work
-text = text.replace('OPEN_APP_CMD=""', 'OPEN_APP_CMD="%s"' % value)
-with open(path, "w", encoding="utf-8") as fh:
-    fh.write(text)
-PY
+# The command holds a quoted argument, which is the case that used to be split on
+# whitespace and passed through with its quotes intact. Single quotes are used so
+# that no backslash survives into the config file.
+set_config OPEN_APP_CMD "\"$WORK/stubs/probing-stub 'probe arg' --flag\""
 if run_driver openapp; then
     check "the quoted command runs as three arguments" \
         json_expr "d['openapp_ran'] and d['openapp_argv'] == ['probe arg', '--flag']"
     check "the quote characters reach nothing" \
         json_expr "not any('\"' in x for x in d['openapp_argv'])"
 fi
-python3 - "$WORK" <<'PY'
-import sys
-work = sys.argv[1]
-path = work + "/config/rclone-onedrive-tray/config"
-with open(path, encoding="utf-8") as fh:
-    text = fh.read()
-start = text.index('OPEN_APP_CMD=')
-end = text.index('\n', start)
-with open(path, "w", encoding="utf-8") as fh:
-    fh.write(text[:start] + 'OPEN_APP_CMD=""' + text[end:])
-PY
+set_config OPEN_APP_CMD '""'
 
 title "The single-instance lock"
 : > "$WORK/records"
@@ -1645,6 +1615,10 @@ import importlib.util
 import os
 import subprocess
 import sys
+
+# env -i above means no PYTHONDONTWRITEBYTECODE is inherited, and loading bin/
+# would otherwise leave a __pycache__ directory in the source tree.
+sys.dont_write_bytecode = True
 
 tray_path, work = sys.argv[1], sys.argv[2]
 os.makedirs(work, exist_ok=True)

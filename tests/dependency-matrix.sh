@@ -17,6 +17,9 @@ set -uo pipefail
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SHIM="$SRC_DIR/tests/lib/pyshim"
 LOADER="$SRC_DIR/tests/lib/load_module.py"
+# The shim is imported from PYTHONPATH, and Python would cache it as a
+# __pycache__ directory inside the source tree. Nothing here wants that cache.
+export PYTHONDONTWRITEBYTECODE=1
 # shellcheck source=tests/lib/harness.sh
 . "$SRC_DIR/tests/lib/harness.sh" "$@"
 
@@ -171,16 +174,11 @@ run "dialogs: no locale-dependent stock buttons" 0 "" tray_strings buttons
 # Treating "anything but enabled" as paused made a missing timer unit announce
 # "Automatic sync paused (click to resume)" when nothing had been paused.
 tray_unit_states() {
-    python3 - "$SRC_DIR/bin/onedrive-tray" <<'PY'
-import importlib.machinery
-import importlib.util
+    env PYTHONPATH="$SRC_DIR/tests/lib" python3 - "$SRC_DIR/bin/onedrive-tray" <<'PY'
 import sys
+from load_module import load, report      # noqa: E402
 
-sys.dont_write_bytecode = True
-loader = importlib.machinery.SourceFileLoader("candidate", sys.argv[1])
-spec = importlib.util.spec_from_loader("candidate", loader)
-module = importlib.util.module_from_spec(spec)
-loader.exec_module(module)
+module = load(sys.argv[1])
 
 
 class Fake:
@@ -217,9 +215,7 @@ for name, active, enabled, want in cases:
     got = module.Tray.unit_states(Fake())
     if got != want:
         bad.append(f"{name}: unit_states() -> {got!r}, wanted {want!r}")
-for b in bad:
-    print(b)
-sys.exit(1 if bad else 0)
+report(bad)
 PY
 }
 
@@ -229,16 +225,11 @@ run "unit states: disabled and unknown are not 'paused'" 0 "" tray_unit_states
 # a shell would. str.split() kept the quote characters and spawn() failed
 # silently; a command that cannot be launched must be reported instead.
 tray_open_app() {
-    python3 - "$SRC_DIR/bin/onedrive-tray" <<'PY'
-import importlib.machinery
-import importlib.util
+    env PYTHONPATH="$SRC_DIR/tests/lib" python3 - "$SRC_DIR/bin/onedrive-tray" <<'PY'
 import sys
+from load_module import load, report      # noqa: E402
 
-sys.dont_write_bytecode = True
-loader = importlib.machinery.SourceFileLoader("candidate", sys.argv[1])
-spec = importlib.util.spec_from_loader("candidate", loader)
-module = importlib.util.module_from_spec(spec)
-loader.exec_module(module)
+module = load(sys.argv[1])
 
 
 class Fake:
@@ -274,9 +265,7 @@ unclosed = Fake('"unclosed')
 module.Tray.open_app(unclosed)
 if not unclosed.notes:
     bad.append("an unsplittable command was not reported")
-for b in bad:
-    print(b)
-sys.exit(1 if bad else 0)
+report(bad)
 PY
 }
 

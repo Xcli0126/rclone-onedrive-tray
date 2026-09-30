@@ -256,14 +256,6 @@ slug="$(printf '%s' "$CAP/local" | sed -e 's|^/||' -e 's|[/: ]|_|g')"
       printf -- '-        1 - - 2026-01-01T00:00:00.000000000+0000 "f%s.txt"\n' "$i"
   done
 } > "$CAP/cache/rclone/bisync/x..$slug.path1.lst"
-cat > "$CAP/cfg/rclone-onedrive-tray/config" <<EOF
-REMOTE="capfake:Vault"
-LOCAL="$CAP/local"
-LOG="$CAP/sync.log"
-RCLONE="rclone"
-MAX_DELETE="100"
-RETRIES="1"
-EOF
 cat > "$CAP/rclone" <<'STUB'
 #!/bin/bash
 printf '%s\n' "$*" >> "$CAP_ARGS"
@@ -272,9 +264,30 @@ exit "${CAP_RC:-0}"
 STUB
 chmod +x "$CAP/rclone"
 
+# cap_config [extra config lines] -- rewrite the CAP fixture's config.
+cap_config() {
+    cat > "$CAP/cfg/rclone-onedrive-tray/config" <<EOF
+REMOTE="capfake:Vault"
+LOCAL="$CAP/local"
+LOG="$CAP/sync.log"
+RCLONE="rclone"
+MAX_DELETE="100"
+RETRIES="1"
+${1:-}
+EOF
+}
+
+# cap_env [VAR=VALUE...] -- run something against the CAP fixture. The stub
+# rclone reads CAP_ARGS for where to record its argv, and CAP_STDERR and CAP_RC
+# for the failure it should report, so a case is set up by adding to this.
+cap_env() {
+    env PATH="$CAP:$PATH" XDG_CONFIG_HOME="$CAP/cfg" XDG_CACHE_HOME="$CAP/cache" \
+        CAP_ARGS="$WORK/cap-args" "$@"
+}
+
+cap_config
 : > "$WORK/cap-args"
-env PATH="$CAP:$PATH" XDG_CONFIG_HOME="$CAP/cfg" XDG_CACHE_HOME="$CAP/cache" \
-    CAP_ARGS="$WORK/cap-args" "$HOME/.local/bin/onedrive-sync" >/dev/null 2>&1 || true
+cap_env "$HOME/.local/bin/onedrive-sync" >/dev/null 2>&1 || true
 if grep -q -- '--max-delete 50' "$WORK/cap-args"; then
     ok "a count of 100 over 200 files becomes --max-delete 50"
 else
@@ -284,11 +297,9 @@ fi
 # The cap aborting has to be reported as such, with a way forward.
 CAP_STDERR='2026/01/01 00:00:00 ERROR : Safety abort: too many deletes (>50%, 150 of 200) on Path1'
 run "an abort is reported as a delete-cap problem" 1 "[maxdelete]" \
-    env PATH="$CAP:$PATH" XDG_CONFIG_HOME="$CAP/cfg" XDG_CACHE_HOME="$CAP/cache" \
-        CAP_ARGS="$WORK/cap-args" CAP_STDERR="$CAP_STDERR" CAP_RC=1 "$HOME/.local/bin/onedrive-sync"
+    cap_env CAP_STDERR="$CAP_STDERR" CAP_RC=1 "$HOME/.local/bin/onedrive-sync"
 run "and it says how to proceed" 1 "--force" \
-    env PATH="$CAP:$PATH" XDG_CONFIG_HOME="$CAP/cfg" XDG_CACHE_HOME="$CAP/cache" \
-        CAP_ARGS="$WORK/cap-args" CAP_STDERR="$CAP_STDERR" CAP_RC=1 "$HOME/.local/bin/onedrive-sync"
+    cap_env CAP_STDERR="$CAP_STDERR" CAP_RC=1 "$HOME/.local/bin/onedrive-sync"
 
 # The configured count is translated into rclone's percentage, and the edges of
 # that translation matter: 0 must refuse every deletion, an unusable value must
@@ -297,8 +308,7 @@ run "and it says how to proceed" 1 "--force" \
 cap_case() {  # cap_case <value> -> prints the --max-delete the stub recorded
     sed -i "s|^MAX_DELETE=.*|MAX_DELETE=\"$1\"|" "$CAP/cfg/rclone-onedrive-tray/config"
     : > "$WORK/cap-args"
-    env PATH="$CAP:$PATH" XDG_CONFIG_HOME="$CAP/cfg" XDG_CACHE_HOME="$CAP/cache" \
-        CAP_ARGS="$WORK/cap-args" "$HOME/.local/bin/onedrive-sync" >/dev/null 2>&1 || true
+    cap_env "$HOME/.local/bin/onedrive-sync" >/dev/null 2>&1 || true
     grep -oE -- '--max-delete [0-9]+' "$WORK/cap-args" | awk '{print $2}'
 }
 check "MAX_DELETE=0 refuses every deletion" test "$(cap_case 0)" = 0
@@ -320,18 +330,9 @@ sed -i "s|^MAX_DELETE=.*|MAX_DELETE=\"100\"|" "$CAP/cfg/rclone-onedrive-tray/con
 # Two ways the denominator can be wrong, both found by an adversarial pass.
 # A --force inherited from BISYNC_ARGS bypasses rclone's cap, and it used to
 # pass silently while every other guard looked intact.
-cat > "$CAP/cfg/rclone-onedrive-tray/config" <<EOF
-REMOTE="capfake:Vault"
-LOCAL="$CAP/local"
-LOG="$CAP/sync.log"
-RCLONE="rclone"
-MAX_DELETE="100"
-BISYNC_ARGS="--resilient --force"
-RETRIES="1"
-EOF
+cap_config 'BISYNC_ARGS="--resilient --force"'
 : > "$CAP/sync.log"; : > "$WORK/cap-args"
-env PATH="$CAP:$PATH" XDG_CONFIG_HOME="$CAP/cfg" XDG_CACHE_HOME="$CAP/cache" \
-    CAP_ARGS="$WORK/cap-args" "$HOME/.local/bin/onedrive-sync" >/dev/null 2>&1 || true
+cap_env "$HOME/.local/bin/onedrive-sync" >/dev/null 2>&1 || true
 check "an inherited --force is called out in the log" \
     grep -q -- "--force is set in BISYNC_ARGS" "$CAP/sync.log"
 
@@ -341,17 +342,9 @@ check "an inherited --force is called out in the log" \
 { printf '# bisync listing v1\n'
   for i in $(seq 1 3000); do printf -- '-        1 - - 2026-01-01T00:00:00.000000000+0000 "a%s"\n' "$i"; done
 } > "$CAP/cache/rclone/bisync/otherpair..$slug.path1.lst"
-cat > "$CAP/cfg/rclone-onedrive-tray/config" <<EOF
-REMOTE="capfake:Vault"
-LOCAL="$CAP/local"
-LOG="$CAP/sync.log"
-RCLONE="rclone"
-MAX_DELETE="100"
-RETRIES="1"
-EOF
+cap_config
 : > "$CAP/sync.log"; : > "$WORK/cap-args"
-env PATH="$CAP:$PATH" XDG_CONFIG_HOME="$CAP/cfg" XDG_CACHE_HOME="$CAP/cache" \
-    CAP_ARGS="$WORK/cap-args" "$HOME/.local/bin/onedrive-sync" >/dev/null 2>&1 || true
+cap_env "$HOME/.local/bin/onedrive-sync" >/dev/null 2>&1 || true
 check "two pairs on one local path are refused rather than guessed" \
     grep -q "pairs share" "$CAP/sync.log"
 check "and the conservative cap is used" grep -q -- "--max-delete 5" "$WORK/cap-args"
@@ -363,8 +356,7 @@ rm -f "$CAP/cache/rclone/bisync/otherpair..$slug.path1.lst"
 : > "$CAP/sync.log"
 CAP_STDERR='2026/01/01 00:00:00 ERROR : Bisync critical error: something else'
 run "an unrelated failure is not blamed on the delete cap" 1 "[resync]" \
-    env PATH="$CAP:$PATH" XDG_CONFIG_HOME="$CAP/cfg" XDG_CACHE_HOME="$CAP/cache" \
-        CAP_ARGS="$WORK/cap-args" CAP_STDERR="$CAP_STDERR" CAP_RC=1 "$HOME/.local/bin/onedrive-sync"
+    cap_env CAP_STDERR="$CAP_STDERR" CAP_RC=1 "$HOME/.local/bin/onedrive-sync"
 if grep -q 'maxdelete' "$CAP/sync.log"; then
     bad "the delete-cap tag reached the log for an unrelated failure"
 else
@@ -378,24 +370,12 @@ fi
 # into the log instead of onto the command line. The CAP stub already records the
 # argv verbatim, so one config rewrite per case is all this needs.
 title "the bandwidth limit"
-probe_config() {  # probe_config [extra config text]
-    cat > "$CAP/cfg/rclone-onedrive-tray/config" <<EOF
-REMOTE="capfake:Vault"
-LOCAL="$CAP/local"
-LOG="$CAP/sync.log"
-RCLONE="rclone"
-MAX_DELETE="100"
-RETRIES="1"
-${1:-}
-EOF
-}
 probe_run() {  # probe_run -> the argv the stub recorded
     : > "$WORK/cap-args"; : > "$CAP/sync.log"
-    env PATH="$CAP:$PATH" XDG_CONFIG_HOME="$CAP/cfg" XDG_CACHE_HOME="$CAP/cache" \
-        CAP_ARGS="$WORK/cap-args" "$HOME/.local/bin/onedrive-sync" >/dev/null 2>&1 || true
+    cap_env "$HOME/.local/bin/onedrive-sync" >/dev/null 2>&1 || true
     cat "$WORK/cap-args" 2>/dev/null
 }
-probe_case() { probe_config "${1:-}"; probe_run; }
+probe_case() { cap_config "${1:-}"; probe_run; }
 
 for value in 1M 5M 10M 500k 1.5M; do
     args="$(probe_case "BW_LIMIT=\"$value\"")"
@@ -503,18 +483,16 @@ chmod 500 "$RO"
 if [ -w "$RO" ]; then
     skip "a 0500 directory is still writable here, so the log check was not exercised"
 else
-    probe_config "LOG=\"$RO/sync.log\""
+    cap_config "LOG=\"$RO/sync.log\""
     : > "$WORK/cap-args"
     run "a run whose log cannot be opened fails, naming the path" 1 "$RO/sync.log" \
-        env PATH="$CAP:$PATH" XDG_CONFIG_HOME="$CAP/cfg" XDG_CACHE_HOME="$CAP/cache" \
-            CAP_ARGS="$WORK/cap-args" "$HOME/.local/bin/onedrive-sync"
+        cap_env "$HOME/.local/bin/onedrive-sync"
     check "and it stopped before touching the remote" test ! -s "$WORK/cap-args"
 
     # The same defect one level up: the directory cannot be created at all.
-    probe_config "LOG=\"$RO/nested/sync.log\""
+    cap_config "LOG=\"$RO/nested/sync.log\""
     : > "$WORK/cap-args"
-    out="$(env PATH="$CAP:$PATH" XDG_CONFIG_HOME="$CAP/cfg" XDG_CACHE_HOME="$CAP/cache" \
-        CAP_ARGS="$WORK/cap-args" "$HOME/.local/bin/onedrive-sync" 2>&1)"
+    out="$(cap_env "$HOME/.local/bin/onedrive-sync" 2>&1)"
     rc=$?
     if [ "$rc" -ne 0 ] && grep -qF "$RO/nested/sync.log" <<<"$out"; then
         ok "a log directory that cannot be created is reported too"
@@ -527,7 +505,7 @@ fi
 chmod 700 "$RO"
 
 # The sections below read the CAP log, so the config goes back to the plain one.
-probe_config
+cap_config
 
 # ---------------------------------------------------------------- the access check
 # rclone's --check-access aborts a run when a marker file is missing on one side,
@@ -555,8 +533,8 @@ exit 0
 STUB
 chmod +x "$ACC/rclone"
 
-# CHECK_ACCESS is rewritten per case; the rest of the file stays put.
-access_case() {  # access_case <CHECK_ACCESS> <CHECK_FILENAME> -> the bits of argv asked about
+# The two keys are rewritten per case; the rest of the file stays put.
+acc_config() {  # acc_config <CHECK_ACCESS> <CHECK_FILENAME>
     cat > "$ACC/cfg/rclone-onedrive-tray/config" <<EOF
 REMOTE="accessfake:Vault"
 LOCAL="$ACC/local"
@@ -567,9 +545,18 @@ RETRIES="1"
 CHECK_ACCESS="$1"
 CHECK_FILENAME="$2"
 EOF
-    : > "$WORK/access-args"
+}
+
+# acc_env [VAR=VALUE...] -- run something against the ACC fixture.
+acc_env() {
     env PATH="$ACC:$PATH" XDG_CONFIG_HOME="$ACC/cfg" XDG_CACHE_HOME="$ACC/cache" \
-        ACC_ARGS="$WORK/access-args" "$HOME/.local/bin/onedrive-sync" >/dev/null 2>&1 || true
+        ACC_ARGS="$WORK/access-args" "$@"
+}
+
+access_case() {  # access_case <CHECK_ACCESS> <CHECK_FILENAME> -> the bits of argv asked about
+    acc_config "$1" "$2"
+    : > "$WORK/access-args"
+    acc_env "$HOME/.local/bin/onedrive-sync" >/dev/null 2>&1 || true
     cat "$WORK/access-args" 2>/dev/null
 }
 
@@ -627,22 +614,11 @@ fi
 # the tree it protects is broken by the check's introduction unless the file is
 # there on both sides before the key is turned on.
 title "onedrive-check-access"
-cat > "$ACC/cfg/rclone-onedrive-tray/config" <<EOF
-REMOTE="accessfake:Vault"
-LOCAL="$ACC/local"
-LOG="$ACC/cache/sync.log"
-RCLONE="rclone"
-MAX_DELETE="0"
-RETRIES="1"
-CHECK_ACCESS="0"
-CHECK_FILENAME=""
-EOF
+acc_config 0 ""
 rm -f "$ACC/local/RCLONE_TEST" "$ACC/remote/RCLONE_TEST"
 : > "$WORK/access-args"
 run "the marker file is created on both sides" 0 "both present" \
-    env PATH="$ACC:$PATH" XDG_CONFIG_HOME="$ACC/cfg" XDG_CACHE_HOME="$ACC/cache" \
-        ACC_ARGS="$WORK/access-args" ACC_REMOTE="$ACC/remote" \
-        "$HOME/.local/bin/onedrive-check-access"
+    acc_env ACC_REMOTE="$ACC/remote" "$HOME/.local/bin/onedrive-check-access"
 check "the marker file reaches both sides" test "$(wc -l < "$WORK/access-args")" -eq 1
 check "it goes to one file at a time (copyto, not a tree copy)" \
     grep -q '^copyto ' "$WORK/access-args"
@@ -650,14 +626,10 @@ check "the local marker exists" test -f "$ACC/local/RCLONE_TEST"
 check "the remote marker exists" test -f "$ACC/remote/RCLONE_TEST"
 before="$(cat "$ACC/remote/RCLONE_TEST")"
 run "the script is safe to run twice" 0 "keeps" \
-    env PATH="$ACC:$PATH" XDG_CONFIG_HOME="$ACC/cfg" XDG_CACHE_HOME="$ACC/cache" \
-        ACC_ARGS="$WORK/access-args" ACC_REMOTE="$ACC/remote" \
-        "$HOME/.local/bin/onedrive-check-access"
+    acc_env ACC_REMOTE="$ACC/remote" "$HOME/.local/bin/onedrive-check-access"
 check "and the marker was left alone" test "$(cat "$ACC/remote/RCLONE_TEST")" = "$before"
 run "it says what it would do without touching anything" 0 "would write" \
-    env PATH="$ACC:$PATH" XDG_CONFIG_HOME="$ACC/cfg" XDG_CACHE_HOME="$ACC/cache" \
-        ACC_ARGS="$WORK/access-args" ACC_REMOTE="$ACC/remote" \
-        "$HOME/.local/bin/onedrive-check-access" --dry-run
+    acc_env ACC_REMOTE="$ACC/remote" "$HOME/.local/bin/onedrive-check-access" --dry-run
 
 # ---------------------------------------------------------------- hint tags
 # A failure that happens before Microsoft answers is a network problem, however
@@ -668,14 +640,11 @@ title "network failures and expired sign-ins"
 CAP_EOF='2026/01/01 00:00:00 CRITICAL: failed to get root: Get "https://graph.microsoft.com/v1.0/drives/X/root": couldn'"'"'t fetch token: Post "https://login.microsoftonline.com/common/oauth2/v2.0/token": EOF'
 CAP_AUTH='2026/01/01 00:00:00 CRITICAL: Failed to refresh token: oauth2: cannot fetch token: 400 Bad Request: {"error":"invalid_grant","error_description":"AADSTS70043: The refresh token has expired"}'
 run "a token fetch that never reached Microsoft is a network problem" 1 "[network]" \
-    env PATH="$CAP:$PATH" XDG_CONFIG_HOME="$CAP/cfg" XDG_CACHE_HOME="$CAP/cache" \
-        CAP_ARGS="$WORK/cap-args" CAP_STDERR="$CAP_EOF" CAP_RC=1 "$HOME/.local/bin/onedrive-sync"
+    cap_env CAP_STDERR="$CAP_EOF" CAP_RC=1 "$HOME/.local/bin/onedrive-sync"
 run "a refused token is an expired sign-in, and says what to click" 1 "[auth]" \
-    env PATH="$CAP:$PATH" XDG_CONFIG_HOME="$CAP/cfg" XDG_CACHE_HOME="$CAP/cache" \
-        CAP_ARGS="$WORK/cap-args" CAP_STDERR="$CAP_AUTH" CAP_RC=1 "$HOME/.local/bin/onedrive-sync"
+    cap_env CAP_STDERR="$CAP_AUTH" CAP_RC=1 "$HOME/.local/bin/onedrive-sync"
 run "and the message names the tray item and the command" 1 "config reconnect" \
-    env PATH="$CAP:$PATH" XDG_CONFIG_HOME="$CAP/cfg" XDG_CACHE_HOME="$CAP/cache" \
-        CAP_ARGS="$WORK/cap-args" CAP_STDERR="$CAP_AUTH" CAP_RC=1 "$HOME/.local/bin/onedrive-sync"
+    cap_env CAP_STDERR="$CAP_AUTH" CAP_RC=1 "$HOME/.local/bin/onedrive-sync"
 
 # ---------------------------------------------------------------- uninstall
 title "uninstall.sh"

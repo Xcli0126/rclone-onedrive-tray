@@ -361,7 +361,8 @@ if [ "${1:-}" = "--resync" ]; then
             printf '%s\n' "$check_report" >&2
         fi
     fi
-    ARGS+=(--resync)
+    # The flag is already in ARGS: the option loop added it. This used to add it
+    # again, which put "--resync --resync" on rclone's command line.
     log_line "NOTICE: --resync requested, rebuilding baseline"
 fi
 

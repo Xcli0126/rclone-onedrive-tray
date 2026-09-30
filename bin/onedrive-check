@@ -189,12 +189,14 @@ while IFS= read -r -d '' path; do
     fi
 
     if [ "$parent_over" -eq 0 ]; then
+        # Each length is used twice below; the +1 is the separator under LOCAL.
         cloud_len=$(( ${#REMOTE_PATH} + ${#rel} ))
+        local_len=$(( ${#LOCAL} + ${#rel} + 1 ))
         [ -n "$REMOTE_PATH" ] && cloud_len=$((cloud_len + 1))
         if [ "$cloud_len" -ge "$LIMIT_CLOUD" ]; then
             add long "$rel" "cloud path $cloud_len chars: $rel"
-        elif [ $(( ${#LOCAL} + ${#rel} + 1 )) -ge "$LIMIT_TOTAL" ]; then
-            add long "$rel" "local path $(( ${#LOCAL} + ${#rel} + 1 )) chars: $rel"
+        elif [ "$local_len" -ge "$LIMIT_TOTAL" ]; then
+            add long "$rel" "local path $local_len chars: $rel"
         fi
     fi
 
