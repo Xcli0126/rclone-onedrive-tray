@@ -161,6 +161,21 @@ rclone config create trial alias remote /tmp/trial/cloud
 `uninstall.sh` 不会动 `/etc` 里的 NetworkManager 钩子，除非那个文件属于正在卸载的这一套，所以临时
 安装不可能把真身的钩子拔掉。
 
+### 更新已有安装
+
+```bash
+cd rclone-onedrive-tray
+git pull
+./install.sh            # 加 --no-start 就不动正在跑的托盘
+```
+
+然后重启托盘进程：菜单和翻译都在那个进程里；同步包装器和监听器由 systemd 每次重新拉起，
+所以它们下一轮自动用上新代码，不需要重启任何东西。你现有的配置和过滤规则会被保留，正在跑的
+同步也不会被打断。
+
+其余细节见 [docs/UPDATING.md](docs/UPDATING.md)：怎么确认现在跑的到底是哪个版本、哪些设置改完
+之后必须跑一次 `--resync`、怎么回退到某个 tag，以及更新前值得先读一眼的那些改动。
+
 ---
 
 ## 配置

@@ -203,6 +203,23 @@ them, and enables nothing.
 to the install being removed, so a trial cannot pull the hook out from under the
 install you already have.
 
+### Updating an existing install
+
+```bash
+cd rclone-onedrive-tray
+git pull
+./install.sh            # --no-start leaves the tray alone
+```
+
+Then restart the tray: the menu and the translations live in that process, while
+the sync wrapper and the watcher are started fresh by systemd, so they pick the
+new code up on the next run without anything being restarted. Your config and
+filters are kept, and a sync that is already running is not interrupted.
+
+[docs/UPDATING.md](docs/UPDATING.md) covers the rest: how to tell which version
+is actually running, which settings force a `--resync` afterwards, how to roll
+back to a tag, and which changes are worth reading about before you update.
+
 ---
 
 ## Configuration

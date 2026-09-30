@@ -1,0 +1,90 @@
+# Updating
+
+Three commands, and the configuration is kept:
+
+```bash
+cd rclone-onedrive-tray
+git pull
+./install.sh            # add --no-start to leave the tray alone
+```
+
+Then restart the tray so the new menu and translations are loaded. Everything
+else picks the new code up on its own: `onedrive-sync` and `onedrive-watch` are
+run fresh by systemd on every tick and every local edit, so the next run uses the
+new version without anything being restarted.
+
+```bash
+kill "$(pgrep -f 'python3 .*/onedrive-tray')" ; onedrive-tray &
+```
+
+`install.sh` keeps an existing `config` and `filters.txt` and tells you so. It
+does rewrite the systemd units from the current templates and the autostart
+entry, and it does not interrupt a sync that is already running.
+
+## Did the update take effect?
+
+Two checks, both cheap.
+
+```bash
+# the installed scripts against the checkout
+for s in onedrive-sync onedrive-tray onedrive-watch onedrive-check onedrive-check-access; do
+    cmp -s "$HOME/.local/bin/$s" "bin/$s" && echo "$s same" || echo "$s DIFFERS"
+done
+
+# the running tray against the file it was started from
+ps -o lstart= -p "$(pgrep -f 'python3 .*/onedrive-tray')"
+stat -c '%y' "$HOME/.local/bin/onedrive-tray"
+```
+
+If the process started before the file was last written, that process is running
+the older code.
+
+## When a resync is needed after updating
+
+Changing any of these invalidates the baseline, so one `onedrive-sync --resync`
+is needed afterwards:
+
+- `REMOTE` or `LOCAL`
+- `FILTERS_FILE`, or the contents of `filters.txt`
+- `BISYNC_ARGS`
+
+Changing these does not: `MAX_DELETE`, `CHECK_ACCESS`, `CHECK_FILENAME`,
+`INTERVAL_MIN`, `WATCH`, `LOG`, and the folder list in `exclude-folders.txt`.
+Measured on rclone 1.75.1: toggling a folder in that list touches neither side
+and needs no resync.
+
+Turning `CHECK_ACCESS` on is the one update that deliberately fails until it is
+finished: bisync looks for the marker file on both sides and aborts while one is
+missing. Create them first, then enable it:
+
+```bash
+onedrive-check-access          # safe to run twice
+# then set CHECK_ACCESS="1" in the config
+```
+
+## Rolling back
+
+The tag tells you which version you are on, and the config, the filters and the
+bisync listings all survive a downgrade:
+
+```bash
+git checkout v1.1.0
+./install.sh
+```
+
+If the older version refuses to start because of the listings the newer one
+wrote, one `onedrive-sync --resync` rebuilds them. Nothing is deleted by a
+resync; it rebuilds the comparison state by reading both sides.
+
+## What changed in each version
+
+`CHANGELOG.md` is the list. Three entries are worth reading before updating an
+install that has been running for a while:
+
+- 1.1.0 made `MAX_DELETE` cap what it always claimed to. Before it, the value was
+  passed to rclone as a percentage, so 100 meant "no limit". If you rely on large
+  deletions going through unattended, raise the value or run with `--force` once.
+- The same version stopped reporting a network failure as an expired sign-in, and
+  added the tray's "Re-authorise OneDrive" item for the cases that really are an
+  expiry.
+- `CHECK_ACCESS` is off by default and stays off unless you ask for it.
