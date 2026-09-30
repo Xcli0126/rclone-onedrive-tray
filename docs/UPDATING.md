@@ -8,10 +8,11 @@ git pull
 ./install.sh            # add --no-start to leave the tray alone
 ```
 
-Then restart the tray so the new menu and translations are loaded. Everything
-else picks the new code up on its own: `onedrive-sync` and `onedrive-watch` are
-run fresh by systemd on every tick and every local edit, so the next run uses the
-new version without anything being restarted.
+Then restart the tray so the new menu and translations are loaded. The panel
+icons are drawn at that start as well, so a redrawn set appears with the same
+restart. Everything else picks the new code up on its own: `onedrive-sync` and
+`onedrive-watch` are run fresh by systemd on every tick and every local edit, so
+the next run uses the new version without anything being restarted.
 
 ```bash
 kill "$(pgrep -f 'python3 .*/onedrive-tray')" ; onedrive-tray &
@@ -49,7 +50,8 @@ is needed afterwards:
 - `BISYNC_ARGS`
 
 Changing these does not: `MAX_DELETE`, `CHECK_ACCESS`, `CHECK_FILENAME`,
-`INTERVAL_MIN`, `WATCH`, `LOG`, and the folder list in `exclude-folders.txt`.
+`INTERVAL_MIN`, `WATCH`, `LOG`, `BW_LIMIT`, `UI_LANG`, `SHOW_ICON`,
+`NOTIFY_ON_SUCCESS`, and the folder list in `exclude-folders.txt`.
 Measured on rclone 1.75.1: toggling a folder in that list touches neither side
 and needs no resync.
 
@@ -78,9 +80,13 @@ resync; it rebuilds the comparison state by reading both sides.
 
 ## What changed in each version
 
-`CHANGELOG.md` is the list. Three entries are worth reading before updating an
+`CHANGELOG.md` is the list. Four entries are worth reading before updating an
 install that has been running for a while:
 
+- 1.2.0 added the tray's settings window. It edits the config file in place: the
+  lines it does not change, including your own comments, are left alone, and a
+  key it needs but cannot find is appended at the end with a note saying where it
+  came from. Nothing is rewritten from a template.
 - 1.1.0 made `MAX_DELETE` cap what it always claimed to. Before it, the value was
   passed to rclone as a percentage, so 100 meant "no limit". If you rely on large
   deletions going through unattended, raise the value or run with `--force` once.

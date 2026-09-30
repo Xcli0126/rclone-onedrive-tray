@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- A settings window in the tray, reached from `Settings…`. It writes the config file the wrapper
+  reads, replacing only the lines whose values changed and appending a key it cannot find, so your
+  own comments survive. Language and the panel icon apply to the running tray at once; the interval
+  is stored as a systemd drop-in (`<unit>.timer.d/interval.conf`) so a later `./install.sh` cannot
+  undo it; the watcher is switched on and off with `systemctl --user enable --now`. Anything that
+  fails is named in the window, which stays open so the change can be corrected.
+- Language selection in that window (`UI_LANG`): follow the system locale, English or Chinese. The
+  menu is rebuilt in place, with no restart.
+- `SHOW_ICON`, plus `--show-icon` and `--hide-icon`, for hiding the panel icon while the tray keeps
+  running and syncing. `--settings` opens the window on its own, starting the tray when none is
+  running. `--version` and `--help` answer without a display.
+- An `About` item, and a header line carrying the version at the top of the menu.
+- `BW_LIMIT`, a bandwidth cap for a run in rclone size syntax (`1M`, `500k`, `1.5M`). The settings
+  window offers Unlimited, 1M, 5M, 10M and 20M. A value rclone could not parse is refused with a
+  warning in the sync log, instead of turning every scheduled run into a failure.
+- `NOTIFY_ON_SUCCESS`: switch the success notification off and keep the failure ones.
+- Redrawn status icons. The cloud is one outlined path, the syncing badge is a pair of arrows,
+  `unknown` has a question mark of its own, and a run that reports a percentage draws the syncing
+  badge as a progress arc. `assets/icons/` holds the current set.
+
+### Fixed
+
+- A missing icon directory is created. `ensure_icons()` used to write nothing, in silence, when the
+  directory was not there.
+- `BISYNC_ARGS=""` now means no extra flags. It used to be indistinguishable from a config that
+  never had the key, so emptying it restored the built-in defaults. An absent key still gets those
+  defaults, and the log says which of the two happened.
+- Lines in `exclude-folders.txt` are trimmed, so a line holding only spaces is ignored rather than
+  becoming `--exclude "/   /**"`. A name containing `/` or `..` is refused with a warning.
+- An unwritable log is reported before the run starts, with the path and the reason. The failure
+  used to be silent: the directory creation hid its own error and the run could report success
+  having recorded nothing.
+
 ## [1.1.0] - 2026-09-30
 
 ### Added

@@ -236,7 +236,13 @@ BISYNC_ARGS="--resilient --recover --max-lock 2m --conflict-resolve none --confl
 FILTERS_FILE="$HOME/.config/rclone-onedrive-tray/filters.txt"
 OPEN_APP_CMD=""               # optional: an app the tray can launch, e.g. "obsidian"
 UI_LANG=""                    # tray language: en / zh (empty = follow $LANG)
+SHOW_ICON="1"                 # 0 hides the panel icon; the tray keeps syncing
+BW_LIMIT=""                   # rclone size cap for a run, e.g. "1M"; empty = no limit
+NOTIFY_ON_SUCCESS="1"         # 0 notifies on failures only
 ```
+
+Most of these are edited through the tray's own settings window, which writes the
+same file: see [Settings](#settings).
 
 `~/.config/rclone-onedrive-tray/exclude-folders.txt` lists top-level folders to leave off this
 machine, one name per line. The tray's "Folders to sync" menu edits it, and `setup.sh` writes it
@@ -266,6 +272,7 @@ per-machine UI state, are the usual things worth excluding. A starting point shi
 Mostly you don't. Click the tray icon when you want to:
 
 ```
+OneDrive 1.2.0
 Last sync 14:32
 426.0 GiB of 1.0 TiB used (40%)
 ────────────────────────────────
@@ -286,9 +293,16 @@ Pause automatic sync ▸   30 minutes
 ☑ Start tray at login
 ────────────────────────────────
 Check file names
+Re-authorise OneDrive…
 Rebuild sync baseline (resync)…
+────────────────────────────────
+Settings…
+About
 Quit
 ```
+
+The first two lines are the version and the time of the last run, and they do nothing when
+clicked. The quota line appears once `rclone about` has answered.
 
 A ticked folder is kept on this machine. Unticking one stops syncing it and leaves both sides
 alone, so nothing is lost; because a folder that is present locally but no longer synced is a
@@ -300,6 +314,28 @@ A timed pause stops both the timer and the watcher, then hands the restart to a 
 systemd timer, so the pause ends on its own whether or not the tray is still running. The menu
 label shows when it comes back.
 
+### Settings
+
+`Settings…` writes to the same config file `onedrive-sync` reads, so what you change in the
+window is what the next run uses. Two of the settings also apply to the running tray on the
+spot, without a restart: the language and whether the icon sits in the panel.
+
+| In the window | Key | What it does |
+| --- | --- | --- |
+| Language | `UI_LANG` | Follow the system locale, English or 中文. Applies at once |
+| Icon in the panel | `SHOW_ICON` | `0` hides it; the tray still runs and syncs, and `onedrive-tray --show-icon` brings it back |
+| Start at login | | Writes or removes the autostart file under `~/.config/autostart` |
+| Sync every … minutes | `INTERVAL_MIN` | Written as a drop-in at `<unit>.timer.d/interval.conf`, so a later `./install.sh` will not undo it |
+| Realtime sync | `WATCH` | Turns the watcher unit on or off |
+| Notify on success | `NOTIFY_ON_SUCCESS` | `0` keeps failures notifying and drops the rest |
+| Abort above … deletions | `MAX_DELETE` | The ceiling `onedrive-sync` applies before it stops a run |
+| Bandwidth limit | `BW_LIMIT` | Unlimited, 1M, 5M, 10M or 20M. A value rclone could not parse is refused with a warning in the sync log instead of failing every run |
+| Access check | `CHECK_ACCESS` | The button beside it creates the marker files on both sides |
+
+When something fails, the window stays open and says which part failed: a systemd call, the
+autostart file, or the marker files. The path of the config it writes is printed along the
+bottom.
+
 From a terminal:
 
 ```bash
@@ -310,6 +346,8 @@ systemctl --user list-timers onedrive-sync.timer
 systemctl --user start onedrive-sync.service     # sync now
 journalctl --user -u onedrive-sync.service -f
 tail -f ~/.cache/rclone-onedrive-tray/sync.log
+onedrive-tray --settings      # the settings window, tray or no tray
+onedrive-tray --hide-icon     # and --show-icon to bring it back
 ```
 
 ### Names OneDrive will not take

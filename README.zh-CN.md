@@ -192,7 +192,12 @@ BISYNC_ARGS="--resilient --recover --max-lock 2m --conflict-resolve none --confl
 FILTERS_FILE="$HOME/.config/rclone-onedrive-tray/filters.txt"
 OPEN_APP_CMD=""               # 可选：托盘菜单里能启动的应用，例如 "obsidian"
 UI_LANG=""                    # 界面语言：en / zh，留空则跟随 $LANG
+SHOW_ICON="1"                 # 0 表示不显示托盘图标，同步照常进行
+BW_LIMIT=""                   # 单次同步的带宽上限，例如 "1M"；留空表示不限速
+NOTIFY_ON_SUCCESS="1"         # 0 表示只在失败时通知
 ```
+
+其中大部分可以在托盘自己的设置窗口里改，改的是同一个文件：见[设置](#设置)。
 
 `~/.config/rclone-onedrive-tray/exclude-folders.txt` 列出不保留在本机的顶层文件夹，一行一个名字。
 托盘的「同步的文件夹」菜单会编辑它，`setup.sh` 也能用 `--skip-folders "归档,临时"` 写入。文件为空
@@ -220,6 +225,7 @@ UI_LANG=""                    # 界面语言：en / zh，留空则跟随 $LANG
 大多数时候你不需要管它。需要时点托盘图标：
 
 ```
+OneDrive 1.2.0
 上次同步 14:32
 已用 426.0 GiB / 1.0 TiB（40%）
 ────────────────────────────────
@@ -240,13 +246,39 @@ Pause automatic sync ▸   30 minutes
 ☑ Start tray at login
 ────────────────────────────────
 Check file names
+Re-authorise OneDrive…
 Rebuild sync baseline (resync)…
+────────────────────────────────
+Settings…
+About
 Quit
 ```
+
+最上面两行是版本号和上次同步时间，点了不会有反应。用量那一行要等 `rclone about` 返回之后才出现。
 
 勾上的文件夹会保留在本机。取消勾选会停止同步它，并且**两边都不动**，所以不会丢东西。但一个「本地还在、却不再同步」的文件夹是个陷阱：在里面改的东西哪儿也去不了，所以托盘接下来会问你是否删除本地副本。重新勾选会把文件下回来。点开头的隐藏目录排在分隔线下面，因为 `.rag` 之类的同样值得排除。
 
 定时暂停会同时停掉定时器和监听器，然后把恢复交给一个 systemd 瞬时定时器，所以**不管托盘还在不在，暂停都会自己结束**。菜单标签会显示恢复时刻。
+
+### 设置
+
+`Settings…` 写的就是 `onedrive-sync` 读的那个配置文件，所以在窗口里改完，下一次同步就用新值。
+其中两项对正在运行的托盘立即生效，不用重启：界面语言，以及要不要在面板上显示图标。
+
+| 窗口里的项 | 配置键 | 作用 |
+| --- | --- | --- |
+| 语言 | `UI_LANG` | 跟随系统语言、English 或中文，立即生效 |
+| 面板图标 | `SHOW_ICON` | `0` 表示不显示；托盘照旧运行和同步，`onedrive-tray --show-icon` 可以调回来 |
+| 开机自启 | | 增删 `~/.config/autostart` 下的自启文件 |
+| 每 … 分钟同步 | `INTERVAL_MIN` | 写成 `<unit>.timer.d/interval.conf`，之后重跑 `./install.sh` 不会把它改回去 |
+| 实时同步 | `WATCH` | 打开或关掉监听器单元 |
+| 成功时通知 | `NOTIFY_ON_SUCCESS` | `0` 时失败仍会通知，只是不再报成功 |
+| 删除超过 … 个就中止 | `MAX_DELETE` | 就是 `onedrive-sync` 中止一轮同步的上限 |
+| 带宽上限 | `BW_LIMIT` | 不限、1M、5M、10M、20M。rclone 解析不了的值会被拒掉，只在同步日志里留一条警告，不会让每次同步都失败 |
+| 访问检查 | `CHECK_ACCESS` | 旁边的按钮会在两边生成标记文件 |
+
+出问题时窗口不会关，并说明是哪一步失败：systemd 调用、自启文件，还是标记文件。窗口底部写着它
+会写入的配置文件路径。
 
 命令行：
 
@@ -258,6 +290,8 @@ systemctl --user list-timers onedrive-sync.timer
 systemctl --user start onedrive-sync.service     # 立即同步
 journalctl --user -u onedrive-sync.service -f
 tail -f ~/.cache/rclone-onedrive-tray/sync.log
+onedrive-tray --settings      # 只打开设置窗口，有没有托盘都行
+onedrive-tray --hide-icon     # 用 --show-icon 调回来
 ```
 
 ### OneDrive 不收的文件名
