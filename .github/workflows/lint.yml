@@ -78,7 +78,10 @@ jobs:
           while read -r suite floor; do
             case "$suite" in ''|'#'*) continue ;; esac
             echo "::group::$suite"
-            out="$(tests/$suite --verbose 2>&1)"; rc=$?
+            # GitHub runs a run: step with bash -e, so a suite that fails must
+            # be caught here rather than aborting the step before its output is
+            # printed.
+            if out="$(tests/$suite --verbose 2>&1)"; then rc=0; else rc=$?; fi
             echo "$out"
             echo "::endgroup::"
             passed="$(printf '%s\n' "$out" | tail -1 |
