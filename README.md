@@ -139,7 +139,7 @@ Everything lands in your home directory, and neither script calls `sudo`.
 
 ```
 ~/.local/bin/onedrive-sync, onedrive-tray, onedrive-watch, onedrive-check,
-             onedrive-check-access
+             onedrive-check-access, onedrive-doctor
 ~/.config/rclone-onedrive-tray/config, filters.txt, exclude-folders.txt
 ~/.config/systemd/user/onedrive-sync.{service,timer}
 ~/.config/systemd/user/onedrive-sync-watch.service
@@ -344,6 +344,7 @@ onedrive-sync --resync        # rebuild the baseline
 onedrive-sync --dry-run       # show what a run would do, change nothing
 onedrive-sync --force         # ignore the delete cap for this run
 onedrive-check                # names and paths OneDrive will refuse
+onedrive-doctor               # is this install healthy, and if not, which part
 systemctl --user list-timers onedrive-sync.timer
 systemctl --user start onedrive-sync.service     # sync now
 journalctl --user -u onedrive-sync.service -f
@@ -444,6 +445,9 @@ the one moment the notification matters.
   clients do, which parts of it are worth having, and which are deliberately
   skipped are all written up in
   [docs/FEATURE-PARITY.md](docs/FEATURE-PARITY.md).
+- What this project knows is still wrong, and what it decided to live with, is in
+  [docs/KNOWN-ISSUES.md](docs/KNOWN-ISSUES.md). If something breaks, run
+  `onedrive-doctor` before reading anything else.
 
 ---
 

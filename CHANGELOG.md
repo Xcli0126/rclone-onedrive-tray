@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `onedrive-doctor`, a read-only diagnostic that answers "is this install healthy, and if not
+  which part is wrong" in one command: rclone and its version, `flock`, whether the config sources
+  cleanly, that `LOCAL` is writable, how old the bisync baseline is, whether the wrapper's lock and
+  rclone's own locks are held, what the log ends with and whether it is a network or a sign-in
+  problem, the timer and service state, the watcher, the tray, the log's size against the rotation
+  cap, and a read-only probe of the remote. Exit 0 when nothing failed, 1 when something did, 2 on
+  a usage error. `--quiet` prints only what needs attention, `--offline` skips the remote. It never
+  writes the config, never starts or stops a unit, never takes the lock and never runs a sync.
+- A table of sixteen rows in the test suite that pins the wrapper's whole command line, one
+  assertion per row, instead of one case per bug that reached rclone.
+- [docs/KNOWN-ISSUES.md](docs/KNOWN-ISSUES.md): what an audit of the tree found and left alone,
+  with the reason for each, next to the limitations that are deliberate.
+
+### Fixed
+
+- Deleting the local copy of a deselected folder went through three hand-rolled path checks and
+  then `shutil.rmtree`. A two-component name such as `a/b` passed them and deleted a nested
+  directory. A name resolving outside the sync root was only stopped by `rmtree` refusing
+  symlinks, after a confirmation had already been shown. One rule now decides: a single path
+  component, neither `.` nor `..`, resolving to a real directory strictly inside the resolved
+  root, and never the root itself.
+- `onedrive-check`'s closing line counted distinct paths while the headings above it counted
+  problems, so the numbers did not add up for a name that is both renamed and too long. It gives
+  both numbers now, in the singular when they are 1.
+- The doctor's own log line names how old the newest failure hint is, so a failure that a later run
+  already recovered from no longer reads as something happening now.
+
 ## [1.2.0] - 2026-10-01
 
 ### Added

@@ -109,9 +109,42 @@ else
     ok "--yes really did stop short of the baseline sync"
 fi
 
+# ------------------------------------------------------- a value that needs escaping
+# The wizard writes the config of a file onedrive-sync sources with `.`. A remote
+# or a path holding a quote, a dollar or a backtick has to be escaped on the way
+# in, or the file fails to source or sources to a different string and the break
+# shows up later, in the wrapper. No suite reached this code before: setup.sh was
+# the least-executed script in the tree, at 42% of its lines.
+title "a config value that needs escaping"
+QUOTE_HOME="$WORK/quote-home"
+# The four characters the writer escapes: backslash, quote, dollar, backtick.
+QUOTE_REMOTE="probefake:we\"ird\$x\`tick\`"
+rm -rf "$QUOTE_HOME"; mkdir -p "$QUOTE_HOME"
+env -i PATH="$WORK/stubs:/usr/bin:/bin" HOME="$QUOTE_HOME" LANG=C.UTF-8 \
+    XDG_CONFIG_HOME="$QUOTE_HOME/.config" XDG_CACHE_HOME="$QUOTE_HOME/.cache" \
+    bash "$SRC_DIR/setup.sh" --remote "$QUOTE_REMOTE" \
+        --local "$QUOTE_HOME/OneDrive" --filters none --yes --no-install \
+    >"$WORK/quote-out.txt" 2>&1
+QUOTE_CFG="$QUOTE_HOME/.config/rclone-onedrive-tray/config"
+check "the wizard writes a config for a remote that needs escaping" \
+    test -f "$QUOTE_CFG"
+check "and escapes the quote on the way in" \
+    grep -q 'REMOTE="probefake:we\\"ird' "$QUOTE_CFG"
+# Read it back the way onedrive-sync does. The source is a variable path, hence
+# the directive, which is the form the rest of the repo already uses.
+# shellcheck source=/dev/null
+QUOTE_GOT="$(set -u; . "$QUOTE_CFG"; printf '%s' "$REMOTE")"
+if [ "$QUOTE_GOT" = "$QUOTE_REMOTE" ]; then
+    ok "and the value comes back unchanged when the file is sourced"
+else
+    bad "the value changed: want '$QUOTE_REMOTE', got '$QUOTE_GOT'"
+    sed 's/^/        /' "$WORK/quote-out.txt" | head -3
+fi
+
 # ---------------------------------------------------------------- the install
 title "install.sh via setup.sh"
-for s in onedrive-sync onedrive-tray onedrive-watch onedrive-check onedrive-check-access; do
+for s in onedrive-sync onedrive-tray onedrive-watch onedrive-check onedrive-check-access \
+         onedrive-doctor; do
     check "installs $s" test -x "$HOME/.local/bin/$s"
 done
 check "generates $UNIT.service" test -f "$UNIT_DIR/$UNIT.service"
@@ -443,6 +476,99 @@ else
     ok "and nothing from the default set is added to it"
 fi
 
+# ---------------------------------------------------------------- the argv table
+# Four of the last five defects lived on this one command line: a percentage
+# read as a count, a bandwidth value rclone cannot parse, an empty BISYNC_ARGS
+# meaning two different things, and --resync passed twice. A case per bug is
+# what let the next one through, so the whole line is pinned here instead: each
+# row runs the wrapper once through the stub rclone and compares the recorded
+# argv with an expected string, character for character.
+title "the command line, pinned row by row"
+CAP_REMOTE="capfake:Vault"
+DEF_ARGS='--resilient --recover --max-lock 2m --conflict-resolve none --conflict-loser num --stats 2s'
+
+# Two more fixtures for the delete-cap rows: one with 200 files and no listing,
+# one with nothing at all, so both fallbacks inside pair_size() are reachable.
+mkdir -p "$CAP/no-listing" "$CAP/empty-local"
+for i in $(seq 1 200); do : > "$CAP/no-listing/g$i.txt"; done
+
+# argv_line <local> [tail] -- exactly what the wrapper should hand to rclone.
+argv_line() {
+    local tail=""
+    [ -n "${2:-}" ] && tail=" $2"
+    printf 'bisync %s %s %s --log-level INFO --log-file %s%s' \
+        "$CAP_REMOTE" "$1" "$DEF_ARGS" "$CAP/sync.log" "$tail"
+}
+
+# argv_row <label> <expected> <config-extra> [wrapper arguments...]
+argv_row() {
+    local label="$1" expected="$2" extra="$3"; shift 3
+    cap_config "$extra"
+    : > "$WORK/cap-args"
+    cap_env "$HOME/.local/bin/onedrive-sync" "$@" >/dev/null 2>&1 || true
+    local got
+    got="$(cat "$WORK/cap-args" 2>/dev/null)"
+    if [ "$got" = "$expected" ]; then
+        ok "$label"
+    else
+        bad "$label"
+        printf '        want: %s\n        got:  %s\n' "$expected" "$got"
+    fi
+}
+
+argv_row "the default config, no arguments: the whole baseline line" \
+    "$(argv_line "$CAP/local" '--max-delete 50')" ""
+argv_row "MAX_DELETE=100 over a 200-file pair: 50 percent of the local tree" \
+    "$(argv_line "$CAP/no-listing" '--max-delete 50')" \
+    "LOCAL=\"$CAP/no-listing\""
+argv_row "a pair whose size cannot be determined keeps the conservative 5 percent" \
+    "$(argv_line "$CAP/empty-local" '--max-delete 5')" \
+    "LOCAL=\"$CAP/empty-local\""
+argv_row "BW_LIMIT=1.5M reaches rclone as --bwlimit 1.5M" \
+    "$(argv_line "$CAP/local" '--max-delete 50 --bwlimit 1.5M')" \
+    'BW_LIMIT="1.5M"'
+argv_row "a BW_LIMIT rclone cannot parse is dropped, never passed on" \
+    "$(argv_line "$CAP/local" '--max-delete 50')" \
+    'BW_LIMIT="5M/1M"'
+argv_row "an absent BISYNC_ARGS gets the built-in default set" \
+    "$(argv_line "$CAP/local" '--max-delete 50')" ""
+argv_row "an empty BISYNC_ARGS passes no extra flags at all" \
+    "bisync $CAP_REMOTE $CAP/local --log-level INFO --log-file $CAP/sync.log --max-delete 50" \
+    'BISYNC_ARGS=""'
+argv_row "a BISYNC_ARGS that is set is used as written, nothing added" \
+    "bisync $CAP_REMOTE $CAP/local --resilient --stats 5s --log-level INFO --log-file $CAP/sync.log --max-delete 50" \
+    'BISYNC_ARGS="--resilient --stats 5s"'
+argv_row "CHECK_ACCESS=1 adds the flag and leaves RCLONE_TEST alone" \
+    "$(argv_line "$CAP/local" '--max-delete 50 --check-access')" \
+    'CHECK_ACCESS="1"'
+argv_row "CHECK_ACCESS=1 with a CHECK_FILENAME adds the name as well" \
+    "$(argv_line "$CAP/local" '--max-delete 50 --check-access --check-filename .sync-id')" \
+    'CHECK_ACCESS="1"
+CHECK_FILENAME=".sync-id"'
+argv_row "--dry-run is forwarded and changes nothing else" \
+    "$(argv_line "$CAP/local" '--max-delete 50 --dry-run')" "" --dry-run
+argv_row "--verbose is forwarded and changes nothing else" \
+    "$(argv_line "$CAP/local" '--max-delete 50 --verbose')" "" --verbose
+argv_row "--force is forwarded and the delete cap stays on the line" \
+    "$(argv_line "$CAP/local" '--max-delete 50 --force')" "" --force
+argv_row "--resync reaches rclone exactly once" \
+    "$(argv_line "$CAP/local" '--max-delete 50 --resync')" "" --resync
+argv_row "--force --resync both arrive, in that order, once each" \
+    "$(argv_line "$CAP/local" '--max-delete 50 --force --resync')" "" --force --resync
+# The keys the settings dialog and the installer write are read by the tray and
+# by systemd, never by rclone, so a config full of them adds nothing here.
+argv_row "the tray and scheduler keys never reach rclone" \
+    "$(argv_line "$CAP/local" '--max-delete 50')" \
+    'WATCH="1"
+WATCH_DEBOUNCE="8"
+INTERVAL_MIN="5"
+UNIT_NAME="cap-unit"
+UI_LANG="zh"
+SHOW_ICON="1"'
+
+# The rows rewrote the CAP config; the sections below want the plain one back.
+cap_config
+
 # ---------------------------------------------------------------- the exclude list
 # The tray's "Folders to sync" menu writes this file. A line holding only spaces
 # is not a folder, and it used to become --exclude "/   /**": rclone matched that
@@ -681,6 +807,198 @@ else
     bad "--force --resync: $resync_count --resync on the command line, NOTICE $(grep -c 'NOTICE: --resync requested' "$CAP/sync.log" || true)"
 fi
 
+# ---------------------------------------------------------------- the doctor
+# A sync that breaks is first taken to onedrive-doctor, so the diagnostic gets
+# its own sandbox here: a fixture tree, stubs for rclone and systemctl, and a
+# PATH assembled from symlinks so that a missing tool is really missing. One
+# assertion per case.
+title "onedrive-doctor"
+DOCTOR_BIN="$HOME/.local/bin/onedrive-doctor"
+DOC="$WORK/doctor"
+DOC_STUBS="$WORK/doctor-stubs"
+DOC_TOOLS="$WORK/doctor-tools"
+DOC_NOFLOCK="$WORK/doctor-tools-noflock"
+DOC_PATH_OVERRIDE=""
+DOC_TIMER_ENABLED="enabled"
+DOC_TIMER_ACTIVE="active"
+mkdir -p "$DOC_STUBS" "$DOC_TOOLS" "$DOC_NOFLOCK"
+
+# Every tool the doctor may call, symlinked so a case can cut one of them out.
+# bash is in the list because the shebang looks it up through this PATH.
+for tool in bash sed grep head cut tail date stat mktemp tr timeout flock pgrep \
+            rm dirname basename sort cat; do
+    tool_path="$(command -v "$tool" 2>/dev/null || true)"
+    [ -n "$tool_path" ] || continue
+    ln -sf "$tool_path" "$DOC_TOOLS/$tool"
+    [ "$tool" = flock ] || ln -sf "$tool_path" "$DOC_NOFLOCK/$tool"
+done
+
+cat > "$DOC_STUBS/rclone" <<'STUB'
+#!/bin/bash
+case "$1" in
+    version) echo "rclone v1.75.1" ;;
+    lsd)     echo "          -1 2026-01-01 00:00:00        -1 Notes" ;;
+    *)       : ;;
+esac
+exit 0
+STUB
+cat > "$DOC_STUBS/systemctl" <<'STUB'
+#!/bin/bash
+case "$*" in
+    *"show -p FragmentPath"*) echo "/run/user/1000/systemd/user/docsync.timer" ;;
+    *"is-enabled "*) echo "${DOC_TIMER_ENABLED:-enabled}" ;;
+    *"is-active "*)  echo "${DOC_TIMER_ACTIVE:-active}" ;;
+    *"show -p NextElapseUSecMonotonic"*) echo "12min 3s" ;;
+    *"show -p Result"*) echo "success" ;;
+esac
+exit 0
+STUB
+chmod +x "$DOC_STUBS/rclone" "$DOC_STUBS/systemctl"
+DOCTOR_TMP="$WORK/doctor-tmp"
+mkdir -p "$DOCTOR_TMP"
+
+doc_slug() { printf '%s' "$1" | sed -e 's|^/||' -e 's|[/: ]|_|g'; }
+
+# doc_fixture <name> [extra config lines] -- build the sandbox and point DOC_FX
+# at it. The log starts with one clean line, so a case that wants a failure hint
+# appends its own.
+doc_fixture() {
+    local d="$DOC/$1" extra="${2:-}"
+    mkdir -p "$d/home" "$d/cfg/rclone-onedrive-tray" "$d/cache/rclone/bisync" \
+             "$d/cache/rclone-onedrive-tray" "$d/data/rclone-onedrive-tray/icons" \
+             "$d/local" "$d/bin" "$d/tmp"
+    printf '*.tmp\n' > "$d/cfg/rclone-onedrive-tray/filters.txt"
+    cp "$DOC_STUBS/rclone" "$DOC_STUBS/systemctl" "$d/bin/"
+    chmod +x "$d/bin/rclone" "$d/bin/systemctl"
+    cat > "$d/cfg/rclone-onedrive-tray/config" <<EOF
+REMOTE="docfake:Vault"
+LOCAL="$d/local"
+UNIT_NAME="docsync"
+LOG="$d/cache/sync.log"
+FILTERS_FILE="$d/cfg/rclone-onedrive-tray/filters.txt"
+WATCH="0"
+$extra
+EOF
+    printf '%s INFO  : Bisync successful\n' "$(date '+%Y/%m/%d %H:%M:%S')" > "$d/cache/sync.log"
+    printf '# bisync listing v1\n' > \
+        "$d/cache/rclone/bisync/docfake_Vault..$(doc_slug "$d/local").path1.lst"
+    DOC_FX="$d"
+}
+
+# doc_run <fixture> [doctor arguments...] -- the TMPDIR is inside the fixture so
+# the read-only case below would notice a temporary file left behind.
+doc_run() {
+    local d="$1"; shift
+    local path="$d/bin:$DOC_TOOLS"
+    [ -n "$DOC_PATH_OVERRIDE" ] && path="$DOC_PATH_OVERRIDE"
+    env HOME="$d/home" XDG_CONFIG_HOME="$d/cfg" XDG_CACHE_HOME="$d/cache" \
+        XDG_DATA_HOME="$d/data" TMPDIR="$d/tmp" PATH="$path" \
+        DOC_TIMER_ENABLED="$DOC_TIMER_ENABLED" DOC_TIMER_ACTIVE="$DOC_TIMER_ACTIVE" \
+        "$DOCTOR_BIN" "$@"
+}
+
+# A healthy fixture: exit 0, every check line carrying a verdict, and a summary
+# that says nothing failed. The lines that do not carry one are the header and
+# the summary itself.
+DOC_PATH_OVERRIDE=""; DOC_TIMER_ENABLED="enabled"; DOC_TIMER_ACTIVE="active"
+doc_fixture healthy
+DOCTOR_OUT="$(doc_run "$DOC_FX" 2>&1)"; DOCTOR_RC=$?
+DOCTOR_BARE="$(printf '%s\n' "$DOCTOR_OUT" | grep -cvE '^(ok|warn|fail) |^onedrive-doctor: ' || true)"
+if [ "$DOCTOR_RC" -eq 0 ] && grep -q "nothing failed" <<<"$DOCTOR_OUT" &&
+        [ "$DOCTOR_BARE" -eq 0 ]; then
+    ok "a healthy fixture: exit 0, one verdict line per check, nothing failed"
+else
+    bad "a healthy fixture: exit $DOCTOR_RC, $DOCTOR_BARE line(s) without a verdict"
+    printf '%s\n' "$DOCTOR_OUT" | head -3 | sed 's/^/        /'
+fi
+
+doc_fixture no-config
+rm -f "$DOC_FX/cfg/rclone-onedrive-tray/config"
+run "no config: exit 1, and the line names the path it looked for" 1 \
+    "$DOC_FX/cfg/rclone-onedrive-tray/config" doc_run "$DOC_FX" --quiet --offline
+
+DOC_PATH_OVERRIDE="$DOC_TOOLS"
+run "no rclone on PATH: exit 1, and the line names rclone" 1 "rclone is not on PATH" \
+    doc_run "$DOC_FX" --quiet --offline
+
+DOC_PATH_OVERRIDE="$DOC_FX/bin:$DOC_NOFLOCK"
+run "no flock on PATH: exit 1" 1 "flock is missing" \
+    doc_run "$DOC_FX" --quiet --offline
+DOC_PATH_OVERRIDE=""
+
+doc_fixture expired-signin
+cat >> "$DOC_FX/cache/sync.log" <<'EOF'
+2026/10/01 20:05:00 CRITICAL: Failed to refresh token: oauth2: cannot fetch token: 400 Bad Request: {"error":"invalid_grant","error_description":"AADSTS70043: The refresh token has expired"}
+EOF
+DOCTOR_OUT="$(doc_run "$DOC_FX" --quiet --offline 2>&1)"; DOCTOR_RC=$?
+if [ "$DOCTOR_RC" -eq 1 ] && grep -q "expired sign-in" <<<"$DOCTOR_OUT" &&
+        ! grep -q "network" <<<"$DOCTOR_OUT"; then
+    ok "a log ending in invalid_grant is an expired sign-in, never a network problem"
+else
+    bad "invalid_grant: exit $DOCTOR_RC, $(head -1 <<<"$DOCTOR_OUT")"
+fi
+
+doc_fixture token-eof
+cat >> "$DOC_FX/cache/sync.log" <<'EOF'
+2026/10/01 20:05:00 CRITICAL: failed to get root: Get "https://graph.microsoft.com/v1.0/drives/X/root": couldn't fetch token: Post "https://login.microsoftonline.com/common/oauth2/v2.0/token": EOF
+EOF
+DOCTOR_OUT="$(doc_run "$DOC_FX" --quiet --offline 2>&1)"; DOCTOR_RC=$?
+if [ "$DOCTOR_RC" -eq 0 ] && grep -q "network problem" <<<"$DOCTOR_OUT" &&
+        ! grep -q "expired" <<<"$DOCTOR_OUT"; then
+    ok "a token fetch that never reached Microsoft is a network problem, not an expiry"
+else
+    bad "token EOF: exit $DOCTOR_RC, $(head -1 <<<"$DOCTOR_OUT")"
+fi
+
+doc_fixture timer-off
+DOC_TIMER_ENABLED="disabled"
+run "a disabled timer is a warning, and the run still exits 0" 0 "is disabled" \
+    doc_run "$DOC_FX" --quiet --offline
+DOC_TIMER_ENABLED="enabled"
+
+doc_fixture quiet
+DOCTOR_FULL="$(doc_run "$DOC_FX" --offline 2>&1)"
+DOCTOR_QUIET="$(doc_run "$DOC_FX" --quiet --offline 2>&1)"
+DOCTOR_FULL_OK="$(printf '%s\n' "$DOCTOR_FULL" | grep -c '^ok ' || true)"
+DOCTOR_QUIET_OK="$(printf '%s\n' "$DOCTOR_QUIET" | grep -c '^ok ' || true)"
+DOCTOR_COUNTED="$(printf '%s\n' "$DOCTOR_QUIET" |
+    sed -n 's/^onedrive-doctor: \([0-9]*\) ok.*/\1/p')"
+if [ "$DOCTOR_QUIET_OK" -eq 0 ] && [ -n "$DOCTOR_COUNTED" ] &&
+        [ "$DOCTOR_COUNTED" = "$DOCTOR_FULL_OK" ] && [ "$DOCTOR_FULL_OK" -gt 0 ]; then
+    ok "--quiet hides every ok line, and the summary still counts them"
+else
+    bad "--quiet: $DOCTOR_QUIET_OK ok line(s) printed, summary '$DOCTOR_COUNTED', full run $DOCTOR_FULL_OK"
+fi
+
+run "the doctor --help documents --offline" 0 "--offline" "$DOCTOR_BIN" --help
+
+DOCTOR_OUT="$("$DOCTOR_BIN" --bogus 2>&1)"; DOCTOR_RC=$?
+if [ "$DOCTOR_RC" -eq 2 ] && grep -q '^usage:' <<<"$DOCTOR_OUT" &&
+        [ "$(grep -c '' <<<"$DOCTOR_OUT")" -eq 1 ]; then
+    ok "an unknown flag exits 2 with one usage line"
+else
+    bad "unknown flag: exit $DOCTOR_RC, $(head -1 <<<"$DOCTOR_OUT")"
+fi
+
+# The whole point of the script is that it is safe to run at any time, so the
+# tree, the config's contents and the config's mtime are compared around a run.
+doc_fixture read-only
+find "$DOC_FX" -printf '%P %s\n' | sort > "$WORK/doctor-tree-before"
+DOCTOR_SUM_BEFORE="$(md5sum < "$DOC_FX/cfg/rclone-onedrive-tray/config")"
+DOCTOR_MTIME_BEFORE="$(stat -c %Y "$DOC_FX/cfg/rclone-onedrive-tray/config")"
+doc_run "$DOC_FX" --offline >/dev/null 2>&1
+find "$DOC_FX" -printf '%P %s\n' | sort > "$WORK/doctor-tree-after"
+DOCTOR_SUM_AFTER="$(md5sum < "$DOC_FX/cfg/rclone-onedrive-tray/config")"
+DOCTOR_MTIME_AFTER="$(stat -c %Y "$DOC_FX/cfg/rclone-onedrive-tray/config")"
+if [ "$DOCTOR_SUM_BEFORE" = "$DOCTOR_SUM_AFTER" ] &&
+        [ "$DOCTOR_MTIME_BEFORE" = "$DOCTOR_MTIME_AFTER" ] &&
+        cmp -s "$WORK/doctor-tree-before" "$WORK/doctor-tree-after"; then
+    ok "a run leaves the config and every file in the tree untouched"
+else
+    bad "the doctor changed the sandbox"
+    diff "$WORK/doctor-tree-before" "$WORK/doctor-tree-after" | head -5 | sed 's/^/        /'
+fi
+
 # ---------------------------------------------------------------- uninstall
 title "uninstall.sh"
 UNINSTALL_OUT="$(bash "$SRC_DIR/uninstall.sh" --prefix "$HOME/.local" 2>&1)"
@@ -694,7 +1012,7 @@ fi
 check_absent "removes the installed scripts" \
     "$HOME/.local/bin/onedrive-sync" "$HOME/.local/bin/onedrive-tray" \
     "$HOME/.local/bin/onedrive-watch" "$HOME/.local/bin/onedrive-check" \
-    "$HOME/.local/bin/onedrive-check-access"
+    "$HOME/.local/bin/onedrive-check-access" "$HOME/.local/bin/onedrive-doctor"
 check_absent "removes the units" \
     "$UNIT_DIR/$UNIT.service" "$UNIT_DIR/$UNIT.timer" "$UNIT_DIR/$UNIT-watch.service"
 check "keeps the configuration (documented; --purge removes it)" test -f "$CFG"

@@ -106,7 +106,8 @@ cd rclone-onedrive-tray
 所有东西都装进你的家目录，两个脚本都不会调用 `sudo`。
 
 ```
-~/.local/bin/onedrive-sync, onedrive-tray, onedrive-watch, onedrive-check
+~/.local/bin/onedrive-sync, onedrive-tray, onedrive-watch, onedrive-check,
+             onedrive-check-access, onedrive-doctor
 ~/.config/rclone-onedrive-tray/config, filters.txt, exclude-folders.txt
 ~/.config/systemd/user/onedrive-sync.{service,timer}
 ~/.config/systemd/user/onedrive-sync-watch.service
@@ -288,6 +289,7 @@ onedrive-sync --resync        # 重建同步基线
 onedrive-sync --dry-run       # 只显示这一轮会做什么，不改动任何东西
 onedrive-sync --force         # 这一轮无视删除上限
 onedrive-check                # 检查 OneDrive 会拒绝或改名的文件名和路径
+onedrive-doctor               # 一次性回答：这套安装是否正常，哪里不正常
 systemctl --user list-timers onedrive-sync.timer
 systemctl --user start onedrive-sync.service     # 立即同步
 journalctl --user -u onedrive-sync.service -f
@@ -368,6 +370,8 @@ sudo loginctl enable-linger "$USER"
 - 没有文件管理器里的逐文件状态、没有分享链接、没有历史版本浏览、没有按流量计费网络或省电模式的
   自动暂停。Windows 和 macOS 客户端到底做了什么、哪些值得做、哪些是故意不做的，都写在
   [docs/FEATURE-PARITY.md](docs/FEATURE-PARITY.md)。
+- 这个项目自己知道还没做对的地方，以及已经决定接受的限制，都列在
+  [docs/KNOWN-ISSUES.md](docs/KNOWN-ISSUES.md)。真出问题时先跑 `onedrive-doctor`，再翻别的。
 
 ---
 

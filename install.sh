@@ -128,6 +128,7 @@ install -m 0755 "$SRC_DIR/bin/onedrive-tray" "$BIN_DIR/onedrive-tray"
 install -m 0755 "$SRC_DIR/bin/onedrive-watch" "$BIN_DIR/onedrive-watch"
 install -m 0755 "$SRC_DIR/bin/onedrive-check" "$BIN_DIR/onedrive-check"
 install -m 0755 "$SRC_DIR/bin/onedrive-check-access" "$BIN_DIR/onedrive-check-access"
+install -m 0755 "$SRC_DIR/bin/onedrive-doctor" "$BIN_DIR/onedrive-doctor"
 
 # --------------------------------------------------------------- config
 say "Installing configuration into $CONFIG_DIR"
@@ -246,6 +247,7 @@ $(say "Installed")
 
   scripts   $BIN_DIR/onedrive-sync, $BIN_DIR/onedrive-tray, $BIN_DIR/onedrive-watch
             $BIN_DIR/onedrive-check, $BIN_DIR/onedrive-check-access
+            $BIN_DIR/onedrive-doctor
   config    $CONFIG_DIR/config
   filters   $CONFIG_DIR/filters.txt
   units     $UNIT_DIR/$UNIT_NAME.{service,timer}

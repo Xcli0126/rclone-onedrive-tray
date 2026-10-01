@@ -11,13 +11,13 @@ Five scripts, none of which needs an rclone remote and all safe on a working set
 
 ```bash
 tests/dependency-matrix.sh      # 31 cases: one missing dependency at a time, plus the tray
-tests/install-flow.sh           # 134 cases: the documented install path, end to end
-tests/filters.sh                # 27 cases: the default filters still filter, plus the checker
-tests/tray.sh                   # 89 cases: the real GTK menu, driven with stubs
-tests/docs.sh                   # 29 cases: the links and rules the docs depend on
+tests/install-flow.sh           # 165 cases: the documented install path, end to end
+tests/filters.sh                # 33 cases: the default filters still filter, plus the checker
+tests/tray.sh                   # 100 cases: the real GTK menu, driven with stubs
+tests/docs.sh                   # 31 cases: the links and rules the docs depend on
 ```
 
-310 cases in total, and each suite prints its own count on the last line, so this
+360 cases in total, and each suite prints its own count on the last line, so this
 list can be checked against the tree in a few seconds.
 
 Add `--verbose` to any of them to see each command and its output.

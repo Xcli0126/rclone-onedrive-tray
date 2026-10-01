@@ -1,0 +1,485 @@
+#!/usr/bin/env bash
+#
+# onedrive-doctor: is this install healthy, and if not, which part is wrong.
+#
+# Why this exists: answering that by hand means running systemctl, journalctl,
+# pgrep and tail and reading four outputs to find the one line that matters.
+# Those are the checks below, one line each so the left edge can be scanned:
+# ok, warn, fail.
+#
+# Usage:
+#   onedrive-doctor              run every check
+#   onedrive-doctor --quiet      print only warn and fail lines, plus the summary
+#   onedrive-doctor --offline    skip the remote probe; nothing leaves the machine
+#   onedrive-doctor --help
+#
+# Exit 0 when nothing failed, 1 when at least one check failed, 2 on a usage
+# error. warn never changes the exit status: it marks something that is off
+# rather than broken, such as a timer that is installed but not enabled, a
+# baseline that was never built, or a network problem the next run retries.
+#
+# Read-only by construction: it never writes the config, never starts, stops,
+# enables or disables a unit, never takes the sync lock and never runs a sync,
+# and it leaves no file behind. Safe while a sync is running, over SSH and with
+# no graphical session; it never imports GTK. Every command that could hang runs
+# under timeout, and where systemctl is absent the scheduler check says so.
+#
+# Configuration: ~/.config/rclone-onedrive-tray/config  (see config.example)
+#
+set -uo pipefail
+
+APP="onedrive-doctor"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/rclone-onedrive-tray"
+CONFIG_FILE="$CONFIG_DIR/config"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/rclone-onedrive-tray"
+RCLONE_CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/rclone"
+DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/rclone-onedrive-tray"
+
+# Every config key some script here reads, so a key outside this list is a note
+# rather than a fault.
+KNOWN_KEYS=" REMOTE LOCAL UNIT_NAME INTERVAL_MIN MAX_DELETE CHECK_ACCESS
+ CHECK_FILENAME BISYNC_ARGS BW_LIMIT FILTERS_FILE EXCLUDE_FOLDERS_FILE LOG
+ OPEN_APP_CMD OPEN_APP_NAME UI_LANG SHOW_ICON WATCH WATCH_DEBOUNCE WATCH_SETTLE
+ WATCH_EXCLUDE RETRIES RETRY_DELAY MAX_LOG_BYTES RCLONE NOTIFY_ON_SUCCESS "
+# Flattened once, because the list above is wrapped: a match against the wrapped
+# form misses any key that ended a line.
+KNOWN=" $(printf '%s' "$KNOWN_KEYS" | tr -s '[:space:]' ' ') "
+
+QUIET=0; OFFLINE=0
+n_ok=0; n_warn=0; n_fail=0
+
+# Print the whole header comment, whatever its length: a fixed range silently
+# truncates the help as soon as the comment grows.
+usage() { sed -n '2,/^[^#]/p' "$0" | sed -e '$d' -e 's/^# \{0,1\}//'; }
+die() { printf '%s: %s\n' "$APP" "$*" >&2; exit 2; }
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --quiet|-q) QUIET=1; shift ;;
+        --offline)  OFFLINE=1; shift ;;
+        -h|--help)  usage; exit 0 ;;
+        *) printf 'usage: %s [--quiet] [--offline] (unknown option: %s)\n' \
+               "$APP" "$1" >&2
+           exit 2 ;;
+    esac
+done
+
+# ---- reporting ------------------------------------------------------------
+# report <ok|warn|fail> <check> <message>
+report() {
+    local verdict="$1" check="$2" msg="$3"
+    [ "$verdict" = ok ] && n_ok=$((n_ok + 1))
+    [ "$verdict" = warn ] && n_warn=$((n_warn + 1))
+    [ "$verdict" = fail ] && n_fail=$((n_fail + 1))
+    # --quiet keeps the lines that ask for something; the summary still counts
+    # every check, so a reader of --quiet never sees fewer checks than ran.
+    [ "$QUIET" -eq 1 ] && [ "$verdict" = ok ] && return 0
+    printf '%-4s %-9s %s\n' "$verdict" "$check" "$msg"
+}
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+human_age() {  # human_age <seconds>
+    local s="$1"
+    if [ "$s" -lt 60 ]; then printf '%ds' "$s"
+    elif [ "$s" -lt 3600 ]; then printf '%dm' "$((s / 60))"
+    elif [ "$s" -lt 86400 ]; then printf '%dh' "$((s / 3600))"
+    else printf '%dd' "$((s / 86400))"; fi
+}
+
+# Seconds since <path> changed, or nothing when stat cannot say. A clock that
+# went backwards reads as 0 rather than as a negative age.
+file_age() {
+    local mtime age
+    mtime="$(stat -c %Y -- "$1" 2>/dev/null)" || return 1
+    [ -n "$mtime" ] || return 1
+    age=$(( $(date +%s) - mtime ))
+    [ "$age" -lt 0 ] && age=0
+    printf '%s' "$age"
+}
+
+# The age at the front of a timestamped log line, or nothing. A failure hint can
+# be older than the last successful run, and saying how old it is stops a reader
+# from taking it for something that is happening now.
+line_age() {
+    local ts epoch age
+    ts="$(printf '%s\n' "$1" |
+        grep -oE '^[0-9]{4}/[0-9]{2}/[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}' |
+        head -1 || true)"
+    [ -n "$ts" ] || return 0
+    epoch="$(date -d "$ts" +%s 2>/dev/null || true)"
+    [ -n "$epoch" ] || return 0
+    age=$(( $(date +%s) - epoch ))
+    [ "$age" -lt 0 ] && age=0
+    human_age "$age"
+}
+
+# ---- the config -----------------------------------------------------------
+# Loaded first and reported as its own check. A config that does not source
+# cleanly under set -u is a real fault, the wrapper dies on it too; the tolerant
+# second source still loads what it can, so the checks after this one describe
+# the install rather than the failed parse.
+config_state="missing"; config_err=""
+err_file="$(mktemp)" || die "cannot create a temporary file"
+trap 'rm -f "$err_file"' EXIT
+
+source_config() {
+    # shellcheck source=/dev/null
+    . "$CONFIG_FILE"
+}
+
+if [ -f "$CONFIG_FILE" ]; then
+    if ( set -u; source_config ) 2>"$err_file"; then
+        config_state="clean"
+    else
+        config_state="unclean"; config_err="$(tail -1 "$err_file")"
+    fi
+    set +u
+    # shellcheck source=/dev/null
+    . "$CONFIG_FILE" 2>/dev/null || true
+    set -u
+fi
+
+# The same defaults the wrapper and the tray use, so no check reports a value
+# the scripts themselves would not use.
+RCLONE="${RCLONE:-rclone}"; LOG="${LOG:-$CACHE_DIR/sync.log}"
+MAX_LOG_BYTES="${MAX_LOG_BYTES:-5242880}"; WATCH="${WATCH:-1}"
+UNIT_NAME="${UNIT_NAME:-onedrive-sync}"
+REMOTE="${REMOTE:-}"; LOCAL="${LOCAL:-}"
+FILTERS_FILE="${FILTERS_FILE:-}"; EXCLUDE_FOLDERS_FILE="${EXCLUDE_FOLDERS_FILE:-}"
+
+[ "$QUIET" -eq 0 ] && printf '%s: %s\n' "$APP" "$CONFIG_FILE"
+
+# ---- 1. rclone ------------------------------------------------------------
+# 1.65 or newer: below that --resilient and --recover do not exist, so an
+# interrupted sync never recovers on its own.
+if have "$RCLONE"; then
+    rclone_path="$(command -v "$RCLONE")"
+    rclone_ver="$(timeout 10 "$RCLONE" version 2>/dev/null | head -1 |
+        grep -oE '[0-9]+\.[0-9]+' | head -1 || true)"
+    major="${rclone_ver%%.*}"; minor="${rclone_ver##*.}"
+    if [ -z "$rclone_ver" ]; then
+        report warn rclone "$rclone_path did not report a version; check the binary (rclone version)"
+    elif [ "$major" -eq 0 ] || { [ "$major" -eq 1 ] && [ "$minor" -lt 65 ]; }; then
+        report fail rclone "rclone $rclone_ver is older than 1.65, so an interrupted sync cannot recover by itself; install a current build (docs/DEPENDENCIES.md)"
+    else
+        report ok rclone "$rclone_ver at $rclone_path"
+    fi
+else
+    report fail rclone "$RCLONE is not on PATH, so nothing can sync; install rclone (docs/DEPENDENCIES.md), or set RCLONE in $CONFIG_FILE"
+fi
+
+# ---- 2. flock -------------------------------------------------------------
+# Without it the wrapper refuses to run: no lock means a manual sync and the
+# timer can corrupt each other's listings.
+if have flock; then
+    report ok flock "$(command -v flock)"
+else
+    report fail flock "flock is missing (it ships with util-linux) and onedrive-sync refuses to run without it; install util-linux"
+fi
+
+# ---- 3. config ------------------------------------------------------------
+if [ "$config_state" = missing ]; then
+    report fail config "no config at $CONFIG_FILE; run ./setup.sh, or ./install.sh and edit it by hand"
+elif [ "$config_state" = unclean ]; then
+    report fail config "$CONFIG_FILE does not source cleanly under set -u: $config_err; fix that line (a key that refers to an unset variable is the usual cause)"
+else
+    config_missing=""
+    [ -n "$REMOTE" ] || config_missing="REMOTE"
+    [ -n "$LOCAL" ] || config_missing="${config_missing:+$config_missing and }LOCAL"
+    if [ -n "$config_missing" ]; then
+        report fail config "$CONFIG_FILE does not set $config_missing; add the key and run onedrive-sync --resync"
+    else
+        unknown=""
+        while IFS= read -r key; do
+            case "$KNOWN" in
+                *" $key "*) ;;
+                *) unknown="${unknown:+$unknown, }$key" ;;
+            esac
+        done < <(sed -n 's/^[[:space:]]*\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' \
+                     "$CONFIG_FILE" | sort -u)
+        report ok config "$CONFIG_FILE sets REMOTE and LOCAL${unknown:+ (note: key(s) nothing here reads: $unknown)}"
+    fi
+fi
+
+# ---- 4. paths -------------------------------------------------------------
+# One line: can this install touch what it needs. LOCAL has to exist and be
+# writable, a filters file the config names has to be there, and an exclude list
+# that exists has to be readable.
+paths_verdict=ok; paths_msg=""
+if [ -z "$LOCAL" ]; then
+    paths_msg="LOCAL is not set, so there is nothing to check"; paths_verdict=fail
+elif [ ! -d "$LOCAL" ]; then
+    paths_msg="$LOCAL does not exist; create it (mkdir -p \"$LOCAL\") or fix LOCAL and run --resync"
+    paths_verdict=fail
+elif [ ! -w "$LOCAL" ]; then
+    paths_msg="$LOCAL exists but is not writable by this user; fix its owner or permissions"; paths_verdict=fail
+else
+    paths_msg="$LOCAL exists and is writable"
+fi
+
+if grep -qE '^[[:space:]]*FILTERS_FILE=' "$CONFIG_FILE" 2>/dev/null; then
+    rules="$(grep -cvE '^[[:space:]]*(#|$)' "$FILTERS_FILE" 2>/dev/null || true)"
+    if [ -z "$FILTERS_FILE" ]; then
+        paths_msg="$paths_msg; FILTERS_FILE is empty, so no filter rules are applied"
+    elif [ ! -f "$FILTERS_FILE" ]; then
+        paths_msg="$paths_msg; FILTERS_FILE $FILTERS_FILE does not exist, so runs apply no filters; create it or empty the key"
+        paths_verdict=fail
+    elif [ ! -r "$FILTERS_FILE" ]; then
+        paths_msg="$paths_msg; FILTERS_FILE $FILTERS_FILE is not readable; fix its permissions"; paths_verdict=fail
+    else
+        paths_msg="$paths_msg; filters file has ${rules:-0} rule line(s)"
+    fi
+fi
+
+if [ -n "$EXCLUDE_FOLDERS_FILE" ] && [ -e "$EXCLUDE_FOLDERS_FILE" ]; then
+    if [ -r "$EXCLUDE_FOLDERS_FILE" ]; then
+        paths_msg="$paths_msg; exclude list has $(grep -cvE '^[[:space:]]*(#|$)' "$EXCLUDE_FOLDERS_FILE" || true) entry line(s)"
+    else
+        paths_msg="$paths_msg; EXCLUDE_FOLDERS_FILE $EXCLUDE_FOLDERS_FILE is not readable; fix its permissions"
+        paths_verdict=fail
+    fi
+fi
+report "$paths_verdict" paths "$paths_msg"
+
+# ---- 5. baseline ----------------------------------------------------------
+# rclone names the listing <left>..<right>.path1.lst; only the right half is
+# reliable, so the same slug the wrapper's pair_size() builds is used here.
+baseline_verdict=warn; baseline_msg=""
+if [ -z "$LOCAL" ]; then
+    baseline_msg="LOCAL is not set, so the bisync pair cannot be named"; baseline_verdict=fail
+else
+    slug="$(printf '%s' "$LOCAL" | sed -e 's|^/||' -e 's|[/: ]|_|g')"
+    newest=""; count=0
+    for listing in "$RCLONE_CACHE"/bisync/*.."$slug".path1.lst; do
+        [ -f "$listing" ] || continue
+        count=$((count + 1))
+        if [ -z "$newest" ] || [ "$listing" -nt "$newest" ]; then newest="$listing"; fi
+    done
+    if [ "$count" -eq 0 ]; then
+        baseline_msg="no bisync listing for $LOCAL under $RCLONE_CACHE/bisync, so nothing has synced yet; build the baseline once with: onedrive-sync --resync"
+    elif [ "$count" -gt 1 ]; then
+        baseline_msg="$count listing pairs name $LOCAL, so the pair size cannot be told apart and the conservative 5% delete cap is used; keep one remote per local folder, then run --resync"
+    else
+        baseline_age="$(file_age "$newest")"
+        baseline_msg="listing $(basename "$newest") is present"
+        [ -n "$baseline_age" ] && baseline_msg="listing $(basename "$newest") last written $(human_age "$baseline_age") ago"
+        baseline_verdict=ok
+    fi
+fi
+report "$baseline_verdict" baseline "$baseline_msg"
+
+# ---- 6. lock --------------------------------------------------------------
+# The wrapper holds $CACHE_DIR/sync.lck with flock; that file carries no PID and
+# stays behind after a run, so on its own it means nothing. rclone's own *.lck
+# files do carry the owner PID, and the wrapper drops a stale one on its next
+# run, which is why this check reads both.
+lock_verdict=ok; lock_msg=""
+wrapper_lock="$CACHE_DIR/sync.lck"
+if [ -e "$wrapper_lock" ]; then
+    lock_age="$(file_age "$wrapper_lock")"
+    lock_msg="sync.lck present${lock_age:+ (last touched $(human_age "$lock_age") ago)}"
+else
+    lock_msg="no sync.lck yet"
+fi
+for lck in "$RCLONE_CACHE"/bisync/*.lck; do
+    [ -e "$lck" ] || continue
+    held_pid="$(grep -o '"PID"[[:space:]]*:[[:space:]]*"[0-9]\+"' "$lck" 2>/dev/null |
+        grep -o '[0-9]\+' | head -1 || true)"
+    if [ -n "$held_pid" ] && kill -0 "$held_pid" 2>/dev/null; then
+        lock_msg="$lock_msg; a sync is running now ($(basename "$lck"), pid $held_pid)"
+    elif [ -n "$held_pid" ]; then
+        lock_msg="$lock_msg; stale $(basename "$lck") (owner pid $held_pid is gone); the next run removes it"
+        lock_verdict=warn
+    else
+        lock_msg="$lock_msg; $(basename "$lck") carries no PID, so only --max-lock expires it"
+        lock_verdict=warn
+    fi
+done
+report "$lock_verdict" lock "$lock_msg"
+
+# ---- 7. log ---------------------------------------------------------------
+# The last line carrying a timestamp says when the wrapper last wrote. The
+# newest failure hint is classified with the wrapper's own patterns, in its
+# order: a failure that never reached Microsoft talks about tokens, so the
+# network patterns are tested before the sign-in ones, and a network problem is
+# never reported as an expiry.
+RE_LOCK='prior lock file found'
+RE_MAXDELETE='too many deletes|excessive deletes|deletion limit'
+RE_ACCESS='access test failed|check file check failed'
+RE_NETWORK='lookup .*:53|dial tcp|no such host|Temporary failure in name resolution|server misbehaving|couldn.t fetch token|connection reset|connection refused|i/o timeout|: EOF|unexpected EOF|no route to host|network is unreachable|TLS handshake|proxyconnect|context deadline exceeded'
+RE_OLD='unknown flag|flag provided but not defined|unknown shorthand flag'
+RE_RESYNC='must run --resync|resync required|prior listings|critical error'
+RE_AUTH='invalid_grant|401 Unauthorized|403 Forbidden|invalid_token|token expired|AADSTS'
+ALL_HINTS="$RE_LOCK|$RE_MAXDELETE|$RE_ACCESS|$RE_NETWORK|$RE_OLD|$RE_RESYNC|$RE_AUTH"
+
+classify_hint() {  # classify_hint <text> -> a tag, or none
+    local t="$1"
+    if grep -qiE "$RE_LOCK" <<<"$t"; then printf 'lock'
+    elif grep -qiE "$RE_MAXDELETE" <<<"$t"; then printf 'maxdelete'
+    elif grep -qiE "$RE_ACCESS" <<<"$t"; then printf 'access'
+    elif grep -qiE "$RE_NETWORK" <<<"$t"; then printf 'network'
+    elif grep -qiE "$RE_OLD" <<<"$t"; then printf 'oldrclone'
+    elif grep -qiE "$RE_RESYNC" <<<"$t"; then printf 'resync'
+    elif grep -qiE "$RE_AUTH" <<<"$t"; then printf 'auth'
+    else printf 'none'; fi
+}
+
+if [ ! -e "$LOG" ]; then
+    report warn log "no log at $LOG yet, so no run has written one; the first sync creates it"
+elif [ ! -r "$LOG" ]; then
+    report fail log "$LOG exists but is not readable by this user; fix its permissions or your groups"
+else
+    last_ts="$(grep -E '^[0-9]{4}/[0-9]{2}/[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}' "$LOG" |
+        tail -1 | cut -c1-19 || true)"
+    log_age=""
+    if [ -n "$last_ts" ]; then
+        epoch="$(date -d "$last_ts" +%s 2>/dev/null || true)"
+        if [ -n "$epoch" ]; then
+            log_age=$(( $(date +%s) - epoch )); [ "$log_age" -lt 0 ] && log_age=0
+            log_age="last write $(human_age "$log_age") ago; "
+        fi
+    fi
+    newest_hint="$(grep -iE "$ALL_HINTS" "$LOG" | tail -1 || true)"
+    tag="none"; [ -n "$newest_hint" ] && tag="$(classify_hint "$newest_hint")"
+    hint_age=""
+    if [ -n "$newest_hint" ]; then
+        hint_secs="$(line_age "$newest_hint")"
+        [ -n "$hint_secs" ] && hint_age=" from ${hint_secs} ago"
+    fi
+    case "$tag" in
+        auth) report fail log "${log_age}the newest failure hint${hint_age} is a refused or expired sign-in; re-authorise from the tray's 'Re-authorise OneDrive' item, or run: rclone config reconnect ${REMOTE%%:*}:." ;;
+        network) report warn log "${log_age}the newest failure hint${hint_age} is a network problem, which the next run retries; the sign-in is not what failed${newest_hint:+: $(printf '%s\n' "$newest_hint" | head -1 | cut -c1-160)}" ;;
+        lock|maxdelete|access|resync|oldrclone) report warn log "${log_age}the newest failure hint${hint_age} is [$tag]; tail the log for the full message: $LOG" ;;
+        *)
+            if [ -n "$last_ts" ]; then
+                report ok log "${log_age}no failure hint in it"
+            else
+                report warn log "no timestamped line in $LOG yet, so nothing has run through the wrapper"
+            fi ;;
+    esac
+fi
+
+# ---- 8. systemd -----------------------------------------------------------
+# The timer is the difference between "broken" and "not scheduled", so both
+# states are named. The service's Result is history: it is reported, and one
+# failed run does not by itself make the doctor exit 1.
+unit="$UNIT_NAME"
+if ! have systemctl; then
+    report warn systemd "systemctl is not on PATH, so the timer and the service could not be read; the wrapper and the other scripts still work"
+else
+    timer_path="$(timeout 10 systemctl --user show -p FragmentPath --value "$unit.timer" 2>/dev/null || true)"
+    timer_enabled="$(timeout 10 systemctl --user is-enabled "$unit.timer" 2>&1 || true)"
+    timer_active="$(timeout 10 systemctl --user is-active "$unit.timer" 2>&1 || true)"
+    timer_next="$(timeout 10 systemctl --user show -p NextElapseUSecMonotonic --value "$unit.timer" 2>/dev/null || true)"
+    svc_result="$(timeout 10 systemctl --user show -p Result --value "$unit.service" 2>/dev/null || true)"
+    if [ -z "$timer_path" ]; then
+        case "$timer_enabled" in
+            *"Failed to connect"*|*"not been booted"*)
+                report warn systemd "no user systemd session is reachable from here, so nothing is scheduled; log in with a session, then run ./install.sh" ;;
+            *) report warn systemd "$unit.timer is not in the user manager, so no sync is scheduled; ./install.sh writes it, then: systemctl --user enable --now $unit.timer" ;;
+        esac
+    else
+        verdict=ok
+        [ "$timer_enabled" = enabled ] || verdict=warn
+        [ "$timer_active" = active ] || verdict=warn
+        [ "${svc_result:-unknown}" = success ] || verdict=warn
+        next_txt="no next elapse reported"
+        [ -n "$timer_next" ] && next_txt="next elapse in $timer_next"
+        report "$verdict" systemd "$unit.timer is ${timer_enabled:-unknown}/${timer_active:-unknown}; $next_txt; last $unit.service Result=${svc_result:-unknown}"
+        [ "$verdict" = warn ] && report warn systemd "that timer state means the schedule is not doing its job; try: systemctl --user enable --now $unit.timer, then: journalctl --user -u $unit.service"
+    fi
+fi
+
+# ---- 9. watcher and tray --------------------------------------------------
+# Over SSH there is normally no tray and that is not a fault, so its absence is
+# a warning that says so. Only the icon directory has to exist on disk.
+case "${WATCH,,}" in
+    1|true|yes|on|enabled)
+        if ! have systemctl; then
+            report warn watch "WATCH is on but systemctl is not on PATH, so the watcher unit could not be read"
+        else
+            watch_active="$(timeout 10 systemctl --user is-active "$unit-watch.service" 2>&1 || true)"
+            if [ "$watch_active" = active ]; then
+                report ok watch "$unit-watch.service is active"
+            else
+                report warn watch "WATCH is on in the config but $unit-watch.service is ${watch_active:-not reporting a state}; ./install.sh writes the unit, then: systemctl --user enable --now $unit-watch.service"
+            fi
+        fi
+        have inotifywait || report warn watch "inotifywait is missing (inotify-tools), so the watcher cannot start even once its unit is enabled"
+        ;;
+    *) report ok watch "WATCH is off, so no watcher unit is expected" ;;
+esac
+
+tray_pid="$(timeout 5 pgrep -f 'onedrive-tray' 2>/dev/null | head -1 || true)"
+icons_dir="$DATA_DIR/icons"
+if [ -n "$tray_pid" ] && [ -d "$icons_dir" ]; then
+    report ok tray "running (pid $tray_pid), icons in $icons_dir"
+elif [ -n "$tray_pid" ]; then
+    report warn tray "running (pid $tray_pid) but $icons_dir is missing; the tray draws the icons there at start, so check for a cairo or permission problem"
+elif [ -d "$icons_dir" ]; then
+    report warn tray "no tray process, but $icons_dir exists; that is normal over SSH or without a desktop session"
+else
+    report warn tray "no tray process and no $icons_dir; start it with onedrive-tray once a graphical session is there"
+fi
+
+# ---- 10. the log file -----------------------------------------------------
+# The wrapper stops before syncing when its log cannot be opened, so that is a
+# failure; a log over MAX_LOG_BYTES is only the next run's rotation.
+log_dir="$(dirname "$LOG")"; probe_dir="$log_dir"
+while [ ! -d "$probe_dir" ] && [ "$probe_dir" != / ] && [ "$probe_dir" != . ]; do
+    probe_dir="$(dirname "$probe_dir")"
+done
+if [ -e "$LOG" ]; then
+    if [ ! -w "$LOG" ]; then
+        report fail logfile "$LOG is not writable, so onedrive-sync stops before it syncs; fix its owner or point LOG somewhere else in $CONFIG_FILE"
+    else
+        log_size="$(stat -c%s -- "$LOG" 2>/dev/null || echo 0)"
+        case "$MAX_LOG_BYTES" in
+            ''|*[!0-9]*) report warn logfile "$LOG is writable, but MAX_LOG_BYTES='$MAX_LOG_BYTES' is not a number, so the rotation comparison is skipped" ;;
+            *) if [ "$log_size" -gt "$MAX_LOG_BYTES" ]; then
+                   report warn logfile "$LOG is writable at $log_size bytes, above MAX_LOG_BYTES=$MAX_LOG_BYTES; the next run rotates it to $LOG.1"
+               else
+                   report ok logfile "$LOG is writable, $log_size of $MAX_LOG_BYTES bytes"
+               fi ;;
+        esac
+    fi
+elif [ -w "$probe_dir" ]; then
+    report ok logfile "$LOG does not exist yet and $log_dir is writable; the first run creates it"
+else
+    report fail logfile "neither $LOG nor its directory exists, and $probe_dir is not writable, so onedrive-sync cannot open its log; create $log_dir or point LOG elsewhere in $CONFIG_FILE"
+fi
+
+# ---- 11. the remote -------------------------------------------------------
+# The one check that leaves the machine, so --offline skips it entirely. It is a
+# read-only listing under timeout, and it is safe while a sync is running.
+if [ "$OFFLINE" -eq 0 ]; then
+    if [ -z "$REMOTE" ]; then
+        report fail remote "REMOTE is not set in $CONFIG_FILE, so there is nothing to sync with"
+    elif ! have "$RCLONE"; then
+        report fail remote "rclone is not on PATH, so the remote cannot be probed"
+    else
+        probe_out="$(timeout 20 "$RCLONE" lsd "$REMOTE" --max-depth 1 2>&1)"
+        probe_rc=$?
+        probe_line="$(printf '%s\n' "$probe_out" | head -1 | cut -c1-160)"
+        if [ "$probe_rc" -eq 0 ]; then
+            report ok remote "answers (rclone lsd $REMOTE)"
+        elif [ "$probe_rc" -eq 124 ]; then
+            report fail remote "$REMOTE did not answer within 20s; check the connection and any proxy, then try: rclone lsd \"$REMOTE\""
+        else
+            case "$(classify_hint "$probe_out")" in
+                auth) report fail remote "refused the sign-in: $probe_line; re-authorise with the tray item, or: rclone config reconnect ${REMOTE%%:*}:." ;;
+                network) report fail remote "unreachable: $probe_line; that is a network problem, not a sign-in failure" ;;
+                *) report fail remote "rclone lsd failed (rc=$probe_rc): $probe_line" ;;
+            esac
+        fi
+    fi
+fi
+
+# ---- summary --------------------------------------------------------------
+if [ "$n_fail" -eq 0 ]; then
+    printf '%s: %d ok, %d warn, nothing failed\n' "$APP" "$n_ok" "$n_warn"
+    exit 0
+fi
+printf '%s: %d ok, %d warn, %d failed\n' "$APP" "$n_ok" "$n_warn" "$n_fail"
+exit 1
