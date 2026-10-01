@@ -68,17 +68,28 @@ jobs:
           echo "python3: $(python3 --version)"
           echo "rclone:  $(rclone version | head -1)"
 
-      - name: Dependency matrix
-        run: tests/dependency-matrix.sh --verbose
-
-      - name: Install flow
-        run: tests/install-flow.sh --verbose
-
-      - name: Default filters
-        run: tests/filters.sh --verbose
-
-      - name: Documentation
-        run: tests/docs.sh --verbose
-
-      - name: Tray menu
-        run: tests/tray.sh --verbose
+      # One run per suite, with the count checked against tests/floors.txt.
+      # A suite that skips everything still exits 0, so without this a runner
+      # missing broadwayd would report "0 passed, 12 skipped" and stay green.
+      - name: The suites, against their floors
+        run: |
+          set -uo pipefail
+          status=0
+          while read -r suite floor; do
+            case "$suite" in ''|'#'*) continue ;; esac
+            echo "::group::$suite"
+            out="$(tests/$suite --verbose 2>&1)"; rc=$?
+            echo "$out"
+            echo "::endgroup::"
+            passed="$(printf '%s\n' "$out" | tail -1 |
+                      grep -oE '[0-9]+ passed' | grep -oE '[0-9]+')"
+            if [ "$rc" -ne 0 ]; then
+              echo "::error::$suite exited $rc"
+              status=1
+            fi
+            if [ "${passed:-0}" -lt "$floor" ]; then
+              echo "::error::$suite reports ${passed:-0} passing, the floor is $floor"
+              status=1
+            fi
+          done < tests/floors.txt
+          exit "$status"

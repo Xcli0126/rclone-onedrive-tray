@@ -106,7 +106,7 @@ and `~$draft.docx` uploaded normally. The measurements are in
 
 ## Verified in CI
 
-Every push runs all four suites on a GitHub runner. That runner is a second
+Every push runs all five suites on a GitHub runner. That runner is a second
 environment rather than a repeat of the first:
 
 | Component | Version |
@@ -194,7 +194,7 @@ treat it as unknown rather than supported.
 
 ## If your machine is not in the table
 
-Run all four suites. They do not need your OneDrive account, they take under a
+Run all five suites. They do not need your OneDrive account, they take under a
 minute, and a failure prints the assertion that disagreed with the
 documentation. That output is the useful thing to send, along with the versions
 from the first table.

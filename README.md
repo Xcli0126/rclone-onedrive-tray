@@ -505,7 +505,7 @@ The first two point `HOME` and the XDG directories at a temporary tree, replace 
 and sudo with stubs, and use a probe unit name. `filters.sh` runs the real rclone over a fixture
 directory, `tray.sh` builds the real GTK menu on a private Broadway display and activates
 every handler against stub commands, and `docs.sh` only reads the repository. None of them can disturb a working install.
-`--verbose` shows every command and its output. CI runs all four on `ubuntu-latest`, which is a
+`--verbose` shows every command and its output. CI runs all five on `ubuntu-latest`, which is a
 different distribution, systemd and rclone from the machine they were written on.
 [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) records what they cover, the versions they have
 been run against, and what nobody has tried yet.

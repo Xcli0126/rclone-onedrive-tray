@@ -226,16 +226,20 @@ because the deletion is still pending.
 **Cause:** This is the guard working: it exists so a wiped local folder can't erase the cloud.
 But there is no automatic way out.
 
-**Fix:** If the deletion is intentional, rebuild the baseline so both sides agree:
+**Fix:** If the deletion is intentional, run that one sync with the cap bypassed:
 
 ```bash
-onedrive-sync --resync
+onedrive-sync --force
 ```
 
-If it is *not* intentional, restore the files locally and let the next run push them back.
+`--force` is the wrong-looking answer that is actually right: the cap is the only thing stopping
+the deletion you meant to make, and the flag removes it for that run while the next run puts the
+cap back. `--resync` is the answer that looks safer and is not: nothing is deleted by a resync, so
+every file you removed locally comes back down from the cloud.
 
-`onedrive-sync` greps its own log for this case and records a hint telling you exactly this, and
-the tray has a **Rebuild sync baseline (resync)…** menu entry for it.
+If the deletion is *not* intentional, restore the files locally and let the next run push them back.
+
+`onedrive-sync` greps its own log for this case and records a hint telling you exactly this.
 
 ### Conflict files appear: `foo.md.conflict1` / `.conflict2`
 
@@ -704,7 +708,9 @@ rclone check "onedrive:" "$HOME/OneDrive" --exclude "/.rag/**"
 ls -la ~/.cache/rclone/bisync/
 
 # is anything stuck holding a lock?
-fuser -v /tmp/onedrive-sync.lock
+# the wrapper's own mutex, then rclone's bisync locks, which carry a PID
+fuser -v "$HOME/.cache/rclone-onedrive-tray/sync.lck"
+ls -la ~/.cache/rclone/bisync/*.lck 2>/dev/null
 ```
 
 **When in doubt, `--resync` is safe.** It re-establishes the baseline from whatever is currently

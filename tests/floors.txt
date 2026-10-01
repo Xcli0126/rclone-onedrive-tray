@@ -1,0 +1,14 @@
+# The fewest assertions each suite must report as passing.
+#
+# A suite that skips everything still exits 0, so a runner without broadwayd or
+# the GTK typelibs would report "0 passed, 12 skipped" and leave CI green with
+# the tray suite gone. CI reads this file, runs each suite once, and fails when
+# the passed count comes in under the floor.
+#
+# Raise a number when the suite gains cases. Lowering one is a decision that
+# belongs in the commit message.
+dependency-matrix.sh 31
+install-flow.sh 165
+filters.sh 33
+docs.sh 32
+tray.sh 100

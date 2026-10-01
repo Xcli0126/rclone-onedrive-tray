@@ -115,6 +115,24 @@ for f in README.md docs/COMPATIBILITY.md CHANGELOG.md; do
     done <<<"$claims"
 done
 
+# The check above only matches a capitalised numeral at the start of a claim, so
+# "all four suites" sat in three pages long after the fourth suite arrived. This
+# second pass looks for that phrasing specifically, and deliberately not in
+# CHANGELOG.md, which is a historical record and quotes counts from the past.
+for f in README.md docs/COMPATIBILITY.md; do
+    [ -f "$f" ] || continue
+    while IFS= read -r stated; do
+        [ -n "$stated" ] || continue
+        word="$(printf '%s' "${stated:0:1}" | tr '[:lower:]' '[:upper:]')${stated:1:3}"
+        if [ "$word" = "$want" ]; then
+            ok "$f says \"$stated\", and there are $count"
+        else
+            bad "$f says \"$stated\", but there are $count test suites"
+        fi
+    done < <(grep -oiE 'all (two|three|four|five|six) (test )?(suites|scripts)' "$f" |
+        sed -E 's/^all //' | sort -u)
+done
+
 # The Chinese README says it with characters, which no English grep above catches.
 # 测试 is required: "两个脚本不会调用 sudo" is about the two installer scripts.
 zh="$(grep -oE '(两|二|三|四|五|六)个测试脚本' README.zh-CN.md 2>/dev/null | sort -u || true)"
