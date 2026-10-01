@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-10-01
+
 ### Added
 
 - A settings window in the tray, reached from `Settings…`. It writes the config file the wrapper
@@ -365,6 +367,7 @@ First public release.
 - `rclone bisync` is marked experimental upstream. See the "Known limitations"
   section of the README.
 
-[Unreleased]: https://github.com/Xcli0126/rclone-onedrive-tray/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/Xcli0126/rclone-onedrive-tray/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/Xcli0126/rclone-onedrive-tray/releases/tag/v1.2.0
 [1.1.0]: https://github.com/Xcli0126/rclone-onedrive-tray/releases/tag/v1.1.0
 [1.0.0]: https://github.com/Xcli0126/rclone-onedrive-tray/releases/tag/v1.0.0
