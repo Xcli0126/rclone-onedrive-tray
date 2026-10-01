@@ -85,7 +85,7 @@ except ImportError:
 
 APP_ID = "rclone-onedrive-tray"
 APP_NAME = "OneDrive"
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 PROJECT_URL = "https://github.com/Xcli0126/rclone-onedrive-tray"
 
 CONFIG_DIR = os.path.join(os.environ.get("XDG_CONFIG_HOME") or

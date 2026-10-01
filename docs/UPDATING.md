@@ -80,9 +80,15 @@ resync; it rebuilds the comparison state by reading both sides.
 
 ## What changed in each version
 
-`CHANGELOG.md` is the list. Four entries are worth reading before updating an
+`CHANGELOG.md` is the list. Five entries are worth reading before updating an
 install that has been running for a while:
 
+- 1.3.0 tightened the tray's offer to delete the local copy of a folder you
+  deselected. A two-component name reached `shutil.rmtree` under the old
+  checks, so a crafted or unusual listing could have removed a nested
+  directory. The rule is now one path component inside the sync root, and
+  the same release adds `onedrive-doctor`, which is the first thing to run
+  when something looks wrong.
 - 1.2.0 added the tray's settings window. It edits the config file in place: the
   lines it does not change, including your own comments, are left alone, and a
   key it needs but cannot find is appended at the end with a note saying where it

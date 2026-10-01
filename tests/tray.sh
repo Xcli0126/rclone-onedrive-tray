@@ -1945,7 +1945,7 @@ cli() {
         python3 "$TRAY" "$@"
 }
 run "--version answers with the version, with no display at all" \
-    0 "1.2.0" cli --version
+    0 "1.3.0" cli --version
 run "--help describes the flags, with no display at all" \
     0 "--settings" cli --help
 run "an unknown option is refused" 2 "unknown option" cli --nope

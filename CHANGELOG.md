@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-10-01
+
 ### Added
 
 - `onedrive-doctor`, a read-only diagnostic that answers "is this install healthy, and if not
@@ -396,7 +398,8 @@ First public release.
 - `rclone bisync` is marked experimental upstream. See the "Known limitations"
   section of the README.
 
-[Unreleased]: https://github.com/Xcli0126/rclone-onedrive-tray/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/Xcli0126/rclone-onedrive-tray/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/Xcli0126/rclone-onedrive-tray/releases/tag/v1.3.0
 [1.2.0]: https://github.com/Xcli0126/rclone-onedrive-tray/releases/tag/v1.2.0
 [1.1.0]: https://github.com/Xcli0126/rclone-onedrive-tray/releases/tag/v1.1.0
 [1.0.0]: https://github.com/Xcli0126/rclone-onedrive-tray/releases/tag/v1.0.0
