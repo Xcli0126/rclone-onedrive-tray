@@ -111,8 +111,12 @@ run "no pycairo: exits and names pycairo" 1 "pycairo" \
 run "no Notify typelib: still loads, notifications off" 0 "LOADED" \
     tray_notify_optional
 # The machine most likely to be asked its version is the one that cannot run the
-# tray, so this is the answer that has to survive a missing PyGObject.
-run "--version answers with the version while PyGObject is hidden" 0 "1.3.0" \
+# tray, so this is the answer that has to survive a missing PyGObject. The version
+# is read out of the script rather than written here: it is bumped on every
+# release, and a literal went stale the first time that happened.
+WANT_VERSION="$(sed -n 's/^VERSION = "\([0-9.]*\)"/\1/p' "$SRC_DIR/bin/onedrive-tray" | head -1)"
+[ -n "$WANT_VERSION" ] || bad "could not read VERSION out of bin/onedrive-tray"
+run "--version answers with the version while PyGObject is hidden" 0 "$WANT_VERSION" \
     env PYTHONPATH="$SHIM" HIDE_MODULE=gi \
     python3 "$SRC_DIR/bin/onedrive-tray" --version
 # GTK aborts with a core dump when there is no display, so the tray has to say
