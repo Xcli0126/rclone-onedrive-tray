@@ -274,7 +274,7 @@ per-machine UI state, are the usual things worth excluding. A starting point shi
 Mostly you don't. Click the tray icon when you want to:
 
 ```
-OneDrive 1.3.0
+OneDrive 1.4.0
 Last sync 14:32
 426.0 GiB of 1.0 TiB used (40%)
 ────────────────────────────────

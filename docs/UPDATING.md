@@ -80,9 +80,16 @@ resync; it rebuilds the comparison state by reading both sides.
 
 ## What changed in each version
 
-`CHANGELOG.md` is the list. Five entries are worth reading before updating an
+`CHANGELOG.md` is the list. Six entries are worth reading before updating an
 install that has been running for a while:
 
+- 1.4.0 finishes that job and fixes three ways a machine could stop syncing
+  quietly. Unticking a folder whose name starts with `#` never actually
+  excluded it, while the delete dialog promised the cloud was untouched, so
+  the deletion propagated; such a name is refused now. A timed pause did not
+  survive a reboot, and the menu went on promising a resume that no longer
+  existed. And a typo in `RETRIES`, `RETRY_DELAY` or `MAX_LOG_BYTES` stopped
+  syncing altogether while reporting failed attempts that never happened.
 - 1.3.0 tightened the tray's offer to delete the local copy of a folder you
   deselected. A two-component name reached `shutil.rmtree` under the old
   checks, so a crafted or unusual listing could have removed a nested

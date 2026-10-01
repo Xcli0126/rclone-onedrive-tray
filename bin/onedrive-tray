@@ -47,7 +47,7 @@ def _die(problem, fix):
 # cannot be imported at all, and USAGE is built from these.
 APP_ID = "rclone-onedrive-tray"
 APP_NAME = "OneDrive"
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 PROJECT_URL = "https://github.com/Xcli0126/rclone-onedrive-tray"
 APT = ("sudo apt install python3-gi python3-cairo gir1.2-gtk-3.0 "
        "gir1.2-ayatanaappindicator3-0.1 gir1.2-notify-0.7")
