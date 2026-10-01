@@ -1147,6 +1147,30 @@ class Tray:
             return False
         GLib.idle_add(report)
 
+    def _local_delete_path(self, name):
+        """The absolute path to delete for `name`, or None when it is refused.
+
+        One rule, in one place, because `name` arrives from a remote listing and
+        `shutil.rmtree` runs on whatever comes back: the name has to be exactly
+        one path component that is neither "." nor "..", the joined path has to
+        resolve to a real directory strictly inside the resolved sync root, and
+        that directory must not be the root itself. Anything else is refused, so
+        a listing cannot have the tray delete a parent, a sibling, a nested
+        path, or the target of a symlink that points out of the root.
+        """
+        if not name or name in (".", "..") or os.path.basename(name) != name:
+            return None
+        root = os.path.realpath(self.local)
+        target = os.path.realpath(os.path.join(self.local, name))
+        # The separator on the end matters: without it a sibling directory such
+        # as "/data/OneDrive-old" would pass for the root "/data/OneDrive".
+        prefix = root if root.endswith(os.sep) else root + os.sep
+        if target == root or not target.startswith(prefix):
+            return None
+        if not os.path.isdir(target):
+            return None
+        return target
+
     def _offer_local_delete(self, name):
         """Offer to reclaim the space a deselected folder occupies.
 
@@ -1154,12 +1178,8 @@ class Tray:
         which turns it into a trap: edits there go nowhere. It is a delete, so it
         only happens on an explicit click, and the remote is never involved.
         """
-        if not name or name.startswith("/") or ".." in name.split("/"):
-            return
-        target = os.path.join(self.local, name)
-        if not os.path.isdir(target):
-            return
-        if os.path.realpath(target) == os.path.realpath(self.local):
+        target = self._local_delete_path(name)
+        if target is None:
             return
 
         if not self._confirm(

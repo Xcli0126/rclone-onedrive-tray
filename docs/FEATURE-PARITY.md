@@ -35,7 +35,10 @@ complexity budget on.
 | Sync as soon as the network returns | Built into the client | yes: NetworkManager dispatcher hook, measured under a second |
 | Not syncing files the service rejects | A fixed internal list | yes: `~$*` for Office lock files, `.lock`, temp files, swap files, editor backups, `.DS_Store`, `Thumbs.db`, `desktop.ini`. Fixed after a test showed the shipped rules had been inert, see below |
 | Warning about names and paths the service will refuse | "Shorten path" and a rename action per item | yes: `onedrive-check`, run before a resync and from the tray. It reports refused names, names rclone will rename (the full OneDrive encoding, not just the illegal characters), and over-long paths, using a measured 380-character limit rather than the documented 400. A tree it could not fully read is reported as incomplete rather than clean |
-| Start at login | Built into the client | yes: an autostart entry |
+| Start at login | Built into the client | yes: an autostart entry, written and removed from the tray's settings window |
+| A settings window | An options dialog covering the account, folders, notifications, bandwidth and updates | yes: `Settings…` in the tray writes the same config file the wrapper reads, replacing only the lines it changes. Language and the panel icon apply without a restart |
+| Bandwidth limiting | Fixed rates per direction, or automatic | yes: `BW_LIMIT`, offered as Unlimited, 1M, 5M, 10M or 20M. A value rclone could not parse is refused with a warning in the sync log instead of failing every run. It caps the run as a whole rather than each direction |
+| Follows the system language | Yes, from the OS | partial: `UI_LANG` follows the locale, or picks English or Chinese by hand. Two languages so far |
 
 ## Worth having
 
@@ -48,7 +51,6 @@ already here.
 | Copy a share link | "Share a OneDrive link" in the context menu | no: `rclone link` would make this a few lines |
 | Version history | Right-click in Explorer, or the web | no |
 | Recycle bin and restore | The web, and Explorer | no |
-| Bandwidth limiting | Fixed rates per direction, or automatic | no: `--bwlimit` can be added to `BISYNC_ARGS` by hand, but nothing surfaces it |
 | Pause on a metered network | Automatic, and documented as PC behaviour under Group Policy | no |
 | Pause on battery saver | Automatic, and documented as PC behaviour under Group Policy | no |
 | Mass-delete notification naming the files | Yes | partial: the run reports the cap it hit, not the files involved |

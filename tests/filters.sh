@@ -173,4 +173,29 @@ rm -f "$CHK_TREE/CON.txt"
 run "a renamed name does not fail the check" 0 "will rename these" \
     env XDG_CONFIG_HOME="$WORK/checkcfg" "$CHECKER"
 
+# One name that is both renamed and over-long is two problems behind one path,
+# so the closing line has to give both numbers. While it printed only the group
+# headings' idea of a count, a reader could add the headings up and get 3 for a
+# tree holding 2 things to look at. 255 characters is the measured name limit;
+# the colon is what makes the same name a rename as well.
+CHK_LONG="$(printf 'q%.0s' $(seq 1 250)):both"
+: > "$CHK_TREE/$CHK_LONG"
+CHK_OUT="$(env XDG_CONFIG_HOME="$WORK/checkcfg" "$CHECKER" 2>&1)"; CHK_RC=$?
+check "a name that is renamed and over-long still exits 1" \
+    test "$CHK_RC" -eq 1
+check "a name that is renamed and over-long is counted as renamed" \
+    grep -qF "OneDrive will rename these (2)" <<<"$CHK_OUT"
+check "the same name is also counted as over-long" \
+    grep -qF "These paths are too long (1)" <<<"$CHK_OUT"
+check "the closing line gives paths and problems separately" \
+    grep -qxF -- "  2 paths to look at (3 problems). Limits and measurements: docs/TROUBLESHOOTING.md" <<<"$CHK_OUT"
+
+# One of each, because the same sentence has to read as English when both numbers
+# are 1. The renamed file from above is the one that stays.
+rm -f "$CHK_TREE/$CHK_LONG"
+CHK_OUT="$(env XDG_CONFIG_HOME="$WORK/checkcfg" "$CHECKER" 2>&1)"; CHK_RC=$?
+check "a single renamed name still exits 0" test "$CHK_RC" -eq 0
+check "the closing line says 1 path and 1 problem, not 1 paths" \
+    grep -qxF -- "  1 path to look at (1 problem). Limits and measurements: docs/TROUBLESHOOTING.md" <<<"$CHK_OUT"
+
 summary

@@ -3,6 +3,10 @@
 Everything below is a failure mode that was actually hit and diagnosed while building this.
 Symptoms first, then cause, then fix.
 
+Start with `onedrive-doctor`. It walks the install once and says which part is wrong: the
+remote, the sign-in, the timer, the lock, the log, or nothing at all. Most of the entries
+below are the long version of one line it prints.
+
 Signing in for the first time is not a failure mode, so it has its own page:
 [SIGNING-IN.md](SIGNING-IN.md).
 

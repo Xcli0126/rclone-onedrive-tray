@@ -296,8 +296,16 @@ if [ "$QUIET" -eq 0 ]; then
     if [ "$distinct" -eq 0 ] && [ "$walk_errors" -eq 0 ]; then
         printf '  nothing to fix. Names and paths are within what OneDrive accepts.\n'
     elif [ "$distinct" -gt 0 ]; then
-        printf '  %d to look at. Limits and measurements: docs/TROUBLESHOOTING.md\n' \
-            "$distinct"
+        # Both numbers, because they differ: one name can be renamed and too
+        # long at once, so it is one path but two problems. The group headings
+        # above count problems; this line says which is which instead of
+        # leaving the reader to add them up and get a number nothing matches.
+        problems=$((rejected + renamed + long_paths))
+        paths_word=paths; problems_word=problems
+        [ "$distinct" -eq 1 ] && paths_word=path
+        [ "$problems" -eq 1 ] && problems_word=problem
+        printf '  %d %s to look at (%d %s). Limits and measurements: docs/TROUBLESHOOTING.md\n' \
+            "$distinct" "$paths_word" "$problems" "$problems_word"
     fi
 fi
 

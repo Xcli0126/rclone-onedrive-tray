@@ -488,6 +488,89 @@ def scenario_folders():
     return data
 
 
+def scenario_folder_delete():
+    """A local delete is only ever offered for one ordinary component.
+
+    The fixture is the one the guard has to survive: a folder that may go, a
+    real directory outside LOCAL, a symlink inside LOCAL pointing at it, a
+    symlink inside LOCAL pointing back at LOCAL itself, and a nested path that
+    is reachable only through two components. The confirmation is faked as
+    accepted so that confirming is not what is under test, and every refused
+    name has to leave the tree outside LOCAL exactly as it was.
+    """
+    tray = build()
+    local = tray.local
+    outside = os.path.join(WORK, "outside")
+    ordinary = os.path.join(local, "ordinary")
+    nested = os.path.join(local, "a", "b")
+    link = os.path.join(local, "link-to-outside")
+    selflink = os.path.join(local, "self-link")
+
+    os.makedirs(os.path.join(ordinary, "sub"), exist_ok=True)
+    with open(os.path.join(ordinary, "sub", "inner.txt"), "w",
+              encoding="utf-8") as fh:
+        fh.write("inner\n")
+    os.makedirs(nested, exist_ok=True)
+    with open(os.path.join(nested, "kept.txt"), "w", encoding="utf-8") as fh:
+        fh.write("kept\n")
+    os.makedirs(outside, exist_ok=True)
+    with open(os.path.join(outside, "precious.txt"), "w",
+              encoding="utf-8") as fh:
+        fh.write("keep me\n")
+    for path, destination in ((link, outside), (selflink, local)):
+        if os.path.lexists(path):
+            os.remove(path)
+        os.symlink(destination, path)
+
+    asked = []
+
+    class FakeDialog:
+        def __init__(self, *a, **k):
+            asked.append(k.get("text", ""))
+
+        def format_secondary_text(self, text):
+            pass
+
+        def add_button(self, label, response):
+            pass
+
+        def run(self):
+            return MODULE.Gtk.ResponseType.OK
+
+        def destroy(self):
+            pass
+
+    real = MODULE.Gtk.MessageDialog
+    MODULE.Gtk.MessageDialog = FakeDialog
+    try:
+        del asked[:]
+        tray._offer_local_delete("ordinary")
+        data = {"ordinary_asked": len(asked),
+                "ordinary_title": asked[0] if asked else ""}
+        data["ordinary_gone"] = wait_for(
+            lambda: not os.path.exists(ordinary), 8.0)
+
+        data["asked"] = {}
+        for name in ("../outside", "a/b", "..", ".", "", "link-to-outside",
+                     "self-link"):
+            del asked[:]
+            tray._offer_local_delete(name)
+            pump(0.3)
+            data["asked"][name] = len(asked)
+
+        data["nested_intact"] = os.path.isfile(
+            os.path.join(nested, "kept.txt"))
+        data["outside_kept"] = os.path.isdir(outside)
+        data["outside_files"] = sorted(os.listdir(outside))
+        data["link_intact"] = (os.path.islink(link)
+                               and os.path.realpath(link) == os.path.realpath(outside))
+        data["local_listing"] = sorted(os.listdir(local))
+    finally:
+        MODULE.Gtk.MessageDialog = real
+    pump(0.3)
+    return data
+
+
 def scenario_openapp():
     """A quoted OPEN_APP_CMD is split the way a shell would split it."""
     tray = build()
@@ -1046,6 +1129,7 @@ SCENARIOS = {
     "pause-durations": scenario_pause_durations,
     "timer-state": scenario_timer_state,
     "folders": scenario_folders,
+    "folder-delete": scenario_folder_delete,
     "openapp": scenario_openapp,
     "lock-hold": scenario_lock_hold,
     "lock-second": scenario_lock_second,
@@ -1329,6 +1413,72 @@ if run_driver folders; then
         json_expr "d['reverted']"
     check "the menu and the file still agree after a failed write" \
         json_expr "d['excluded_after_failure'] == ['Music'] and d['check_states']['Docs'] and not d['check_states']['Music']"
+fi
+
+title "Deleting a deselected folder's local copy"
+# The guard decides on a name that came from a remote listing, and shutil.rmtree
+# runs on whatever it returns. Only one ordinary component inside LOCAL may ever
+# get that far: everything else, including a symlink that leaves LOCAL, has to be
+# refused before the confirmation is even put on screen.
+if run_driver folder-delete; then
+    check "the one ordinary folder is offered and then deleted" json_py '
+if d["ordinary_asked"] != 1 or not d["ordinary_gone"]:
+    print("asked=%r gone=%r title=%r"
+          % (d["ordinary_asked"], d["ordinary_gone"], d["ordinary_title"]))
+    raise SystemExit(1)
+'
+    check "../outside is refused" json_py '
+if d["asked"]["../outside"] != 0:
+    print("a dialog was put on screen for ../outside: %r"
+          % (d["asked"]["../outside"],))
+    raise SystemExit(1)
+'
+    check "a two-component name is refused and its directory survives" json_py '
+if d["asked"]["a/b"] != 0 or not d["nested_intact"]:
+    print("asked=%r nested_intact=%r"
+          % (d["asked"]["a/b"], d["nested_intact"]))
+    raise SystemExit(1)
+'
+    check ".. is refused" json_py '
+if d["asked"][".."] != 0:
+    print("a dialog was put on screen for ..: %r" % (d["asked"][".."],))
+    raise SystemExit(1)
+'
+    check ". is refused" json_py '
+if d["asked"]["."] != 0:
+    print("a dialog was put on screen for .: %r" % (d["asked"]["."],))
+    raise SystemExit(1)
+'
+    check "an empty name is refused" json_py '
+if d["asked"][""] != 0:
+    print("a dialog was put on screen for an empty name: %r"
+          % (d["asked"][""],))
+    raise SystemExit(1)
+'
+    check "a symlink that leaves LOCAL is refused" json_py '
+if d["asked"]["link-to-outside"] != 0:
+    print("a dialog was put on screen for the symlink: %r"
+          % (d["asked"]["link-to-outside"],))
+    raise SystemExit(1)
+'
+    check "a symlink that resolves back to LOCAL itself is refused" json_py '
+if d["asked"]["self-link"] != 0:
+    print("a dialog was put on screen for the self-link: %r"
+          % (d["asked"]["self-link"],))
+    raise SystemExit(1)
+'
+    check "the outside directory and its contents still exist" json_py '
+if not d["outside_kept"] or d["outside_files"] != ["precious.txt"]:
+    print("kept=%r files=%r" % (d["outside_kept"], d["outside_files"]))
+    raise SystemExit(1)
+'
+    check "the symlink still points at the outside directory" \
+        json_expr "d['link_intact']"
+    check "the refused names left the rest of LOCAL where it was" json_py '
+if d["local_listing"] != ["a", "link-to-outside", "self-link"]:
+    print("LOCAL holds %r" % (d["local_listing"],))
+    raise SystemExit(1)
+'
 fi
 
 title "A quoted OPEN_APP_CMD"
