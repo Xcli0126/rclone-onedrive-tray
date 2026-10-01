@@ -16,7 +16,6 @@ set -uo pipefail
 
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SHIM="$SRC_DIR/tests/lib/pyshim"
-LOADER="$SRC_DIR/tests/lib/load_module.py"
 # The shim is imported from PYTHONPATH, and Python would cache it as a
 # __pycache__ directory inside the source tree. Nothing here wants that cache.
 export PYTHONDONTWRITEBYTECODE=1
@@ -68,37 +67,79 @@ echo "dependency matrix, against what docs/DEPENDENCIES.md promises"
 
 # ---------------------------------------------------------------- the tray
 title "onedrive-tray"
-run "loads when every binding is present" 0 "LOADED" \
-    python3 "$LOADER" "$SRC_DIR/bin/onedrive-tray"
+# The guard is a function the script calls from main() now, so importing the
+# module no longer reaches it and proves nothing about these messages: the script
+# itself is what has to be run. That is also the point of the change, because a
+# module that imports with no bindings is what lets --version answer on a machine
+# that cannot run the tray.
+tray_bindings() {
+    env PYTHONPATH="$SRC_DIR/tests/lib" python3 - "$SRC_DIR/bin/onedrive-tray" <<'PY'
+import sys
+from load_module import load
+
+module = load(sys.argv[1])
+module.load_bindings()
+print("LOADED")
+PY
+}
+
+# The same import, with the binding for notifications hidden: the tray has to
+# carry on without it, and load_bindings() is where that decision is made.
+tray_notify_optional() {
+    env PYTHONPATH="$SHIM:$SRC_DIR/tests/lib" HIDE_TYPELIB=Notify \
+        python3 - "$SRC_DIR/bin/onedrive-tray" <<'PY'
+import sys
+from load_module import load, report
+
+module = load(sys.argv[1])
+module.load_bindings()
+print("LOADED")
+report([] if module.Notify is None else ["Notify is still %r" % (module.Notify,)])
+PY
+}
+
+run "loads when every binding is present" 0 "LOADED" tray_bindings
 run "no PyGObject: exits and names python3-gi" 1 "PyGObject" \
-    env PYTHONPATH="$SHIM" HIDE_MODULE=gi python3 "$LOADER" "$SRC_DIR/bin/onedrive-tray"
+    env PYTHONPATH="$SHIM" HIDE_MODULE=gi python3 "$SRC_DIR/bin/onedrive-tray"
 run "no Gtk typelib: exits and names GTK 3" 1 "GTK 3" \
-    env PYTHONPATH="$SHIM" HIDE_TYPELIB=Gtk python3 "$LOADER" "$SRC_DIR/bin/onedrive-tray"
+    env PYTHONPATH="$SHIM" HIDE_TYPELIB=Gtk python3 "$SRC_DIR/bin/onedrive-tray"
 run "no AppIndicator typelib: exits and names AppIndicator" 1 "AppIndicator" \
     env PYTHONPATH="$SHIM" HIDE_TYPELIB=AyatanaAppIndicator3,AppIndicator3 \
-    python3 "$LOADER" "$SRC_DIR/bin/onedrive-tray"
+    python3 "$SRC_DIR/bin/onedrive-tray"
 run "no pycairo: exits and names pycairo" 1 "pycairo" \
-    env PYTHONPATH="$SHIM" HIDE_MODULE=cairo python3 "$LOADER" "$SRC_DIR/bin/onedrive-tray"
+    env PYTHONPATH="$SHIM" HIDE_MODULE=cairo python3 "$SRC_DIR/bin/onedrive-tray"
 run "no Notify typelib: still loads, notifications off" 0 "LOADED" \
-    env PYTHONPATH="$SHIM" HIDE_TYPELIB=Notify python3 "$LOADER" "$SRC_DIR/bin/onedrive-tray"
+    tray_notify_optional
+# The machine most likely to be asked its version is the one that cannot run the
+# tray, so this is the answer that has to survive a missing PyGObject.
+run "--version answers with the version while PyGObject is hidden" 0 "1.3.0" \
+    env PYTHONPATH="$SHIM" HIDE_MODULE=gi \
+    python3 "$SRC_DIR/bin/onedrive-tray" --version
 # GTK aborts with a core dump when there is no display, so the tray has to say
-# what it is before it gets that far. Loading the module does not reach that
-# code, which is deliberate: the dependency checks above have to keep working on
-# a headless machine.
+# what it is before it gets that far.
 run "no display: exits and says it needs a session" 1 "graphical session" \
     env -u DISPLAY -u WAYLAND_DISPLAY python3 "$SRC_DIR/bin/onedrive-tray"
 # A display has to be set to get past the guard above, but the lock is taken
-# before GTK connects to it, so nothing here opens a window.
+# before GTK connects to it, so nothing here opens a window. XDG_RUNTIME_DIR is
+# unset on purpose: this is the fallback path, and the message names it.
 run "unusable TMPDIR: says so instead of already running" 1 "Could not create the lock file" \
-    env DISPLAY=:0 TMPDIR="$WORK/does-not-exist" \
+    env -u XDG_RUNTIME_DIR DISPLAY=:0 TMPDIR="$WORK/does-not-exist" \
+        python3 "$SRC_DIR/bin/onedrive-tray"
+# The lock is a fixed name, so it belongs somewhere only this user can write.
+# The runtime directory wins over TMPDIR; with it pointing at nothing, the tray
+# has to fail on the lock rather than quietly fall back to the shared one.
+run "the lock prefers XDG_RUNTIME_DIR over TMPDIR" 1 "Could not create the lock file" \
+    env DISPLAY=:0 XDG_RUNTIME_DIR="$WORK/no-runtime-dir" TMPDIR="$WORK" \
+        XDG_CONFIG_HOME="$WORK/no-config" \
         python3 "$SRC_DIR/bin/onedrive-tray"
 
-# The lock is a flock on the descriptor, but the file it lives in is visible in
-# $TMPDIR and used to survive the process. An empty config directory gets the
-# tray as far as the lock without ever touching GTK, so this needs no display.
+# The lock is a flock on the descriptor, but the file it lives in is visible and
+# used to survive the process. An empty config directory gets the tray as far as
+# the lock without ever touching GTK, so this needs no display.
 LOCK_DIR="$WORK/tray-lock"; mkdir -p "$LOCK_DIR"
 run "missing config: exits after taking the lock" 1 "Config not found" \
-    env DISPLAY=:0 TMPDIR="$LOCK_DIR" XDG_CONFIG_HOME="$WORK/no-config" \
+    env -u XDG_RUNTIME_DIR DISPLAY=:0 TMPDIR="$LOCK_DIR" \
+        XDG_CONFIG_HOME="$WORK/no-config" \
         python3 "$SRC_DIR/bin/onedrive-tray"
 check_absent "the lock file does not outlive the process" \
     "$LOCK_DIR/rclone-onedrive-tray.lock"

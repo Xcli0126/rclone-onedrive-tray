@@ -7,6 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `tests/floors.txt` records the fewest passing assertions each suite may report, and CI runs each
+  suite once and fails when the count comes in under its floor. A suite that skips everything still
+  exits 0, so without this a runner missing broadwayd could report "0 passed, 12 skipped" and leave
+  CI green with the tray suite gone.
+- `tests/lib/coverage.sh` measures which lines of the shipped scripts the suites execute, so the
+  figures quoted in the docs can be reproduced with one command. It is not part of CI.
+
+### Fixed
+
+- The tray's offer to delete the local copy of a deselected folder could delete cloud data. A folder
+  named `#notes` was written to `exclude-folders.txt` where both readers treat a leading `#` as a
+  comment, so the folder stayed in sync while the dialog promised "the folder stays in OneDrive",
+  and the deletion then propagated. Names the file cannot round-trip are now refused with the reason
+  shown, and the delete offer is refused whenever the exclusion did not take effect.
+- A timed pause did not survive a reboot: the resume timer was a transient unit, so it disappeared
+  with the session while both sync units stayed disabled and the menu went on promising a resume
+  time. The tray now checks at its next start whether that timer exists, re-arms it when it does
+  not, and ends the pause with a notification when it cannot.
+- The tray's single-instance lock lived in `$TMPDIR` with a fixed name and was opened for writing,
+  so any local user could point it at a file the tray can write and truncate it, or hold the lock
+  and keep every subsequent tray from starting. It lives in `$XDG_RUNTIME_DIR` now, opened with
+  `O_NOFOLLOW`, with the old path as a fallback.
+- `--version` and `--help` needed PyGObject, on the machine most likely to be asked for its version.
+  They are answered before the bindings are loaded; a bare run still names the missing package.
+- A typo in `RETRIES`, `RETRY_DELAY` or `MAX_LOG_BYTES` stopped syncing altogether: the retry loop
+  never ran, rclone was never invoked, and the wrapper reported "all 0 attempts failed". Those keys
+  are read the way `MAX_DELETE` is and refused with one line naming the key, the value and the file.
+- The retry loop retried failures it had already classified as permanent (an expired sign-in, a
+  missing access marker, a tripped delete cap, an rclone too old for a flag), spending two extra
+  minutes and two extra rclone invocations on each. It stops after the first attempt for those and
+  says why in the log.
+- `onedrive-check` missed three of the names it is documented to catch: `.lock` and `desktop.ini`
+  reduce to a stem that never matches, and `_vti_` was not in the list at all. It also called a name
+  of exactly 255 characters too long, which is the documented maximum.
+- `onedrive-doctor`'s remote probe reported an unreachable remote and a timeout as failures while
+  its own contract calls a retryable network problem a warning, so an offline laptop exited 1 as if
+  rclone were missing.
+- The delete cap counted the files under `LOCAL` with a full walk on every run, even though the
+  bisync listing the wrapper has already read is the number rclone compares against. The listing is
+  used when there is one and the walk only remains as the fallback.
+- Both writers of the autostart entry wrote `Exec=` with no quoting, so a home directory containing
+  a space produced an entry the desktop reads as two arguments and the tray never started at login.
+  The value is quoted and escaped the way the specification requires.
+- `uninstall.sh` left the settings window's interval drop-in behind, so a later install of the same
+  unit name silently inherited the old interval.
+- `setup.sh --yes` could not rewrite an existing config: the overwrite prompt returned its `n`
+  default without asking, so the only scripted way to re-run the wizard was to delete the file by
+  hand. It also advertised `(Y/n)` and then treated a capital `Y` as no.
+
+### Changed
+
+- Three pages still said "all four suites" for a tree with five, and the check written to catch that
+  matched only a capitalised numeral, so lowercase phrasing was invisible to it. It matches both now
+  and covers two pages rather than one, and it deliberately skips the changelog, which is a
+  historical record.
+- The lock recipe in the troubleshooting page named `/tmp/onedrive-sync.lock`, a path nothing has
+  created since the wrapper moved its lock beside its state.
+- The advice for a tripped delete cap was given three ways, and the version in the docs undid the
+  deletion the user meant to make: `--resync` brings every locally deleted file back down. The docs
+  now say `--force`, which is what the wrapper's own hint said all along.
+- The README no longer promises that a timed pause ends "whether or not the tray is still running",
+  which was only true within one session.
+
 ## [1.3.0] - 2026-10-01
 
 ### Added

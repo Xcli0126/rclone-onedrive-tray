@@ -138,7 +138,9 @@ WATCH_SETTLE="12"
 WATCH_EXCLUDE=""
 
 # ------------------------------------------------------------------ advanced
-# How many times to retry a failed sync before giving up for this round.
+# How many times to retry a failed sync before giving up for this round. A failure the wrapper
+# can tell is permanent (an expired sign-in, a missing access marker, a tripped delete cap, an
+# rclone too old for a flag) stops after the first attempt instead of burning the full count.
 RETRIES="3"
 # Seconds between retries.
 RETRY_DELAY="60"

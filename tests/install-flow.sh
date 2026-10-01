@@ -141,6 +141,64 @@ else
     sed 's/^/        /' "$WORK/quote-out.txt" | head -3
 fi
 
+# ---------------------------------------------------------------- re-running the wizard
+# ask() returns the prompt's default without reading anything under --yes or
+# when stdin is not a terminal. The overwrite prompt's default was "n", so
+# --yes could never re-run the wizard: it answered its own question with "no"
+# and then told the user to delete the config by hand. --yes is an instruction
+# not to ask, and the flags beside it are the answer.
+title "re-running setup.sh"
+RERUN_HOME="$WORK/rerun-home"
+rm -rf "$RERUN_HOME"; mkdir -p "$RERUN_HOME"
+RERUN_CFG="$RERUN_HOME/.config/rclone-onedrive-tray/config"
+run "the first --yes run writes a config" 0 "Wrote" \
+    env HOME="$RERUN_HOME" XDG_CONFIG_HOME="$RERUN_HOME/.config" \
+        XDG_CACHE_HOME="$RERUN_HOME/.cache" \
+    bash "$SRC_DIR/setup.sh" --remote "$REMOTE" --local "$RERUN_HOME/OneDrive" \
+        --filters none --interval 9 --unit-name zz-rerun-probe --yes --no-install
+run "a second --yes run overwrites it instead of aborting" 0 "Wrote" \
+    env HOME="$RERUN_HOME" XDG_CONFIG_HOME="$RERUN_HOME/.config" \
+        XDG_CACHE_HOME="$RERUN_HOME/.cache" \
+    bash "$SRC_DIR/setup.sh" --remote "$REMOTE" --local "$RERUN_HOME/OneDrive" \
+        --filters none --interval 11 --unit-name zz-rerun-probe --yes --no-install
+check "and the second run's value is the one on disk" \
+    grep -qxF 'INTERVAL_MIN="11"' "$RERUN_CFG"
+
+# The first-sync prompt is written "(Y/n)" and was tested with = "y", so the
+# capital the prompt advertises meant "no". script(1) gives the wizard a real
+# terminal, which is the only way ask() reads anything at all. The sync it would
+# start is a stub that records the call, and the config already exists so the
+# overwrite prompt is exercised beside it.
+PTY_HOME="$WORK/pty-home"
+rm -rf "$PTY_HOME"
+mkdir -p "$PTY_HOME/.local/bin" "$PTY_HOME/.config/rclone-onedrive-tray"
+cat > "$PTY_HOME/.local/bin/onedrive-sync" <<EOF
+#!/bin/bash
+printf '%s\n' "\$*" >> "$PTY_HOME/sync-calls"
+EOF
+chmod +x "$PTY_HOME/.local/bin/onedrive-sync"
+printf 'REMOTE="%s"\nLOCAL="%s"\nUNIT_NAME="zz-pty-probe"\n' \
+    "$REMOTE" "$PTY_HOME/OneDrive" > "$PTY_HOME/.config/rclone-onedrive-tray/config"
+
+pty_setup() {  # pty_setup <answers with \n> -- drive the wizard on a terminal
+    printf '%b' "$1" | timeout 60 script -qec \
+        "env HOME=$PTY_HOME XDG_CONFIG_HOME=$PTY_HOME/.config XDG_CACHE_HOME=$PTY_HOME/.cache bash $SRC_DIR/setup.sh --remote $REMOTE --local $PTY_HOME/OneDrive --filters none --unit-name zz-pty-probe --skip-folders x --no-install" \
+        /dev/null >"$WORK/pty-out.txt" 2>&1
+}
+
+rm -f "$PTY_HOME/sync-calls"
+pty_setup 'Y\nY\n'
+if grep -q -- '--resync' "$PTY_HOME/sync-calls" 2>/dev/null; then
+    ok "the capital Y the (Y/n) prompt advertises starts the first sync"
+else
+    bad "a capital Y at the (Y/n) prompt did not start the first sync"
+    grep -a 'Run it now' "$WORK/pty-out.txt" | head -2 | sed 's/^/        /'
+fi
+rm -f "$PTY_HOME/sync-calls"
+pty_setup 'Y\nn\n'
+check "an n at the same prompt leaves the first sync to the user" \
+    test ! -s "$PTY_HOME/sync-calls"
+
 # ---------------------------------------------------------------- the install
 title "install.sh via setup.sh"
 for s in onedrive-sync onedrive-tray onedrive-watch onedrive-check onedrive-check-access \
@@ -174,6 +232,37 @@ if command -v systemd-analyze >/dev/null 2>&1; then
 else
     skip "systemd-analyze is not installed; unit syntax unchecked"
 fi
+
+# ---------------------------------------------------------------- a prefix with a space
+# Exec= in a desktop entry is not a shell word list: the parser splits it on
+# spaces, so a prefix like "/home/x/My Files" used to produce a two-argument
+# command and the tray never started at login. A name that cannot be split is
+# quoted, which is what the Desktop Entry specification asks for, and a literal
+# % is written %% because a single one is a field code.
+title "an install prefix that needs quoting"
+SPACE_HOME="$WORK/space home"
+rm -rf "$SPACE_HOME"; mkdir -p "$SPACE_HOME"
+env HOME="$SPACE_HOME" XDG_CONFIG_HOME="$SPACE_HOME/.config" \
+    XDG_CACHE_HOME="$SPACE_HOME/.cache" XDG_DATA_HOME="$SPACE_HOME/.data" \
+    bash "$SRC_DIR/install.sh" --no-start >"$WORK/space-out.txt" 2>&1
+SPACE_DESKTOP="$SPACE_HOME/.config/autostart/rclone-onedrive-tray.desktop"
+check "the desktop entry is written for a prefix with a space" \
+    test -f "$SPACE_DESKTOP"
+if grep -qxF "Exec=\"$SPACE_HOME/.local/bin/onedrive-tray\"" "$SPACE_DESKTOP"; then
+    ok "Exec double quotes the tray path, so the space stays one argument"
+else
+    bad "Exec is not quoted for a path with a space: $(grep '^Exec=' "$SPACE_DESKTOP" 2>/dev/null)"
+fi
+
+PCT_HOME="$WORK/pct%home"
+rm -rf "$PCT_HOME"; mkdir -p "$PCT_HOME"
+env HOME="$PCT_HOME" XDG_CONFIG_HOME="$PCT_HOME/.config" \
+    XDG_CACHE_HOME="$PCT_HOME/.cache" XDG_DATA_HOME="$PCT_HOME/.data" \
+    bash "$SRC_DIR/install.sh" --no-start >"$WORK/pct-out.txt" 2>&1
+PCT_DESKTOP="$PCT_HOME/.config/autostart/rclone-onedrive-tray.desktop"
+PCT_EXPECT="${PCT_HOME//%/%%}/.local/bin/onedrive-tray"
+check "a percent in the path is escaped as a literal field code" \
+    grep -qxF "Exec=\"$PCT_EXPECT\"" "$PCT_DESKTOP"
 
 # ---------------------------------------------------------------- the wrapper
 title "onedrive-sync against a stub remote"
@@ -270,6 +359,20 @@ run "a resync reports the bad name and carries on" 0 "reserved name: CON" \
     "$HOME/.local/bin/onedrive-sync" --resync
 rm -f "$LOCAL_DIR/CON" "$LOCAL_DIR/Clash.md" "$LOCAL_DIR/clash.md"
 
+# Three names from the same documented list were invisible to the checker:
+# ".lock" left the stem empty, "desktop.ini" reduced to "desktop", and "_vti_"
+# was not in the list at all. The default filters happen to skip the first two,
+# so an untouched install was covered by luck rather than by the checker.
+# docs/FEATURE-PARITY.md lists all three beside CON.
+for reserved in .lock desktop.ini _vti_; do
+    : > "$LOCAL_DIR/$reserved"
+    run "'$reserved' is a reserved name" 1 "reserved name: $reserved" \
+        "$HOME/.local/bin/onedrive-check"
+    rm -f "$LOCAL_DIR/$reserved"
+done
+run "and the tree is clean again once those are gone" 0 "nothing to fix" \
+    "$HOME/.local/bin/onedrive-check"
+
 run "the help text is not truncated" 0 "were taken are in" \
     "$HOME/.local/bin/onedrive-check" --help
 
@@ -326,6 +429,29 @@ if grep -q -- '--max-delete 50' "$WORK/cap-args"; then
 else
     bad "expected --max-delete 50, recorded: $(head -1 "$WORK/cap-args" 2>/dev/null)"
 fi
+
+# The pair size used to be the larger of the listing and a full walk of LOCAL, so
+# a tree bigger than its listing inflated the denominator. The listing is the
+# count rclone itself compares the percentage against, so it decides, and the
+# walk only happens when there is no listing at all.
+BIGLOCAL="$CAP/listing-wins"
+mkdir -p "$BIGLOCAL"
+for i in $(seq 1 1000); do : > "$BIGLOCAL/b$i.txt"; done
+big_slug="$(printf '%s' "$BIGLOCAL" | sed -e 's|^/||' -e 's|[/: ]|_|g')"
+{ printf '# bisync listing v1 from test\n'
+  for i in $(seq 1 200); do
+      printf -- '-        1 - - 2026-01-01T00:00:00.000000000+0000 "b%s.txt"\n' "$i"
+  done
+} > "$CAP/cache/rclone/bisync/bigpair..$big_slug.path1.lst"
+cap_config "LOCAL=\"$BIGLOCAL\""
+: > "$WORK/cap-args"
+cap_env "$HOME/.local/bin/onedrive-sync" >/dev/null 2>&1 || true
+if grep -q -- '--max-delete 50' "$WORK/cap-args"; then
+    ok "a tree larger than its listing is measured by the listing, not walked"
+else
+    bad "the local walk won over the listing: $(grep -o -- '--max-delete [0-9]*' "$WORK/cap-args" | head -1)"
+fi
+cap_config
 
 # The cap aborting has to be reported as such, with a way forward.
 CAP_STDERR='2026/01/01 00:00:00 ERROR : Safety abort: too many deletes (>50%, 150 of 200) on Path1'
@@ -569,6 +695,40 @@ SHOW_ICON="1"'
 # The rows rewrote the CAP config; the sections below want the plain one back.
 cap_config
 
+# ---------------------------------------------------------------- numeric keys
+# A numeric key that is not a number used to fail in a way that hid itself:
+# `seq 1 three` printed nothing, so the loop body never ran, rclone was never
+# invoked, and the run ended on "all 0 attempts failed". MAX_LOG_BYTES="5MB" made
+# the rotation comparison error out and skip the rotation in silence, and
+# RETRY_DELAY="three" killed the sleep between two attempts. One line naming the
+# key, the value and the config file replaces all three.
+title "a numeric key that is not a number"
+NUMKEY_CFG="$CAP/cfg/rclone-onedrive-tray/config"
+for key in RETRIES RETRY_DELAY MAX_LOG_BYTES; do
+    cap_config "$key=\"three\""
+    : > "$WORK/cap-args"
+    out="$(cap_env "$HOME/.local/bin/onedrive-sync" 2>&1)"; rc=$?
+    if [ "$rc" -eq 1 ] && grep -qF "$key='three'" <<<"$out" &&
+            grep -qF "$NUMKEY_CFG" <<<"$out"; then
+        ok "$key=three is refused, naming the key, the value and the file"
+    else
+        bad "$key=three: exit $rc, $(head -1 <<<"$out")"
+    fi
+    check "and $key=three never reached rclone" test ! -s "$WORK/cap-args"
+done
+
+# Absent and empty both keep the documented default, which is what an install
+# that never had the key already gets.
+cap_config 'RETRIES=""
+RETRY_DELAY=""
+MAX_LOG_BYTES=""'
+: > "$WORK/cap-args"
+run "an empty RETRIES, RETRY_DELAY and MAX_LOG_BYTES keep the defaults" 0 "" \
+    cap_env "$HOME/.local/bin/onedrive-sync"
+check "and that run still reached rclone once" \
+    test "$(wc -l < "$WORK/cap-args")" -eq 1
+cap_config
+
 # ---------------------------------------------------------------- the exclude list
 # The tray's "Folders to sync" menu writes this file. A line holding only spaces
 # is not a folder, and it used to become --exclude "/   /**": rclone matched that
@@ -772,6 +932,60 @@ run "a refused token is an expired sign-in, and says what to click" 1 "[auth]" \
 run "and the message names the tray item and the command" 1 "config reconnect" \
     cap_env CAP_STDERR="$CAP_AUTH" CAP_RC=1 "$HOME/.local/bin/onedrive-sync"
 
+# ---------------------------------------------------------------- what is retried
+# The retry loop spent the remaining attempts on every failure class, including
+# the ones whose own hint says a rerun cannot help: two extra rclone invocations
+# two minutes apart for a refused sign-in, an access-check abort, a tripped
+# delete cap or an unknown rclone flag. The classifier that names the class is
+# already there, so the loop can ask it.
+title "retrying only the failures a rerun can clear"
+RETRY_MAXDELETE='2026/01/01 00:00:00 ERROR : Safety abort: too many deletes (>50%, 150 of 200) on Path1'
+RETRY_ACCESS='2026/01/01 00:00:00 ERROR : Access test failed: Path1 count 1, Path2 count 0 - RCLONE_TEST'
+RETRY_OLD='Error: unknown flag: --resilient'
+
+# retry_case <stderr> -- one run of three allowed attempts, DELAY one second.
+# RETRY_COUNT is how many times rclone was invoked, RETRY_OUT its stderr.
+retry_case() {
+    cap_config 'RETRIES="3"
+RETRY_DELAY="1"'
+    : > "$WORK/cap-args"; : > "$CAP/sync.log"
+    RETRY_OUT="$(cap_env CAP_STDERR="$1" CAP_RC=1 "$HOME/.local/bin/onedrive-sync" 2>&1)"
+    RETRY_RC=$?
+    RETRY_COUNT="$(wc -l < "$WORK/cap-args")"
+}
+
+retry_case "$CAP_EOF"
+if [ "$RETRY_RC" -eq 1 ] && [ "$RETRY_COUNT" -eq 3 ]; then
+    ok "a network failure is retried, all three attempts"
+else
+    bad "a network failure: exit $RETRY_RC after $RETRY_COUNT attempt(s)"
+fi
+
+retry_case "$CAP_AUTH"
+if [ "$RETRY_RC" -eq 1 ] && [ "$RETRY_COUNT" -eq 1 ]; then
+    ok "a refused sign-in is not retried"
+else
+    bad "a refused sign-in: exit $RETRY_RC after $RETRY_COUNT attempt(s)"
+fi
+check "and the log says why the remaining attempts were dropped" \
+    grep -qF "not retrying" "$CAP/sync.log"
+if grep -qF "all 1 attempts failed" <<<"$RETRY_OUT"; then
+    ok "and the closing line counts the attempts that were made, not the limit"
+else
+    bad "the closing line does not match the attempts made: $(tail -1 <<<"$RETRY_OUT")"
+fi
+
+retry_case "$RETRY_MAXDELETE"
+check "a tripped delete cap is not retried" test "$RETRY_COUNT" -eq 1
+
+retry_case "$RETRY_ACCESS"
+check "an access-check abort is not retried" test "$RETRY_COUNT" -eq 1
+
+retry_case "$RETRY_OLD"
+check "an unknown rclone flag is not retried" test "$RETRY_COUNT" -eq 1
+
+cap_config
+
 # ------------------------------------------------- the help text and the flags
 # Every script prints its own header comment as its help, extracted up to the
 # first line that is not a comment. Two of them used a fixed line range instead,
@@ -837,7 +1051,15 @@ cat > "$DOC_STUBS/rclone" <<'STUB'
 #!/bin/bash
 case "$1" in
     version) echo "rclone v1.75.1" ;;
-    lsd)     echo "          -1 2026-01-01 00:00:00        -1 Notes" ;;
+    lsd)
+        # DOC_LSD_RC and DOC_LSD_ERR drive the remote probe: 1 with a network
+        # error or an invalid_grant, 124 for the branch a real timeout reaches.
+        if [ "${DOC_LSD_RC:-0}" = 0 ]; then
+            echo "          -1 2026-01-01 00:00:00        -1 Notes"
+        else
+            [ -n "${DOC_LSD_ERR:-}" ] && printf '%s\n' "$DOC_LSD_ERR" >&2
+        fi
+        exit "${DOC_LSD_RC:-0}" ;;
     *)       : ;;
 esac
 exit 0
@@ -894,6 +1116,7 @@ doc_run() {
     env HOME="$d/home" XDG_CONFIG_HOME="$d/cfg" XDG_CACHE_HOME="$d/cache" \
         XDG_DATA_HOME="$d/data" TMPDIR="$d/tmp" PATH="$path" \
         DOC_TIMER_ENABLED="$DOC_TIMER_ENABLED" DOC_TIMER_ACTIVE="$DOC_TIMER_ACTIVE" \
+        DOC_LSD_RC="${DOC_LSD_RC:-0}" DOC_LSD_ERR="${DOC_LSD_ERR:-}" \
         "$DOCTOR_BIN" "$@"
 }
 
@@ -999,8 +1222,82 @@ else
     diff "$WORK/doctor-tree-before" "$WORK/doctor-tree-after" | head -5 | sed 's/^/        /'
 fi
 
+# ---------------------------------------------------------------- the remote probe
+# Every doctor case above passes --offline, so the one check that leaves the
+# machine had never run under test. Its verdicts follow the exit contract in the
+# script's header: a network problem and a timeout are warnings, because the next
+# run retries them, while a refused sign-in is a failure because it needs a
+# person. The stub rclone answers the probe here, driven by DOC_LSD_RC and
+# DOC_LSD_ERR.
+title "the doctor's remote probe"
+doc_fixture remote-probe
+DOC_LSD_RC=0; DOC_LSD_ERR=""
+DOCTOR_OUT="$(doc_run "$DOC_FX" 2>&1)"; DOCTOR_RC=$?
+if [ "$DOCTOR_RC" -eq 0 ] && grep -q '^ok   remote ' <<<"$DOCTOR_OUT"; then
+    ok "a remote that answers is ok, and the run exits 0"
+else
+    bad "a remote that answers: exit $DOCTOR_RC, $(grep ' remote ' <<<"$DOCTOR_OUT" | head -1)"
+fi
+
+DOC_LSD_RC=1
+DOC_LSD_ERR='2026/10/01 20:05:00 CRITICAL: failed to get root: Get "https://graph.microsoft.com/v1.0/drives/X/root": dial tcp 1.2.3.4:443: connect: network is unreachable'
+DOCTOR_OUT="$(doc_run "$DOC_FX" --quiet 2>&1)"; DOCTOR_RC=$?
+if [ "$DOCTOR_RC" -eq 0 ] && grep -q '^warn remote .*network problem' <<<"$DOCTOR_OUT"; then
+    ok "an unreachable remote is a warning, so an offline laptop still exits 0"
+else
+    bad "unreachable remote: exit $DOCTOR_RC, $(grep ' remote ' <<<"$DOCTOR_OUT" | head -1)"
+fi
+
+DOC_LSD_RC=124; DOC_LSD_ERR=""
+DOCTOR_OUT="$(doc_run "$DOC_FX" --quiet 2>&1)"; DOCTOR_RC=$?
+if [ "$DOCTOR_RC" -eq 0 ] && grep -q '^warn remote .*did not answer within 20s' <<<"$DOCTOR_OUT"; then
+    ok "a probe that times out is a warning too, not a failure"
+else
+    bad "timed-out probe: exit $DOCTOR_RC, $(grep ' remote ' <<<"$DOCTOR_OUT" | head -1)"
+fi
+
+DOC_LSD_RC=1
+DOC_LSD_ERR='2026/10/01 20:05:00 CRITICAL: Failed to refresh token: oauth2: cannot fetch token: 400 Bad Request: {"error":"invalid_grant","error_description":"AADSTS70043: The refresh token has expired"}'
+DOCTOR_OUT="$(doc_run "$DOC_FX" --quiet 2>&1)"; DOCTOR_RC=$?
+if [ "$DOCTOR_RC" -eq 1 ] && grep -q '^fail remote .*refused the sign-in' <<<"$DOCTOR_OUT"; then
+    ok "a refused sign-in is a failure, because no rerun fixes it"
+else
+    bad "refused sign-in: exit $DOCTOR_RC, $(grep ' remote ' <<<"$DOCTOR_OUT" | head -1)"
+fi
+
+# The wrapper refuses to run with a MAX_LOG_BYTES that is not a positive integer,
+# so the doctor has to say that rather than that the rotation is skipped.
+doc_fixture bad-max-log-bytes 'MAX_LOG_BYTES="5MB"'
+DOC_LSD_RC=0; DOC_LSD_ERR=""
+run "a MAX_LOG_BYTES the wrapper refuses is named as such" 0 \
+    "onedrive-sync refuses to run" \
+    doc_run "$DOC_FX" --quiet
+
+# A remote name that is not set and an rclone that is not on PATH both stay
+# failures: neither is something the next run changes.
+doc_fixture no-remote 'REMOTE=""'
+DOC_LSD_RC=0; DOC_LSD_ERR=""
+DOCTOR_OUT="$(doc_run "$DOC_FX" --quiet 2>&1)"; DOCTOR_RC=$?
+if [ "$DOCTOR_RC" -eq 1 ] && grep -q '^fail remote.*REMOTE is not set' <<<"$DOCTOR_OUT"; then
+    ok "an unset REMOTE fails the probe without contacting anything"
+else
+    bad "unset REMOTE: exit $DOCTOR_RC, $(grep ' remote ' <<<"$DOCTOR_OUT" | head -1)"
+fi
+
+doc_fixture no-rclone-probe
+DOC_PATH_OVERRIDE="$DOC_TOOLS"
+run "a missing rclone fails the probe as well as the version check" 1 \
+    "rclone is not on PATH, so the remote cannot be probed" \
+    doc_run "$DOC_FX" --quiet
+DOC_PATH_OVERRIDE=""
+
 # ---------------------------------------------------------------- uninstall
 title "uninstall.sh"
+# The tray stores the sync interval in <unit>.timer.d/interval.conf, and
+# install.sh deliberately keeps an existing drop-in. Left behind by uninstall it
+# makes the next install of the same unit name inherit the old interval.
+mkdir -p "$UNIT_DIR/$UNIT.timer.d"
+printf '[Timer]\nOnUnitInactiveSec=42min\n' > "$UNIT_DIR/$UNIT.timer.d/interval.conf"
 UNINSTALL_OUT="$(bash "$SRC_DIR/uninstall.sh" --prefix "$HOME/.local" 2>&1)"
 UNINSTALL_RC=$?
 if [ "$UNINSTALL_RC" -eq 0 ]; then
@@ -1015,6 +1312,8 @@ check_absent "removes the installed scripts" \
     "$HOME/.local/bin/onedrive-check-access" "$HOME/.local/bin/onedrive-doctor"
 check_absent "removes the units" \
     "$UNIT_DIR/$UNIT.service" "$UNIT_DIR/$UNIT.timer" "$UNIT_DIR/$UNIT-watch.service"
+check_absent "removes the timer interval drop-in with the units" \
+    "$UNIT_DIR/$UNIT.timer.d" "$UNIT_DIR/$UNIT.timer.d/interval.conf"
 check "keeps the configuration (documented; --purge removes it)" test -f "$CFG"
 # The hook in /etc belongs to the machine. This sandbox never had one, and the
 # unit name it would name is not the one being removed, so sudo must not run.
@@ -1029,5 +1328,18 @@ if [ -f "$HOOK" ]; then
 else
     skip "no NetworkManager hook on this machine to leave alone"
 fi
+
+# --purge is the documented way to take the configuration with it, so the config
+# directory has to go. The cache (the log, the wrapper lock, the tray's
+# paused-until stamp) is a separate directory and stays.
+PURGE_OUT="$(bash "$SRC_DIR/uninstall.sh" --prefix "$HOME/.local" --purge 2>&1)"
+PURGE_RC=$?
+if [ "$PURGE_RC" -eq 0 ]; then
+    ok "a --purge run finishes"
+else
+    bad "--purge exits $PURGE_RC"
+    printf '%s\n' "$PURGE_OUT" | head -3 | sed 's/^/        /'
+fi
+check_absent "--purge removes the configuration directory" "$CFG_DIR"
 
 summary

@@ -2,7 +2,8 @@
 #
 # Uninstaller for rclone-onedrive-tray.
 #
-#   ./uninstall.sh                 remove programs, units and autostart entry
+#   ./uninstall.sh                 remove programs, units (including the timer's
+#                                  interval drop-in) and the autostart entry
 #   ./uninstall.sh --prefix DIR    match a non-default install prefix
 #   ./uninstall.sh --purge         also remove the configuration and filters
 #
@@ -63,6 +64,10 @@ fi
 say "Removing files"
 rm -f "$UNIT_DIR/$UNIT_NAME.service" "$UNIT_DIR/$UNIT_NAME.timer"
 rm -f "$UNIT_DIR/$UNIT_NAME-watch.service"
+# The tray stores the sync interval in a drop-in beside the timer, and install.sh
+# keeps an existing one on purpose. Left behind, it silently hands its interval to
+# the next install of the same unit name, so it goes with the units it overrides.
+rm -rf "$UNIT_DIR/$UNIT_NAME.timer.d"
 rm -f "$AUTOSTART"
 rm -f "$BIN_DIR/onedrive-sync" "$BIN_DIR/onedrive-tray" "$BIN_DIR/onedrive-watch"
 rm -f "$BIN_DIR/onedrive-check"

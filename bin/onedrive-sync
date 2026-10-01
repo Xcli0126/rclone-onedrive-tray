@@ -53,6 +53,31 @@ CHECK_FILENAME="${CHECK_FILENAME:-}"
 MAX_LOG_BYTES="${MAX_LOG_BYTES:-5242880}"
 RETRIES="${RETRIES:-3}"
 RETRY_DELAY="${RETRY_DELAY:-60}"
+
+# A numeric key holding something else used to fail in three quiet ways: `seq 1
+# three` printed nothing, so the retry loop never ran and a run that never
+# invoked rclone ended on "all 0 attempts failed"; RETRY_DELAY="three" killed the
+# sleep between two attempts; MAX_LOG_BYTES="5MB" made the rotation comparison
+# error out and skip the rotation without a word. Each of the three now stops the
+# run with one line naming the key, the value and the file it came from, which is
+# the only way the reader can find the typo. MAX_DELETE keeps its own tolerant
+# handling below, because a count of 0 and a count larger than the folder are
+# both meaningful there.
+require_positive_int() {  # require_positive_int <KEY>
+    local key="$1" value="${!1}"
+    # Trimmed first, so a stray space is read rather than refused: what is judged
+    # is the shape of the number, not the whitespace around it.
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    case "$value" in
+        ''|*[!0-9]*) die "$key='${!1}' is not a positive integer in $CONFIG_FILE" ;;
+    esac
+    [ "$value" -gt 0 ] || die "$key='${!1}' is not a positive integer in $CONFIG_FILE"
+    printf -v "$key" '%s' "$value"
+}
+require_positive_int RETRIES
+require_positive_int RETRY_DELAY
+require_positive_int MAX_LOG_BYTES
 # An absent key keeps the documented defaults. A key that is present and empty
 # means exactly that, no extra flags: somebody who empties it is asking for the
 # command line rclone would have built on its own. The old :- expansion could not
@@ -166,9 +191,14 @@ pair_size() {
         printf '0'
         return
     fi
-    # The local tree is a second opinion, and the only one available before the
-    # first run has written a listing. The larger of the two is used, so a small
-    # local side cannot inflate the percentage into uselessness.
+    # The local tree is the only measure available before the first run has
+    # written a listing. Once one exists it is the count rclone itself compares
+    # the percentage against, so the tree is not walked: on a large folder that
+    # walk ran before every single sync, timer runs included.
+    if [ "$best" -gt 0 ]; then
+        printf '%s' "$best"
+        return
+    fi
     count="$(find "$LOCAL" -type f 2>/dev/null | wc -l)"
     count="${count//[^0-9]/}"
     [ -n "$count" ] && [ "$count" -gt "$best" ] && best="$count"
@@ -454,6 +484,13 @@ hint_for() {
 ERRS="$(mktemp)"
 trap 'rm -f "$ERRS"' EXIT
 
+# The classes whose hint asks for something only a person can do: an expired
+# sign-in, an access-check abort, a tripped delete cap and an rclone that does
+# not know the flags. Retrying those spends the remaining attempts and their
+# waits on a rerun that cannot succeed. Everything else (a network problem, a
+# held lock, an unclassified failure) is retried as before.
+PERMANENT_TAGS=" auth access maxdelete oldrclone "
+
 for i in $(seq 1 "$RETRIES"); do
     : >"$ERRS"
     "$RCLONE" "${ARGS[@]}" 2>"$ERRS"
@@ -470,11 +507,23 @@ for i in $(seq 1 "$RETRIES"); do
     fi
 
     hint=$(hint_for)
+    # hint_for prints "[tag] message", and it runs in a subshell, so the tag is
+    # read back out of the line it printed rather than left in a variable.
+    hint_tag="${hint#[}"
+    hint_tag="${hint_tag%%]*}"
     printf '%s: attempt %d/%d failed (rc=%d) %s\n' "$APP" "$i" "$RETRIES" "$rc" "$hint" >&2
     log_line "ERROR: attempt $i/$RETRIES failed (rc=$rc) $hint"
+
+    case "$PERMANENT_TAGS" in
+        *" $hint_tag "*)
+            log_line "NOTICE: not retrying: [$hint_tag] cannot be cleared by another attempt, so this round stops after $i"
+            break ;;
+    esac
 
     [ "$i" -lt "$RETRIES" ] && sleep "$RETRY_DELAY"
 done
 
-printf '%s: all %d attempts failed, giving up this round\n' "$APP" "$RETRIES" >&2
+# $i, not $RETRIES: a run that stopped at the first permanent failure made one
+# attempt, and saying it made three is the same kind of lie as "all 0 attempts".
+printf '%s: all %d attempts failed, giving up this round\n' "$APP" "$i" >&2
 exit 1

@@ -17,6 +17,7 @@ Requires: python3-gi, gir1.2-ayatanaappindicator3-0.1 (or appindicator3),
 """
 from __future__ import annotations
 
+import errno
 import fcntl
 import json
 import math
@@ -41,52 +42,80 @@ def _die(problem, fix):
     raise SystemExit(1)
 
 
-APT = ("sudo apt install python3-gi python3-cairo gir1.2-gtk-3.0 "
-       "gir1.2-ayatanaappindicator3-0.1 gir1.2-notify-0.7")
-
-try:
-    import gi
-except ImportError:
-    _die("PyGObject is not installed, so there are no GTK bindings at all.",
-         APT)
-
-try:
-    gi.require_version("Gtk", "3.0")
-    from gi.repository import GLib, Gtk  # noqa: E402
-except (ValueError, ImportError):
-    _die("The GTK 3 bindings are missing.", APT)
-
-try:
-    gi.require_version("AyatanaAppIndicator3", "0.1")
-    from gi.repository import AyatanaAppIndicator3 as AppIndicator
-except ValueError:
-    try:
-        gi.require_version("AppIndicator3", "0.1")
-        from gi.repository import AppIndicator3 as AppIndicator
-    except ValueError:
-        _die("No AppIndicator bindings were found, so no tray icon can be shown.",
-             APT + "\nOn GNOME you also need the AppIndicator shell extension "
-                   "(Ubuntu ships it as part of gnome-shell-extension-appindicator).")
-
-# Notifications are a nicety, not a requirement: degrade instead of refusing to
-# start, and say so once.
-try:
-    gi.require_version("Notify", "0.7")
-    from gi.repository import Notify  # noqa: E402
-except ValueError:
-    Notify = None
-
-# The icons are drawn at startup, so without cairo the tray would appear as an
-# empty space with no explanation.
-try:
-    import cairo
-except ImportError:
-    _die("pycairo is missing, so the status icons cannot be drawn.", APT)
-
+# What the program calls itself, as literals, before anything that can fail:
+# --version and --help have to be answered on a machine where the toolkit below
+# cannot be imported at all, and USAGE is built from these.
 APP_ID = "rclone-onedrive-tray"
 APP_NAME = "OneDrive"
 VERSION = "1.3.0"
 PROJECT_URL = "https://github.com/Xcli0126/rclone-onedrive-tray"
+APT = ("sudo apt install python3-gi python3-cairo gir1.2-gtk-3.0 "
+       "gir1.2-ayatanaappindicator3-0.1 gir1.2-notify-0.7")
+
+# Filled in by load_bindings(). Every one of them is None until it has run, which
+# is what lets this module be imported, and --version and --help be answered, on
+# a machine with no PyGObject.
+Gtk = GLib = AppIndicator = Notify = cairo = None
+# The settings window class, built by load_bindings() for the same reason: it
+# inherits from Gtk.Dialog, and a class statement runs when the module is
+# imported.
+SettingsDialog = None
+
+
+def load_bindings() -> None:
+    """Import the bindings the tray needs, or die saying which one is missing.
+
+    Called from main() before anything is built. These guards used to run at
+    import time, which made `--version` and `--help` fail with the apt hint on
+    exactly the machine most likely to be asked for them: one that has no
+    PyGObject, and so cannot run the tray at all.
+    """
+    global Gtk, GLib, AppIndicator, Notify, cairo, SettingsDialog
+    if Gtk is not None:
+        return
+
+    try:
+        import gi
+    except ImportError:
+        _die("PyGObject is not installed, so there are no GTK bindings at all.",
+             APT)
+
+    try:
+        gi.require_version("Gtk", "3.0")
+        from gi.repository import GLib, Gtk  # noqa: F811
+    except (ValueError, ImportError):
+        _die("The GTK 3 bindings are missing.", APT)
+
+    try:
+        gi.require_version("AyatanaAppIndicator3", "0.1")
+        from gi.repository import AyatanaAppIndicator3 as AppIndicator
+    except ValueError:
+        try:
+            gi.require_version("AppIndicator3", "0.1")
+            from gi.repository import AppIndicator3 as AppIndicator
+        except ValueError:
+            _die("No AppIndicator bindings were found, so no tray icon can be "
+                 "shown.",
+                 APT + "\nOn GNOME you also need the AppIndicator shell extension "
+                       "(Ubuntu ships it as part of gnome-shell-extension-appindicator).")
+
+    # Notifications are a nicety, not a requirement: degrade instead of refusing
+    # to start, and say so once.
+    try:
+        gi.require_version("Notify", "0.7")
+        from gi.repository import Notify  # noqa: F811
+    except ValueError:
+        Notify = None
+
+    # The icons are drawn at startup, so without cairo the tray would appear as
+    # an empty space with no explanation.
+    try:
+        import cairo
+    except ImportError:
+        _die("pycairo is missing, so the status icons cannot be drawn.", APT)
+
+    SettingsDialog = _settings_dialog_class()
+
 
 CONFIG_DIR = os.path.join(os.environ.get("XDG_CONFIG_HOME") or
                           os.path.expanduser("~/.config"), "rclone-onedrive-tray")
@@ -105,8 +134,15 @@ AUTOSTART = os.path.join(os.environ.get("XDG_CONFIG_HOME") or
 SYSTEMD_USER_DIR = os.path.join(os.environ.get("XDG_CONFIG_HOME") or
                                 os.path.expanduser("~/.config"),
                                 "systemd", "user")
-LOCK_FILE = os.path.join(os.environ.get("TMPDIR") or "/tmp",
-                         "rclone-onedrive-tray.lock")
+# Where the single-instance lock lives. $XDG_RUNTIME_DIR is 0700 and belongs to
+# this user, so a fixed name in it cannot be created first by anyone else, which
+# is the same reasoning that moved the sync lock out of /tmp
+# (docs/TROUBLESHOOTING.md). Without a runtime directory there is nothing
+# private to use, so the old path stays, and acquire_lock() refuses to follow a
+# symlink there.
+LOCK_DIR = (os.environ.get("XDG_RUNTIME_DIR") or os.environ.get("TMPDIR")
+            or "/tmp")
+LOCK_FILE = os.path.join(LOCK_DIR, "rclone-onedrive-tray.lock")
 
 # A timed pause creates a transient systemd timer under this name. It is what
 # brings the timer and the watcher back, so a pause survives the tray exiting.
@@ -298,12 +334,39 @@ def set_watch_unit(unit: str, enable: bool) -> str:
     return ""
 
 
-def autostart_contents() -> str:
+def desktop_exec(value: str) -> str:
+    """Quote one path for a Desktop Entry Exec= line.
+
+    A home directory can hold a space, and the line is read as a command line:
+    written bare, the path comes out as two arguments and the tray never starts
+    at login. The quoting is the Desktop Entry Specification's, applied in the
+    order it requires. First the quoting layer: backslash, double quote, backtick
+    and dollar are escaped, and a percent is doubled because it introduces a
+    field code. Then the general string-value rule, which doubles every backslash
+    the quoting layer left behind. That second pass is what the specification
+    means by needing four backslashes for one literal backslash, and it is not
+    optional here: GLib's key-file reader rejects a bare \\" as a value that
+    cannot be interpreted, so without it the whole file would fail to parse.
+    """
+    quoted = value.replace("\\", "\\\\")
+    for ch in ('"', "`", "$"):
+        quoted = quoted.replace(ch, "\\" + ch)
+    quoted = quoted.replace("%", "%%")
+    return '"' + quoted.replace("\\", "\\\\") + '"'
+
+
+def autostart_contents(script: str = "") -> str:
+    """The desktop entry that starts the tray at login.
+
+    `script` is the program to run; the tray itself when it is not given, and a
+    parameter so that a test can hand it a path a home directory could really
+    have.
+    """
     return ("[Desktop Entry]\n"
             "Type=Application\n"
             f"Name={APP_NAME} status icon\n"
             "Comment=rclone bisync tray icon\n"
-            f"Exec={os.path.realpath(__file__)}\n"
+            f"Exec={desktop_exec(script or os.path.realpath(__file__))}\n"
             "Terminal=false\n"
             "X-GNOME-Autostart-enabled=true\n")
 
@@ -404,6 +467,8 @@ STRINGS = {
         "Paused until {when}": "已暂停，{when} 自动恢复",
         "Paused for {n}": "已暂停 {n}",
         "Could not schedule the resume": "无法安排自动恢复",
+        "Could not restore the resume timer, so automatic sync is on again":
+            "无法恢复暂停的定时器，已重新开启自动同步",
         "Could not change the login setting": "无法修改开机自启动设置",
         "Could not start {app}": "无法启动 {app}",
         "Folders to sync": "同步的文件夹",
@@ -421,6 +486,14 @@ STRINGS = {
         "Local copy deleted": "本地副本已删除",
         "Could not delete the local copy": "无法删除本地副本",
         "Could not save the folder list": "无法保存文件夹清单",
+        "Cannot leave {name} out of the sync: the folder name is empty":
+            "无法将「{name}」排除：文件夹名是空的",
+        "Cannot leave {name} out of the sync: the folder name has a space at one end":
+            "无法将「{name}」排除：文件夹名的一端有空格",
+        "Cannot leave {name} out of the sync: a name starting with # is read as a comment":
+            "无法将「{name}」排除：以 # 开头的名字会被当成注释",
+        "Cannot leave {name} out of the sync: the folder name has a line break in it":
+            "无法将「{name}」排除：文件夹名里有换行",
         "Re-authorise OneDrive…": "重新登录 OneDrive…",
         "Sign in again?": "要重新登录吗？",
         "This opens a terminal and your browser so you can sign in to "
@@ -444,7 +517,7 @@ STRINGS = {
         "{used} of {total} used ({pct}%)": "已用 {used} / {total}（{pct}%）",
         # Failure hints, keyed by the [tag] the sync wrapper writes to the log.
         "lock": "有同步锁未释放；若反复出现请删除 ~/.cache/rclone/bisync/*.lck",
-        "maxdelete": "待删除文件超过 MAX_DELETE；若确属正常的大批量删除，请运行 onedrive-sync --resync",
+        "maxdelete": "待删除文件超过 MAX_DELETE；若确属正常的大批量删除，请运行 onedrive-sync --force",
         "network": "网络或 DNS 暂时不可用，稍后自动重试",
         "resync": "同步基线失效，请运行 onedrive-sync --resync",
         "oldrclone": "rclone 版本过旧，不认识 BISYNC_ARGS 里的参数；--resilient/--recover 需要 1.65 或更新版本",
@@ -830,7 +903,19 @@ def read_excluded_folders(path: str):
         return []
 
 
-def write_excluded_folders(path: str, names) -> bool:
+def write_excluded_folders(path: str, names):
+    """Write the list of folders not kept here. Returns (ok, reason).
+
+    A name the readers would not give back unchanged is refused rather than
+    written: the menu says "not synced" from this file and onedrive-sync reads it
+    too, so a name that does not round-trip would leave the two disagreeing about
+    what is being synced. The reason is a t() key either way, because whoever
+    shows it has to be able to translate it.
+    """
+    for name in sorted(names):
+        problem = exclusion_problem(name)
+        if problem:
+            return False, problem
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as fh:
@@ -838,9 +923,31 @@ def write_excluded_folders(path: str, names) -> bool:
             fh.write("# Edited by the tray. The cloud keeps them either way.\n")
             for name in sorted(names):
                 fh.write(f"{name}\n")
-        return True
+        return True, ""
     except OSError:
-        return False
+        return False, "Could not save the folder list"
+
+
+def exclusion_problem(name: str) -> str:
+    """Why `name` cannot go in exclude-folders.txt, or "" when it can.
+
+    Both readers of that file drop a line starting with # and both trim the line
+    before using it, so a name only means the same thing to the menu and to
+    onedrive-sync when it survives that unchanged. The sentence returned here is
+    also the t() key of the message that says so, folder name and all.
+    """
+    if not name or not name.strip():
+        return "Cannot leave {name} out of the sync: the folder name is empty"
+    if name != name.strip():
+        return ("Cannot leave {name} out of the sync: the folder name has a space "
+                "at one end")
+    if name.startswith("#"):
+        return ("Cannot leave {name} out of the sync: a name starting with # is "
+                "read as a comment")
+    if "\n" in name or "\r" in name:
+        return ("Cannot leave {name} out of the sync: the folder name has a line "
+                "break in it")
+    return ""
 
 
 # ---------------------------------------------------------------- quota
@@ -975,6 +1082,10 @@ class Tray:
 
         GLib.timeout_add_seconds(3, self.poll)
         self.poll()
+        # A pause is only as long-lived as the transient timer that ends it, so
+        # what the stamp claims is checked against systemd before the menu is
+        # allowed to promise a resume.
+        self.recover_pause()
         GLib.timeout_add_seconds(1800, self.refresh_quota)
         self.refresh_quota()
         GLib.timeout_add_seconds(1800, self.refresh_folders)
@@ -1030,31 +1141,56 @@ class Tray:
         self.item_folders.set_submenu(sub)
         self.building_folders = False
 
+    def _revert_folder_tick(self, item):
+        """Put a check item back where it was, without re-entering the handler."""
+        self.building_folders = True
+        try:
+            item.set_active(not item.get_active())
+        finally:
+            self.building_folders = False
+
+    def _exclusion_in_effect(self, name) -> bool:
+        """Whether exclude-folders.txt really holds `name` right now.
+
+        Asked of the same reader the menu is built from, so this is the file's
+        own answer and not what the tray meant to write.
+        """
+        return name in read_excluded_folders(self.exclude_file)
+
     def on_toggle_folder(self, item, name):
         # set_active() during a rebuild also emits "toggled"; ignore those.
         if self.building_folders:
             return
-        excluded = set(read_excluded_folders(self.exclude_file))
+        # A name the file cannot hold is dropped from what was read, so one
+        # hand-written line no reader gives back cannot stop every later change
+        # from being written.
+        excluded = {found for found in read_excluded_folders(self.exclude_file)
+                    if not exclusion_problem(found)}
         if item.get_active():
             excluded.discard(name)
         else:
             excluded.add(name)
-        if not write_excluded_folders(self.exclude_file, excluded):
-            self.notify(APP_NAME, self.t("Could not save the folder list"))
+        written, problem = write_excluded_folders(self.exclude_file, excluded)
+        if not written:
             # Put the tick back. Leaving it where the click put it would show a
             # change that was never written, so the menu and the file would
-            # disagree about which folders are synced.
-            self.building_folders = True
-            try:
-                item.set_active(not item.get_active())
-            finally:
-                self.building_folders = False
+            # disagree about which folders are synced. The message names the
+            # folder when the name is the reason, because that is the part the
+            # user can do something about.
+            self._revert_folder_tick(item)
+            self.notify(APP_NAME, self.t(problem, name=name))
             return
         if item.get_active():
             self.notify(APP_NAME, self.t("{name} will sync", name=name))
-        else:
+        elif self._exclusion_in_effect(name):
             self.notify(APP_NAME, self.t("{name} will not sync", name=name))
             self._offer_local_delete(name)
+        else:
+            # The write said it worked and the reader does not see the name, so
+            # nothing may be offered on the strength of it.
+            self._revert_folder_tick(item)
+            self.notify(APP_NAME, self.t("Could not save the folder list"))
+            return
 
         # A filter change needs no --resync, so the next run can simply be asked
         # to happen. systemctl runs in a worker: it can take seconds to answer.
@@ -1177,9 +1313,17 @@ class Tray:
         bisync leaves the local copy alone when a folder stops being synced,
         which turns it into a trap: edits there go nowhere. It is a delete, so it
         only happens on an explicit click, and the remote is never involved.
+
+        The offer stands on the exclusion being real, which is the file's answer
+        and not the tray's intention: the dialog promises the folder stays in
+        OneDrive, and that promise holds only while onedrive-sync is really
+        ignoring the folder. Without the exclusion, deleting the local copy is an
+        ordinary local delete, and the next bisync propagates it to the cloud.
         """
         target = self._local_delete_path(name)
         if target is None:
+            return
+        if not self._exclusion_in_effect(name):
             return
 
         if not self._confirm(
@@ -1572,6 +1716,76 @@ class Tray:
         self._refresh_checks()
         return False
 
+    def _pause_due(self):
+        """The time the pause stamp says the resume is due, or None."""
+        try:
+            with open(PAUSE_STAMP, encoding="utf-8") as fh:
+                return int(fh.read().strip())
+        except (OSError, ValueError):
+            return None
+
+    def recover_pause(self):
+        """Make the pause stamp and the resume timer agree, at startup.
+
+        The timer that ends a pause is a transient systemd unit, so it lives and
+        dies with the running user manager: a reboot or a logout during the pause
+        leaves both units disabled and no timer behind, while the stamp in
+        ~/.cache still holds the old due time. Reading only the stamp made the
+        menu promise a resume that could never come, so the stamp is checked
+        against systemd itself, off the main loop because systemctl can take
+        seconds to answer.
+        """
+        threading.Thread(target=self._recover_pause_worker, daemon=True).start()
+
+    def _recover_pause_worker(self):
+        due = self._pause_due()
+        if due is None:
+            return
+        if due <= time.time():
+            # The pause is over and the stamp is all that is left of it. The
+            # units are the next poll's business, and its answer is the truth.
+            GLib.idle_add(self._pause_over)
+            return
+        _, out, _ = self._sc("is-active", f"{PAUSE_UNIT}.timer")
+        answer = out.splitlines()[0].strip() if out.strip() else ""
+        if answer == "active":
+            return
+        _, _, err = sh(
+            f"systemd-run --user --on-active={max(1, int(due - time.time()))}s "
+            f"--unit={PAUSE_UNIT} systemctl --user enable --now "
+            f"{shlex.quote(self.timer)} {shlex.quote(self.watch)}",
+            timeout=30)
+        if err and "Running timer" not in err:
+            # The pause cannot be kept, so it ends here instead of being left as
+            # a promise nothing will keep: the units go back on now, and the
+            # notification says so rather than letting the menu claim a resume.
+            self._set_units("enable", "--now")
+            GLib.idle_add(self._pause_lost)
+        else:
+            GLib.idle_add(self._pause_rearmed)
+
+    def _pause_over(self):
+        """The stamp has expired: drop it, so nothing claims a pause."""
+        self._clear_stamp()
+        self.auto_seen = None
+        self._refresh_checks()
+        return False
+
+    def _pause_rearmed(self):
+        """The resume timer is back, so the stamp is true again."""
+        self.auto_seen = "paused"
+        self._refresh_checks()
+        return False
+
+    def _pause_lost(self):
+        """The resume could not be restored: end the pause, and say so."""
+        self._clear_stamp()
+        self.auto_seen = None
+        self.notify(APP_NAME, self.t(
+            "Could not restore the resume timer, so automatic sync is on again"))
+        self._refresh_checks()
+        return False
+
     def on_toggle_boot(self, item):
         """The menu checkbox and the settings dialog write the same file."""
         err = write_autostart(item.get_active())
@@ -1840,272 +2054,280 @@ def _as_int(value, fallback: int) -> int:
         return fallback
 
 
-class SettingsDialog(Gtk.Dialog):
-    """The settings window.
+def _settings_dialog_class():
+    """Build the settings window class, which has to inherit from Gtk.Dialog.
 
-    Widget values are read on the main loop; the config write, the systemctl
-    calls and the access-check script all run on a worker thread and come back
-    through GLib.idle_add(). Any of them can take seconds, and a frozen window is
-    worse than a slow one. Failures are collected and shown in the window: a
-    systemd or autostart action that failed silently would leave the window
-    claiming a change that never happened.
-
-    `tray` may be None. That is the --settings case where another process owns
-    the icon: the config, systemd and autostart changes still go through, and
-    the two live ones (language, icon) have nothing to apply to here.
+    A class statement runs when the module is imported, and the bindings are
+    imported on demand, so the class is built here and handed to the module by
+    load_bindings(). Nothing else about it is dynamic.
     """
+    class SettingsDialog(Gtk.Dialog):
+        """The settings window.
 
-    def __init__(self, tray=None, cfg=None, translate=None):
-        source = cfg if cfg is not None else (
-            tray.cfg if tray is not None else load_config())
-        if translate is None:
-            translate = (tray.t if tray is not None
-                         else make_translator(resolve_lang(source)))
-        super().__init__(title=translate("Settings"), parent=None, flags=0)
-        self.tray = tray
-        self.cfg = dict(source)
-        self.t = translate
-        self.original = {key: str(self.cfg.get(key, default))
-                         for key, default in SETTINGS_DEFAULTS.items()}
-        self.original_boot = os.path.exists(AUTOSTART)
-        self.failures: list = []
-        self.done = False
-        self.busy = False
-        self.markers_busy = False
-        self.set_modal(True)
-        self._build()
+        Widget values are read on the main loop; the config write, the systemctl
+        calls and the access-check script all run on a worker thread and come back
+        through GLib.idle_add(). Any of them can take seconds, and a frozen window is
+        worse than a slow one. Failures are collected and shown in the window: a
+        systemd or autostart action that failed silently would leave the window
+        claiming a change that never happened.
 
-    # -------------------------------------------------- widgets
-    def _build(self):
-        box = self.get_content_area()
-        box.set_spacing(10)
-        box.set_border_width(12)
-        self._build_options(box)
-        self._build_labels(box)
-        self._build_buttons()
-        self.notice_check_access()
+        `tray` may be None. That is the --settings case where another process owns
+        the icon: the config, systemd and autostart changes still go through, and
+        the two live ones (language, icon) have nothing to apply to here.
+        """
 
-    def _build_options(self, box):
-        """The grid of controls, one row each, in the order they are shown."""
-        grid = Gtk.Grid()
-        grid.set_row_spacing(8)
-        grid.set_column_spacing(14)
-        box.pack_start(grid, False, False, 0)
+        def __init__(self, tray=None, cfg=None, translate=None):
+            source = cfg if cfg is not None else (
+                tray.cfg if tray is not None else load_config())
+            if translate is None:
+                translate = (tray.t if tray is not None
+                             else make_translator(resolve_lang(source)))
+            super().__init__(title=translate("Settings"), parent=None, flags=0)
+            self.tray = tray
+            self.cfg = dict(source)
+            self.t = translate
+            self.original = {key: str(self.cfg.get(key, default))
+                             for key, default in SETTINGS_DEFAULTS.items()}
+            self.original_boot = os.path.exists(AUTOSTART)
+            self.failures: list = []
+            self.done = False
+            self.busy = False
+            self.markers_busy = False
+            self.set_modal(True)
+            self._build()
 
-        def row(index, text, widget):
-            label = Gtk.Label(label=text)
-            label.set_xalign(0)
-            grid.attach(label, 0, index, 1, 1)
-            if widget is not None:
-                grid.attach(widget, 1, index, 1, 1)
+        # -------------------------------------------------- widgets
+        def _build(self):
+            box = self.get_content_area()
+            box.set_spacing(10)
+            box.set_border_width(12)
+            self._build_options(box)
+            self._build_labels(box)
+            self._build_buttons()
+            self.notice_check_access()
 
-        self.combo_lang = Gtk.ComboBoxText()
-        for value, text in (("", self.t("Follow the system")),
-                            ("en", "English"), ("zh", "中文")):
-            self.combo_lang.append(value, text)
-        self.combo_lang.set_active_id(self.original["UI_LANG"] or "")
-        row(0, self.t("Language"), self.combo_lang)
+        def _build_options(self, box):
+            """The grid of controls, one row each, in the order they are shown."""
+            grid = Gtk.Grid()
+            grid.set_row_spacing(8)
+            grid.set_column_spacing(14)
+            box.pack_start(grid, False, False, 0)
 
-        self.check_show = Gtk.CheckButton(label=self.t("Show the icon in the panel"))
-        self.check_show.set_active(truthy(self.original["SHOW_ICON"]))
-        grid.attach(self.check_show, 0, 1, 2, 1)
+            def row(index, text, widget):
+                label = Gtk.Label(label=text)
+                label.set_xalign(0)
+                grid.attach(label, 0, index, 1, 1)
+                if widget is not None:
+                    grid.attach(widget, 1, index, 1, 1)
 
-        self.check_boot = Gtk.CheckButton(label=self.t("Start tray at login"))
-        self.check_boot.set_active(self.original_boot)
-        grid.attach(self.check_boot, 0, 2, 2, 1)
+            self.combo_lang = Gtk.ComboBoxText()
+            for value, text in (("", self.t("Follow the system")),
+                                ("en", "English"), ("zh", "中文")):
+                self.combo_lang.append(value, text)
+            self.combo_lang.set_active_id(self.original["UI_LANG"] or "")
+            row(0, self.t("Language"), self.combo_lang)
 
-        self.spin_interval = Gtk.SpinButton.new_with_range(1, 1440, 1)
-        self.spin_interval.set_value(_as_int(self.original["INTERVAL_MIN"], 5))
-        row(3, self.t("Sync interval (minutes)"), self.spin_interval)
+            self.check_show = Gtk.CheckButton(label=self.t("Show the icon in the panel"))
+            self.check_show.set_active(truthy(self.original["SHOW_ICON"]))
+            grid.attach(self.check_show, 0, 1, 2, 1)
 
-        self.check_watch = Gtk.CheckButton(label=self.t("Realtime sync"))
-        self.check_watch.set_active(truthy(self.original["WATCH"]))
-        grid.attach(self.check_watch, 0, 4, 2, 1)
+            self.check_boot = Gtk.CheckButton(label=self.t("Start tray at login"))
+            self.check_boot.set_active(self.original_boot)
+            grid.attach(self.check_boot, 0, 2, 2, 1)
 
-        self.check_notify = Gtk.CheckButton(
-            label=self.t("Tell me when a sync succeeds"))
-        self.check_notify.set_active(truthy(self.original["NOTIFY_ON_SUCCESS"]))
-        grid.attach(self.check_notify, 0, 5, 2, 1)
+            self.spin_interval = Gtk.SpinButton.new_with_range(1, 1440, 1)
+            self.spin_interval.set_value(_as_int(self.original["INTERVAL_MIN"], 5))
+            row(3, self.t("Sync interval (minutes)"), self.spin_interval)
 
-        self.spin_delete = Gtk.SpinButton.new_with_range(0, 1000000, 1)
-        self.spin_delete.set_value(_as_int(self.original["MAX_DELETE"], 100))
-        row(6, self.t("Delete cap (files)"), self.spin_delete)
+            self.check_watch = Gtk.CheckButton(label=self.t("Realtime sync"))
+            self.check_watch.set_active(truthy(self.original["WATCH"]))
+            grid.attach(self.check_watch, 0, 4, 2, 1)
 
-        self.combo_bw = Gtk.ComboBoxText()
-        for value in BANDWIDTH_CHOICES:
-            self.combo_bw.append(bw_id(value),
-                                 self.t("Unlimited") if not value else value)
-        self.combo_bw.set_active_id(bw_id(self.original["BW_LIMIT"]))
-        row(7, self.t("Bandwidth limit"), self.combo_bw)
+            self.check_notify = Gtk.CheckButton(
+                label=self.t("Tell me when a sync succeeds"))
+            self.check_notify.set_active(truthy(self.original["NOTIFY_ON_SUCCESS"]))
+            grid.attach(self.check_notify, 0, 5, 2, 1)
 
-        self.check_access = Gtk.CheckButton(label=self.t("Access check"))
-        self.check_access.set_active(truthy(self.original["CHECK_ACCESS"]))
-        self.check_access.connect("toggled", self.on_access_toggled)
-        self.button_markers = Gtk.Button(label=self.t("Create the marker files"))
-        self.button_markers.connect("clicked", self.on_create_markers)
-        access_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        access_row.pack_start(self.check_access, False, False, 0)
-        access_row.pack_start(self.button_markers, False, False, 0)
-        grid.attach(access_row, 0, 8, 2, 1)
+            self.spin_delete = Gtk.SpinButton.new_with_range(0, 1000000, 1)
+            self.spin_delete.set_value(_as_int(self.original["MAX_DELETE"], 100))
+            row(6, self.t("Delete cap (files)"), self.spin_delete)
 
-    def _build_labels(self, box):
-        """The two message rows, and the path of the file being edited."""
-        self.label_notice = Gtk.Label()
-        self.label_notice.set_xalign(0)
-        self.label_notice.set_line_wrap(True)
-        self.label_notice.set_max_width_chars(64)
-        self.label_notice.set_no_show_all(True)
-        box.pack_start(self.label_notice, False, False, 0)
+            self.combo_bw = Gtk.ComboBoxText()
+            for value in BANDWIDTH_CHOICES:
+                self.combo_bw.append(bw_id(value),
+                                     self.t("Unlimited") if not value else value)
+            self.combo_bw.set_active_id(bw_id(self.original["BW_LIMIT"]))
+            row(7, self.t("Bandwidth limit"), self.combo_bw)
 
-        self.label_status = Gtk.Label()
-        self.label_status.set_xalign(0)
-        self.label_status.set_line_wrap(True)
-        self.label_status.set_max_width_chars(64)
-        self.label_status.set_no_show_all(True)
-        box.pack_start(self.label_status, False, False, 0)
+            self.check_access = Gtk.CheckButton(label=self.t("Access check"))
+            self.check_access.set_active(truthy(self.original["CHECK_ACCESS"]))
+            self.check_access.connect("toggled", self.on_access_toggled)
+            self.button_markers = Gtk.Button(label=self.t("Create the marker files"))
+            self.button_markers.connect("clicked", self.on_create_markers)
+            access_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            access_row.pack_start(self.check_access, False, False, 0)
+            access_row.pack_start(self.button_markers, False, False, 0)
+            grid.attach(access_row, 0, 8, 2, 1)
 
-        self.label_config = Gtk.Label(
-            label=self.t("Config file: {path}", path=CONFIG_FILE))
-        self.label_config.set_xalign(0)
-        self.label_config.set_selectable(True)
-        box.pack_start(self.label_config, False, False, 0)
+        def _build_labels(self, box):
+            """The two message rows, and the path of the file being edited."""
+            self.label_notice = Gtk.Label()
+            self.label_notice.set_xalign(0)
+            self.label_notice.set_line_wrap(True)
+            self.label_notice.set_max_width_chars(64)
+            self.label_notice.set_no_show_all(True)
+            box.pack_start(self.label_notice, False, False, 0)
 
-    def _build_buttons(self):
-        """Cancel and Save. Each closes the window through its own response."""
-        self.cancel_button = Gtk.Button(label=self.t("Cancel"))
-        self.cancel_button.connect("clicked", self.on_cancel)
-        self.add_action_widget(self.cancel_button, Gtk.ResponseType.CANCEL)
-        self.save_button = Gtk.Button(label=self.t("Save"))
-        self.save_button.connect("clicked", self.on_save)
-        self.add_action_widget(self.save_button, Gtk.ResponseType.OK)
+            self.label_status = Gtk.Label()
+            self.label_status.set_xalign(0)
+            self.label_status.set_line_wrap(True)
+            self.label_status.set_max_width_chars(64)
+            self.label_status.set_no_show_all(True)
+            box.pack_start(self.label_status, False, False, 0)
 
-    def values(self) -> dict:
-        """The config values the widgets hold right now."""
-        return {
-            "UI_LANG": self.combo_lang.get_active_id() or "",
-            "SHOW_ICON": "1" if self.check_show.get_active() else "0",
-            "INTERVAL_MIN": str(int(self.spin_interval.get_value())),
-            "WATCH": "1" if self.check_watch.get_active() else "0",
-            "NOTIFY_ON_SUCCESS": "1" if self.check_notify.get_active() else "0",
-            "MAX_DELETE": str(int(self.spin_delete.get_value())),
-            "BW_LIMIT": bw_value(self.combo_bw.get_active_id()),
-            "CHECK_ACCESS": "1" if self.check_access.get_active() else "0",
-        }
+            self.label_config = Gtk.Label(
+                label=self.t("Config file: {path}", path=CONFIG_FILE))
+            self.label_config.set_xalign(0)
+            self.label_config.set_selectable(True)
+            box.pack_start(self.label_config, False, False, 0)
 
-    def set_status(self, text):
-        self.label_status.set_text(text or "")
-        self.label_status.set_visible(bool(text))
+        def _build_buttons(self):
+            """Cancel and Save. Each closes the window through its own response."""
+            self.cancel_button = Gtk.Button(label=self.t("Cancel"))
+            self.cancel_button.connect("clicked", self.on_cancel)
+            self.add_action_widget(self.cancel_button, Gtk.ResponseType.CANCEL)
+            self.save_button = Gtk.Button(label=self.t("Save"))
+            self.save_button.connect("clicked", self.on_save)
+            self.add_action_widget(self.save_button, Gtk.ResponseType.OK)
 
-    def set_notice(self, text):
-        self.label_notice.set_text(text or "")
-        self.label_notice.set_visible(bool(text))
+        def values(self) -> dict:
+            """The config values the widgets hold right now."""
+            return {
+                "UI_LANG": self.combo_lang.get_active_id() or "",
+                "SHOW_ICON": "1" if self.check_show.get_active() else "0",
+                "INTERVAL_MIN": str(int(self.spin_interval.get_value())),
+                "WATCH": "1" if self.check_watch.get_active() else "0",
+                "NOTIFY_ON_SUCCESS": "1" if self.check_notify.get_active() else "0",
+                "MAX_DELETE": str(int(self.spin_delete.get_value())),
+                "BW_LIMIT": bw_value(self.combo_bw.get_active_id()),
+                "CHECK_ACCESS": "1" if self.check_access.get_active() else "0",
+            }
 
-    def notice_check_access(self):
-        """Warn before the switch is saved, not after the sync has failed."""
-        if not self.check_access.get_active():
-            self.set_notice("")
-            return
-        marker = marker_file_path(self.cfg)
-        if os.path.exists(marker):
-            self.set_notice("")
-            return
-        self.set_notice(self.t(
-            "The markers rclone's access check looks for are missing, so the "
-            "next sync will fail until they exist. This side needs {path}, and "
-            "the same name on the remote.", path=marker))
+        def set_status(self, text):
+            self.label_status.set_text(text or "")
+            self.label_status.set_visible(bool(text))
 
-    # -------------------------------------------------- actions
-    def on_access_toggled(self, *_):
-        self.notice_check_access()
+        def set_notice(self, text):
+            self.label_notice.set_text(text or "")
+            self.label_notice.set_visible(bool(text))
 
-    def on_cancel(self, *_):
-        self.response(Gtk.ResponseType.CANCEL)
+        def notice_check_access(self):
+            """Warn before the switch is saved, not after the sync has failed."""
+            if not self.check_access.get_active():
+                self.set_notice("")
+                return
+            marker = marker_file_path(self.cfg)
+            if os.path.exists(marker):
+                self.set_notice("")
+                return
+            self.set_notice(self.t(
+                "The markers rclone's access check looks for are missing, so the "
+                "next sync will fail until they exist. This side needs {path}, and "
+                "the same name on the remote.", path=marker))
 
-    def on_save(self, *_):
-        if self.busy:
-            return
-        self.busy = True
-        self.save_button.set_sensitive(False)
-        self.set_status("")
-        # Read the widgets here: GTK is not thread safe, so nothing below may
-        # touch them from the worker.
-        values = self.values()
-        boot = self.check_boot.get_active()
-        threading.Thread(target=self._worker, args=(values, boot),
-                         daemon=True).start()
+        # -------------------------------------------------- actions
+        def on_access_toggled(self, *_):
+            self.notice_check_access()
 
-    def _unit(self) -> str:
-        return self.cfg.get("UNIT_NAME") or "onedrive-sync"
+        def on_cancel(self, *_):
+            self.response(Gtk.ResponseType.CANCEL)
 
-    def _worker(self, values, boot):
-        failures = []
-        changed = {key: value for key, value in values.items()
-                   if self.original.get(key) != value}
-        if changed:
-            try:
-                update_config_file(CONFIG_FILE, changed)
-            except OSError as exc:
-                failures.append(self.t("Could not write the config file: {why}",
-                                       why=str(exc)))
-        if values["INTERVAL_MIN"] != self.original["INTERVAL_MIN"]:
-            err = write_timer_dropin(self._unit(), values["INTERVAL_MIN"])
-            if err:
-                failures.append(self.t("Could not apply the sync interval: {why}",
-                                       why=err[:160]))
-        if values["WATCH"] != self.original["WATCH"]:
-            err = set_watch_unit(self._unit(), values["WATCH"] == "1")
-            if err:
-                failures.append(self.t(
-                    "Could not change the realtime sync unit: {why}",
-                    why=err[:160]))
-        if boot != self.original_boot:
-            err = write_autostart(boot)
-            if err:
-                failures.append(self.t(
-                    "Could not change the login setting: {why}", why=err[:160]))
-        GLib.idle_add(self._finish, values, failures)
-        return False
+        def on_save(self, *_):
+            if self.busy:
+                return
+            self.busy = True
+            self.save_button.set_sensitive(False)
+            self.set_status("")
+            # Read the widgets here: GTK is not thread safe, so nothing below may
+            # touch them from the worker.
+            values = self.values()
+            boot = self.check_boot.get_active()
+            threading.Thread(target=self._worker, args=(values, boot),
+                             daemon=True).start()
 
-    def _finish(self, values, failures):
-        self.busy = False
-        self.failures = failures
-        if failures:
-            # Stay open with the reasons on screen, rather than closing over a
-            # failure the user would never see.
-            self.set_status("\n".join(failures))
-            self.save_button.set_sensitive(True)
+        def _unit(self) -> str:
+            return self.cfg.get("UNIT_NAME") or "onedrive-sync"
+
+        def _worker(self, values, boot):
+            failures = []
+            changed = {key: value for key, value in values.items()
+                       if self.original.get(key) != value}
+            if changed:
+                try:
+                    update_config_file(CONFIG_FILE, changed)
+                except OSError as exc:
+                    failures.append(self.t("Could not write the config file: {why}",
+                                           why=str(exc)))
+            if values["INTERVAL_MIN"] != self.original["INTERVAL_MIN"]:
+                err = write_timer_dropin(self._unit(), values["INTERVAL_MIN"])
+                if err:
+                    failures.append(self.t("Could not apply the sync interval: {why}",
+                                           why=err[:160]))
+            if values["WATCH"] != self.original["WATCH"]:
+                err = set_watch_unit(self._unit(), values["WATCH"] == "1")
+                if err:
+                    failures.append(self.t(
+                        "Could not change the realtime sync unit: {why}",
+                        why=err[:160]))
+            if boot != self.original_boot:
+                err = write_autostart(boot)
+                if err:
+                    failures.append(self.t(
+                        "Could not change the login setting: {why}", why=err[:160]))
+            GLib.idle_add(self._finish, values, failures)
             return False
-        self.done = True
-        if self.tray is not None:
-            self.tray.apply_settings(values)
-        self.response(Gtk.ResponseType.OK)
-        return False
 
-    def on_create_markers(self, *_):
-        if self.markers_busy:
-            return
-        self.markers_busy = True
-        self.button_markers.set_sensitive(False)
-        self.set_status(self.t("Creating the marker files…"))
-        threading.Thread(target=self._markers_worker, daemon=True).start()
+        def _finish(self, values, failures):
+            self.busy = False
+            self.failures = failures
+            if failures:
+                # Stay open with the reasons on screen, rather than closing over a
+                # failure the user would never see.
+                self.set_status("\n".join(failures))
+                self.save_button.set_sensitive(True)
+                return False
+            self.done = True
+            if self.tray is not None:
+                self.tray.apply_settings(values)
+            self.response(Gtk.ResponseType.OK)
+            return False
 
-    def _markers_worker(self):
-        ok, report = run_check_access()
-        GLib.idle_add(self._markers_done, ok, report)
+        def on_create_markers(self, *_):
+            if self.markers_busy:
+                return
+            self.markers_busy = True
+            self.button_markers.set_sensitive(False)
+            self.set_status(self.t("Creating the marker files…"))
+            threading.Thread(target=self._markers_worker, daemon=True).start()
 
-    def _markers_done(self, ok, report):
-        self.markers_busy = False
-        self.button_markers.set_sensitive(True)
-        if ok:
-            text = (report + "\n") if report else ""
-            self.set_status(text + self.t("The marker files are there."))
-        else:
-            self.set_status(self.t("Could not create the marker files: {why}",
-                                   why=(report or "?")[:300]))
-        # Either way the warning follows the file system, not the attempt: a
-        # failed creation leaves the next sync failing as it did before.
-        self.notice_check_access()
-        return False
+        def _markers_worker(self):
+            ok, report = run_check_access()
+            GLib.idle_add(self._markers_done, ok, report)
+
+        def _markers_done(self, ok, report):
+            self.markers_busy = False
+            self.button_markers.set_sensitive(True)
+            if ok:
+                text = (report + "\n") if report else ""
+                self.set_status(text + self.t("The marker files are there."))
+            else:
+                self.set_status(self.t("Could not create the marker files: {why}",
+                                       why=(report or "?")[:300]))
+            # Either way the warning follows the file system, not the attempt: a
+            # failed creation leaves the next sync failing as it did before.
+            self.notice_check_access()
+            return False
+    return SettingsDialog
 
 
 def show_settings_standalone():
@@ -2129,9 +2351,15 @@ def acquire_lock():
     Returns the file object, or None when another tray already holds it. Raises
     OSError when the file cannot be created at all: callers need to tell those
     two apart, because both used to print the same sentence, so an unwritable
-    TMPDIR looked like a running tray and exited 0.
+    directory looked like a running tray and exited 0.
+
+    O_NOFOLLOW is what keeps the fallback path, a fixed name in a directory every
+    local user can write, from being a file somebody else chose: a symlink is
+    refused instead of being truncated. The refusal has to come from the open and
+    not from a check before it, because the link can be swapped in between.
     """
-    handle = open(LOCK_FILE, "w")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
+    handle = os.fdopen(os.open(LOCK_FILE, flags, 0o600), "w")
     try:
         fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
@@ -2144,8 +2372,8 @@ def release_lock(handle):
     """Drop the lock and remove the file this process created.
 
     The lock itself is the flock on the descriptor, but the file was left behind
-    in $TMPDIR after every exit, so a later run (or a curious user) found a stale
-    lock sitting there.
+    after every exit, so a later run (or a curious user) found a stale lock
+    sitting there.
     """
     try:
         os.remove(LOCK_FILE)
@@ -2212,10 +2440,13 @@ def main(argv=None):
         print(f"SHOW_ICON={value} written to {CONFIG_FILE}")
         return 0
 
-    # Checked here rather than at import time, so a headless machine still gets
-    # the dependency report first: which package is missing is the more useful
-    # answer when both are wrong. GTK does not fail politely in this situation,
-    # it aborts the process and leaves a core dump.
+    # The bindings come next, before the display guard and before anything is
+    # built, so a headless machine still gets the dependency report first: which
+    # package is missing is the more useful answer when both are wrong. GTK does
+    # not fail politely in this situation, it aborts the process and leaves a
+    # core dump.
+    load_bindings()
+
     if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
         print("rclone-onedrive-tray: this is the tray icon, and it needs a "
               "graphical session.\n"
@@ -2231,9 +2462,16 @@ def main(argv=None):
         lock = acquire_lock()
     except OSError as exc:
         if not settings:
-            print(f"Could not create the lock file {LOCK_FILE}: {exc}\n"
-                  f"Check that TMPDIR points at a directory that exists and is "
-                  f"writable.", file=sys.stderr)
+            if exc.errno == errno.ELOOP:
+                print(f"Refusing to use the lock file {LOCK_FILE}: it is a "
+                      f"symbolic link.\n"
+                      f"A link there can be aimed at any file on the machine, so "
+                      f"it is never followed. Remove it and start again.",
+                      file=sys.stderr)
+            else:
+                print(f"Could not create the lock file {LOCK_FILE}: {exc}\n"
+                      f"Check that {LOCK_DIR} points at a directory that exists "
+                      f"and is writable.", file=sys.stderr)
             return 1
         lock = None
     if lock is None:

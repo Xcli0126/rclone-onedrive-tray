@@ -133,7 +133,9 @@ build the baseline. If you would rather not answer prompts:
 ```
 
 `--yes` deliberately stops short of the first sync. That one downloads everything and must not be
-interrupted, so it stays a decision you make rather than a side effect of answering "yes".
+interrupted, so it stays a decision you make rather than a side effect of answering "yes". It does
+overwrite an existing config when you give it flags, so a scripted re-run does not have to delete
+the file by hand first; without `--yes`, a run that finds one still stops and asks.
 
 Everything lands in your home directory, and neither script calls `sudo`.
 
@@ -311,8 +313,11 @@ downloads it back. Dot-directories sit below the separator, since `.rag` and fri
 excluding too.
 
 A timed pause stops both the timer and the watcher, then hands the restart to a transient
-systemd timer, so the pause ends on its own whether or not the tray is still running. The menu
-label shows when it comes back.
+systemd timer, so the pause ends on its own while that session lasts. A transient unit does not
+survive a reboot or a logout, so the tray checks at its next start whether the timer it promised is
+really there: it re-arms it when it is not, and if that fails it ends the pause and says so rather
+than leaving the menu counting down to a resume that will never come. The menu label shows when it
+comes back.
 
 ### Settings
 

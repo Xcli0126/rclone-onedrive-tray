@@ -19,7 +19,8 @@
 #   --watch yes|no           enable realtime sync (default yes)
 #   --unit-name NAME         systemd unit base name (default onedrive-sync)
 #   --skip-folders "A,B"     top-level folders to leave off this machine
-#   --yes                    do not prompt for anything but the baseline
+#   --yes                    do not prompt for anything; the flags are the
+#                            answer, so an existing config is overwritten
 #   --no-install             write the config only, do not run install.sh
 #
 set -uo pipefail
@@ -98,7 +99,15 @@ say "rclone-onedrive-tray setup"
 
 if [ -f "$CONFIG_FILE" ]; then
     warn "a config already exists: $CONFIG_FILE"
-    case "$(ask 'Overwrite it? (y/N)' 'n')" in
+    # ask() answers with the default without reading anything under --yes or
+    # when stdin is not a terminal, so the default is the answer in those runs.
+    # With "n" there, --yes answered its own question with no and the only way
+    # left to re-run the wizard was to delete the config by hand. --yes is an
+    # instruction not to ask, and the flags beside it are what to do instead.
+    # An interactive run keeps the "n" default and still stops on a bare Enter.
+    overwrite_default=n
+    [ "$ASSUME_YES" -eq 1 ] && overwrite_default=y
+    case "$(ask 'Overwrite it? (y/N)' "$overwrite_default")" in
         [yY]*) : ;;
         *)     die "aborted; delete the file yourself to start over" ;;
     esac
@@ -266,8 +275,13 @@ RUN_RESYNC=0
 if [ "$ASSUME_YES" -eq 1 ]; then
     # Never start a long, uninterruptible first sync off the back of --yes.
     echo "    With --yes this is left to you:  onedrive-sync --resync"
-elif [ "$(ask 'Run it now? (Y/n)' 'y')" = "y" ]; then
-    RUN_RESYNC=1
+else
+    # The prompt advertises (Y/n), so both spellings of yes have to mean yes:
+    # this compared the answer with "y" alone, and the capital it shows the user
+    # meant "no".
+    case "$(ask 'Run it now? (Y/n)' 'y')" in
+        [yY]*) RUN_RESYNC=1 ;;
+    esac
 fi
 if [ "$RUN_RESYNC" -eq 1 ]; then
     # The same prefix install.sh defaults to, and the one it was just called

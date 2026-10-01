@@ -6,11 +6,10 @@ whose sync has stopped, this one is for the code itself.
 
 Everything found and fixed goes in `CHANGELOG.md`. What stays here is the work
 that was reported and not done, with the reason, so it does not have to be
-rediscovered. Most of this page comes from a full audit of the tree at the 1.2.0
-release: 22 ranked findings, 19 of them fixed in the two rounds that followed,
-and the three below left open. The same audit also listed a handful of
-suspicions it did not act on; what survived review is folded into the entries
-here.
+rediscovered. Two rounds of review feed it: an audit of the tree at the 1.2.0
+release, which produced 22 ranked findings and fixed 19 of them, and a second
+pass by a different model at 1.3.0, which found twelve more and fixed all of
+them. What neither acted on is below, next to the limits that are deliberate.
 
 ## Open
 
@@ -43,18 +42,6 @@ walk, which reads as a permissions problem rather than an unsupported option.
 The supported target is Ubuntu, and [COMPATIBILITY](COMPATIBILITY.md) says so.
 Changing this is a support-matrix decision rather than a cleanup.
 
-### The delete cap walks the whole local tree on every run
-
-To turn `MAX_DELETE` from a file count into the percentage rclone actually
-compares against, `bin/onedrive-sync` counts the files under `LOCAL` with
-`find "$LOCAL" -type f | wc -l`. On a large tree that is a full walk before every
-sync, including the runs where the count only feeds that conversion.
-
-The suite pins the current arithmetic (100 over 200 files becomes
-`--max-delete 50`), so a cheaper bound has to keep it. Caching the count beside
-the bisync listings, or deriving it from the listing the wrapper already reads,
-are the two obvious routes.
-
 ### `NOTIFY_ON_SUCCESS=1` is silent for a scheduled run
 
 The success notification only fires when the run was asked for from the tray. A
@@ -84,16 +71,18 @@ test is allowed to touch before anyone starts.
 - The duplication figures quoted in the 1.2.0 audit came from a hand-written
   six-line window script, not a clone detector, and `extras/` was never measured
   at all.
+- `uninstall.sh --purge` removes the configuration and the icon directory but not
+  the cache directory, which holds the sync log, the lock and the pause stamp. A
+  reinstalled copy therefore starts with the old log and, if a pause was in
+  progress, its stamp. Nothing breaks, and the argument for deleting a log on
+  uninstall is not obvious, so it stays until somebody wants it gone.
+- `install.sh` quotes the `Exec=` line of the autostart entry but not `ExecStart=`
+  in the systemd unit, so a prefix containing a space would still produce a unit
+  whose `ExecStart` is two arguments. The default prefix has no space, so this is
+  only reachable with `--prefix` pointing somewhere unusual.
 
 ## Accepted, with the reason
 
-- `onedrive-tray --version` and `--help` need PyGObject, because the import guards
-  run before the argument handling. On a machine where the tray is broken for the
-  usual reason, the message it prints (which package is missing) is more useful
-  than the version number. `tests/dependency-matrix.sh` pins that behaviour on
-  purpose. Moving the imports behind `main()` would mean re-pointing that case at
-  `tests/lib/load_module.py`, and nothing has needed the version badly enough to
-  justify it yet.
 - `rclone bisync` is experimental upstream. See the "Known limitations" section of
   the README.
 - The panel icon needs an AppIndicator-compatible shell, which on stock GNOME

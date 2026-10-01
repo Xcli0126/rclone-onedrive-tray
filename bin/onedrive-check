@@ -85,8 +85,9 @@ LIMIT_CLOUD=380
 # Microsoft's documented total: a local path of up to 400 plus a root folder of
 # up to 120. Only reachable with a long LOCAL, but nothing else catches it.
 LIMIT_TOTAL=520
-# Documented, not measured. No 255-character name can be created on ext4 either,
-# so this is a guard rather than a case that happens.
+# Documented, not measured. A name longer than 255 bytes cannot be created on
+# ext4 either, so this is a guard rather than a case that happens; a name of
+# exactly 255 is the legal maximum and is not reported.
 LIMIT_NAME=255
 
 long_paths=0
@@ -101,12 +102,25 @@ declare -A reported=()
 # Microsoft reserves the Windows device names, and the one that was tried was
 # refused: "CON: Failed to copy: invalidRequest: Invalid request". Windows also
 # ignores everything after the first dot, so CON.txt is the same name as CON.
+#
+# Three more reserved names do not fit that rule and were invisible here:
+# ".lock" leaves nothing before the dot, so the stem is empty; "desktop.ini"
+# reduces to "desktop"; and "_vti_" is a reserved prefix with no dot in it at
+# all. docs/FEATURE-PARITY.md lists all three beside CON, and the default
+# filters only skip two of them, so the checker has to catch them itself.
 is_reserved_name() {
-    local stem="${1%%.*}"
-    case "${stem,,}" in
-        con|prn|aux|nul|com[0-9]|lpt[0-9]) return 0 ;;
-        *) return 1 ;;
+    local name="${1,,}"
+    local stem="${name%%.*}"
+    case "$name" in
+        .lock|desktop.ini) return 0 ;;
     esac
+    case "$stem" in
+        con|prn|aux|nul|com[0-9]|lpt[0-9]) return 0 ;;
+    esac
+    case "$name" in
+        _vti_*) return 0 ;;
+    esac
+    return 1
 }
 
 # 0 when $1 is valid UTF-8, 1 otherwise, byte by byte. The check runs under a C
@@ -204,7 +218,9 @@ while IFS= read -r -d '' path; do
     if is_reserved_name "$name"; then
         add rejected "$rel" "reserved name: $rel"
     fi
-    if [ "${#name}" -ge "$LIMIT_NAME" ]; then
+    # 255 is the documented maximum, so a name of exactly that length is legal:
+    # -ge failed a name the service accepts.
+    if [ "${#name}" -gt "$LIMIT_NAME" ]; then
         add long "$rel" "name is ${#name} chars: $rel"
     fi
 

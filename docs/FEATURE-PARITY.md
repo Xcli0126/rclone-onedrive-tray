@@ -99,7 +99,7 @@ bugs in this project.
 | Largest file | 250 GB | Larger files cannot be uploaded at all |
 | Recommended item count | 300,000 per account | Above it, performance degrades even for items that are not synced |
 | Invalid characters | `"` `*` `:` `<` `>` `?` `/` `\` `\|`, plus leading or trailing spaces | Microsoft's client renames them. rclone maps them to look-alike Unicode, so names change on the way up |
-| Reserved names | `.lock`, `CON`, `PRN`, `AUX`, `NUL`, `COM0` to `COM9`, `LPT0` to `LPT9`, `_vti_`, `desktop.ini`, anything starting with `~$` | Not uniform in practice: `CON` was refused, `.lock` uploaded and then vanished from listings, `~$` uploaded normally. `onedrive-check` matches the stem, so `CON.txt` is caught too |
+| Reserved names | `.lock`, `CON`, `PRN`, `AUX`, `NUL`, `COM0` to `COM9`, `LPT0` to `LPT9`, `_vti_`, `desktop.ini`, anything starting with `~$` | Not uniform in practice: `CON` was refused, `.lock` uploaded and then vanished from listings, `~$` uploaded normally. `onedrive-check` matches the stem for the device names, so `CON.txt` is caught, and the whole name for `.lock` and `desktop.ini`, with `_vti_` as a prefix |
 | Files the Microsoft client never syncs | `.tmp` and `.ini` | This project syncs `.ini` on purpose, since on Linux those are usually real settings a user wants on both machines |
 | Name case | The service is case insensitive | `Hello.doc` and `hello.doc` cannot coexist |
 | Versions | OneDrive Personal creates a version on every change, and rclone cannot delete versions on Personal | Disk usage on the service can exceed the size of the folder. `no_versions` and `cleanup` are for work accounts only |

@@ -645,7 +645,9 @@ per case, in a throwaway folder that was deleted afterwards:
 Two things follow from that table. The documented 400-character limit is not a working limit: the
 failure showed up around 380, which is why the checker uses 380. And the reserved-name list is not
 uniform. `CON` fails loudly, `.lock` uploads and then becomes invisible, and `~$` names upload
-normally even though Microsoft documents them as reserved.
+normally even though Microsoft documents them as reserved. The checker covers all three groups:
+the device names by their stem (so `CON.txt` is caught), `.lock` and `desktop.ini` by their whole
+name, and `_vti_` as a prefix.
 
 **Fix:** use the checker.
 

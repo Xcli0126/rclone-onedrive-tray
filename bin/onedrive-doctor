@@ -436,7 +436,7 @@ if [ -e "$LOG" ]; then
     else
         log_size="$(stat -c%s -- "$LOG" 2>/dev/null || echo 0)"
         case "$MAX_LOG_BYTES" in
-            ''|*[!0-9]*) report warn logfile "$LOG is writable, but MAX_LOG_BYTES='$MAX_LOG_BYTES' is not a number, so the rotation comparison is skipped" ;;
+            ''|*[!0-9]*) report warn logfile "$LOG is writable, but MAX_LOG_BYTES='$MAX_LOG_BYTES' is not a positive integer, which onedrive-sync refuses to run with; give it a byte count (the default is 5242880) or empty the key" ;;
             *) if [ "$log_size" -gt "$MAX_LOG_BYTES" ]; then
                    report warn logfile "$LOG is writable at $log_size bytes, above MAX_LOG_BYTES=$MAX_LOG_BYTES; the next run rotates it to $LOG.1"
                else
@@ -453,6 +453,15 @@ fi
 # ---- 11. the remote -------------------------------------------------------
 # The one check that leaves the machine, so --offline skips it entirely. It is a
 # read-only listing under timeout, and it is safe while a sync is running.
+#
+# The verdicts follow the exit contract at the top of this file: a network
+# problem or a timeout is a warn, because the next run retries it and an offline
+# laptop must not read as a broken install. A refused sign-in is a fail, because
+# nothing but a person re-authorising the remote clears it, and so are an unset
+# REMOTE and a missing rclone. Those four say different things on the line:
+# "unreachable" and "did not answer within 20s" for the two that retry,
+# "refused the sign-in" for the one that does not, and a plain statement of what
+# is missing for the last two.
 if [ "$OFFLINE" -eq 0 ]; then
     if [ -z "$REMOTE" ]; then
         report fail remote "REMOTE is not set in $CONFIG_FILE, so there is nothing to sync with"
@@ -465,11 +474,11 @@ if [ "$OFFLINE" -eq 0 ]; then
         if [ "$probe_rc" -eq 0 ]; then
             report ok remote "answers (rclone lsd $REMOTE)"
         elif [ "$probe_rc" -eq 124 ]; then
-            report fail remote "$REMOTE did not answer within 20s; check the connection and any proxy, then try: rclone lsd \"$REMOTE\""
+            report warn remote "$REMOTE did not answer within 20s, so this is a network problem the next run retries, not a sign-in failure; check the connection and any proxy, then try: rclone lsd \"$REMOTE\""
         else
             case "$(classify_hint "$probe_out")" in
-                auth) report fail remote "refused the sign-in: $probe_line; re-authorise with the tray item, or: rclone config reconnect ${REMOTE%%:*}:." ;;
-                network) report fail remote "unreachable: $probe_line; that is a network problem, not a sign-in failure" ;;
+                auth) report fail remote "refused the sign-in: $probe_line; that needs a person, so re-authorise with the tray item, or: rclone config reconnect ${REMOTE%%:*}:." ;;
+                network) report warn remote "unreachable: $probe_line; that is a network problem the next run retries, not a sign-in failure" ;;
                 *) report fail remote "rclone lsd failed (rc=$probe_rc): $probe_line" ;;
             esac
         fi

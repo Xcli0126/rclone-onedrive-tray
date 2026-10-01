@@ -7,8 +7,8 @@
 #
 # Raise a number when the suite gains cases. Lowering one is a decision that
 # belongs in the commit message.
-dependency-matrix.sh 31
-install-flow.sh 165
-filters.sh 33
+dependency-matrix.sh 33
+install-flow.sh 203
+filters.sh 35
 docs.sh 32
-tray.sh 100
+tray.sh 115

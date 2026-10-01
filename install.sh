@@ -172,9 +172,41 @@ if [ "$WATCH" = "1" ]; then
 fi
 
 # --------------------------------------------------------------- autostart
+# Exec= in a desktop entry is not a shell word list: the value is split on
+# spaces, so an unquoted tray path under a prefix like "/home/x/My Files" became
+# two arguments and the tray never started at login. The Desktop Entry
+# specification wants such an argument enclosed in double quotes, with the double
+# quote, backtick, dollar and backslash escaped inside it, and a literal percent
+# written as %% because a single one is a field code. A path made only of
+# unreserved characters is left bare, which is how the entry read before.
+desktop_exec_arg() {  # desktop_exec_arg <path> -> the Exec argument
+    local arg="$1"
+    arg="${arg//%/%%}"
+    case "$arg" in
+        *[!A-Za-z0-9/._+:=@,^-]*)
+            arg="${arg//\\/\\\\}"
+            arg="${arg//\"/\\\"}"
+            arg="${arg//\`/\\\`}"
+            arg="${arg//\$/\\\$}"
+            printf '"%s"' "$arg" ;;
+        *) printf '%s' "$arg" ;;
+    esac
+}
+
+# sed's replacement text gives \ and & a meaning of their own, and | ends the s
+# command, so the value is escaped for sed before it goes in.
+sed_replacement() {  # sed_replacement <text>
+    local text="$1"
+    text="${text//\\/\\\\}"
+    text="${text//&/\\&}"
+    text="${text//|/\\|}"
+    printf '%s' "$text"
+}
+
 say "Installing autostart entry"
 mkdir -p "$AUTOSTART_DIR"
-sed -e "s|%TRAY_SCRIPT%|$BIN_DIR/onedrive-tray|g" \
+tray_exec="$(desktop_exec_arg "$BIN_DIR/onedrive-tray")"
+sed -e "s|%TRAY_SCRIPT%|$(sed_replacement "$tray_exec")|g" \
     "$SRC_DIR/autostart/rclone-onedrive-tray.desktop.in" \
     > "$AUTOSTART_DIR/rclone-onedrive-tray.desktop"
 chmod 0644 "$AUTOSTART_DIR/rclone-onedrive-tray.desktop"

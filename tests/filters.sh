@@ -176,10 +176,17 @@ run "a renamed name does not fail the check" 0 "will rename these" \
 # One name that is both renamed and over-long is two problems behind one path,
 # so the closing line has to give both numbers. While it printed only the group
 # headings' idea of a count, a reader could add the headings up and get 3 for a
-# tree holding 2 things to look at. 255 characters is the measured name limit;
-# the colon is what makes the same name a rename as well.
-CHK_LONG="$(printf 'q%.0s' $(seq 1 250)):both"
-: > "$CHK_TREE/$CHK_LONG"
+# tree holding 2 things to look at. The over-long one is a deep directory rather
+# than a long file name: this filesystem stops at 255 bytes and 255 is the legal
+# maximum, so the total path length is the only way to reach that group at all.
+# The colon is what makes the same path a rename as well.
+CHK_DEEP="$CHK_TREE"
+for _ in 1 2 3 4 5 6; do
+    CHK_DEEP="$CHK_DEEP/$(printf 'd%.0s' $(seq 1 55))"
+done
+mkdir -p "$CHK_DEEP"
+CHK_LONG="$CHK_DEEP/$(printf 'd%.0s' $(seq 1 54)):$(printf 'x%.0s' $(seq 1 40))"
+mkdir "$CHK_LONG"
 CHK_OUT="$(env XDG_CONFIG_HOME="$WORK/checkcfg" "$CHECKER" 2>&1)"; CHK_RC=$?
 check "a name that is renamed and over-long still exits 1" \
     test "$CHK_RC" -eq 1
@@ -192,10 +199,25 @@ check "the closing line gives paths and problems separately" \
 
 # One of each, because the same sentence has to read as English when both numbers
 # are 1. The renamed file from above is the one that stays.
-rm -f "$CHK_TREE/$CHK_LONG"
+rm -rf "${CHK_DEEP:?}"
 CHK_OUT="$(env XDG_CONFIG_HOME="$WORK/checkcfg" "$CHECKER" 2>&1)"; CHK_RC=$?
 check "a single renamed name still exits 0" test "$CHK_RC" -eq 0
 check "the closing line says 1 path and 1 problem, not 1 paths" \
     grep -qxF -- "  1 path to look at (1 problem). Limits and measurements: docs/TROUBLESHOOTING.md" <<<"$CHK_OUT"
+
+# The name limit is 255 characters, and the check used -ge, so a name of exactly
+# that length was reported as over-long: a legal name failed the check. Only
+# 256 and up are over it.
+CHK_MAX="$(printf 'm%.0s' $(seq 1 255))"
+: > "$CHK_TREE/$CHK_MAX"
+CHK_OUT="$(env XDG_CONFIG_HOME="$WORK/checkcfg" "$CHECKER" 2>&1)"; CHK_RC=$?
+check "a name of exactly 255 characters is within the limit" \
+    test "$CHK_RC" -eq 0
+if grep -q "name is 255 chars" <<<"$CHK_OUT"; then
+    bad "a 255-character name was reported as over-long"
+else
+    ok "and it is not in the too-long group"
+fi
+rm -f "$CHK_TREE/$CHK_MAX"
 
 summary

@@ -103,6 +103,18 @@ if [ -f "$WORK/calls/systemctl-fail" ]; then
     printf 'mock systemctl failure\n' >&2
     exit 1
 fi
+# enable --now clears the disabled state, the way the real user manager would,
+# so a scenario that turns the units back on is answered truthfully afterwards.
+case " \$* " in
+    *" enable --now "*) rm -f "$WORK/calls/timer-disabled" ;;
+esac
+# The transient resume timer a pause arms. Whether it survived is what decides
+# if the pause still has anything that will end it, so one file makes it answer
+# "active" and its absence makes it answer the way a missing unit does.
+if [ "\$1 \$2 \$3" = "--user is-active rclone-onedrive-tray-resume.timer" ]; then
+    [ -f "$WORK/calls/pause-timer-active" ] && { printf 'active\n'; exit 0; }
+    exit 3
+fi
 for arg in "\$@"; do
     case "\$arg" in
         is-enabled)
@@ -123,6 +135,12 @@ STUB
 cat > "$WORK/stubs/systemd-run" <<STUB
 #!/bin/sh
 printf 'systemd-run %s\n' "\$*" >> "$WORK/calls/calls"
+# A resume that cannot be scheduled is a pause nothing will end; the tray has to
+# end it rather than leave the units disabled behind a promise.
+if [ -f "$WORK/calls/systemd-run-fail" ]; then
+    printf 'mock systemd-run failure\n' >&2
+    exit 1
+fi
 exit 0
 STUB
 
@@ -166,6 +184,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import shutil
 import sys
 import time
 
@@ -189,6 +208,10 @@ def load_tray():
     spec = importlib.util.spec_from_loader("tray_under_test", loader)
     module = importlib.util.module_from_spec(spec)
     loader.exec_module(module)
+    # The bindings are imported on demand from load_bindings() rather than at the
+    # top of the module, so the driver asks for them the way main() does. An
+    # older tray had them already, and simply has no such function.
+    getattr(module, "load_bindings", lambda: None)()
     return module
 
 
@@ -543,6 +566,11 @@ def scenario_folder_delete():
     real = MODULE.Gtk.MessageDialog
     MODULE.Gtk.MessageDialog = FakeDialog
     try:
+        # The offer only stands on an exclusion that really took effect, and
+        # unticking a folder is the only way the handler ever reaches it. The
+        # names refused below are still refused by the path guard first, which is
+        # the guard this scenario is about.
+        MODULE.write_excluded_folders(tray.exclude_file, ["ordinary"])
         del asked[:]
         tray._offer_local_delete("ordinary")
         data = {"ordinary_asked": len(asked),
@@ -1122,6 +1150,179 @@ def scenario_cli_settings():
     return data
 
 
+def install_fake_notify(shown):
+    """Replace the notification binding with one that records the bodies.
+
+    notify() reads the binding when it is called, so a scenario that wants to
+    read what the tray said replaces it before it does anything.
+    """
+    class FakeNote:
+        def __init__(self, title, body, icon):
+            shown.append(body)
+
+        def set_urgency(self, *_):
+            pass
+
+        def show(self):
+            pass
+
+    class FakeNotify:
+        Urgency = type("Urgency", (), {"NORMAL": 0})
+
+        class Notification:
+            @staticmethod
+            def new(title, body, icon):
+                return FakeNote(title, body, icon)
+
+        @staticmethod
+        def init(_app):
+            pass
+
+    return FakeNotify
+
+
+def scenario_excluded_name():
+    """A name the folder list cannot hold is refused, and nothing is deleted.
+
+    A line starting with # is a comment to both readers of exclude-folders.txt,
+    so unticking "#notes" left the menu saying the folder was out of the sync
+    while onedrive-sync kept syncing it. The local copy is what turns that into
+    data loss: with the exclusion not in effect, deleting it is an ordinary
+    local delete, and the next bisync propagates the deletion to the cloud.
+    """
+    # The listing normally arrives from rclone on a worker; giving the stub the
+    # same names means a late answer cannot rebuild the submenu underneath the
+    # assertions below.
+    with open(os.path.join(os.environ["TRAY_CALLS"], "folders"), "w",
+              encoding="utf-8") as fh:
+        fh.write("#notes/\nDocs/\n")
+    tray = build()
+    folder = os.path.join(tray.local, "#notes")
+    kept = os.path.join(folder, "kept.txt")
+    os.makedirs(folder, exist_ok=True)
+    with open(kept, "w", encoding="utf-8") as fh:
+        fh.write("still here\n")
+
+    shown = []
+    asked = []
+
+    class CountingDialog:
+        """Accepts every confirmation and remembers how many there were."""
+
+        def __init__(self, *a, **k):
+            asked.append(k.get("text", ""))
+
+        def format_secondary_text(self, text):
+            pass
+
+        def add_button(self, label, response):
+            pass
+
+        def run(self):
+            return MODULE.Gtk.ResponseType.OK
+
+        def destroy(self):
+            pass
+
+    real_notify = MODULE.Notify
+    real_dialog = MODULE.Gtk.MessageDialog
+    MODULE.Notify = install_fake_notify(shown)
+    MODULE.Gtk.MessageDialog = CountingDialog
+    try:
+        tray.folders = ["#notes", "Docs"]
+        tray.folders_seen = list(tray.folders)
+        tray._build_folder_menu()
+        pump(0.3)
+        find_at(tray.menu, "#notes").set_active(False)
+        pump(0.8)
+        data = {
+            "tick_back": bool(find_at(tray.menu, "#notes").get_active()),
+            "excluded": MODULE.read_excluded_folders(tray.exclude_file),
+            "file_text": read_text(tray.exclude_file),
+            "asked_after_untick": len(asked),
+            "local_after_untick": os.path.isfile(kept),
+            "notices": list(shown),
+        }
+        # These sentences reach t() through a variable, so the static check that
+        # every t() key has a Chinese entry cannot see them. They are the whole
+        # message a user gets when a click is refused, so they are checked here.
+        refusals = [MODULE.exclusion_problem(name)
+                    for name in ("", " ", " a", "#notes", "a\nb")]
+        refusals.append("Could not save the folder list")
+        data["refusals_translated"] = all(
+            MODULE.STRINGS["zh"].get(text) for text in refusals)
+        data["refusals"] = refusals
+        # The offer has to refuse on its own as well: the dialog it puts up
+        # promises the folder stays in OneDrive, and that promise is only true
+        # while the folder is really out of the sync.
+        del asked[:]
+        tray._offer_local_delete("#notes")
+        pump(0.5)
+        data["asked_direct"] = len(asked)
+        data["local_after_direct"] = os.path.isfile(kept)
+    finally:
+        MODULE.Notify = real_notify
+        MODULE.Gtk.MessageDialog = real_dialog
+    # The fixture goes, not the tray: the scenarios after this one list what is
+    # in LOCAL, and this folder is only here to be refused.
+    shutil.rmtree(folder, ignore_errors=True)
+    pump(0.3)
+    return data
+
+
+def scenario_pause_recovery():
+    """What the tray does at startup with a pause stamp in ~/.cache.
+
+    A transient systemd unit lives only in the running user manager, so a reboot
+    or a logout during a pause leaves both units disabled with no timer behind
+    it while the stamp still holds a future time. Reading the stamp alone made
+    the menu promise a resume that could never come.
+    """
+    case = os.environ.get("TRAY_PAUSE_CASE", "gone")
+    stamp = MODULE.PAUSE_STAMP
+    os.makedirs(os.path.dirname(stamp), exist_ok=True)
+    due = int(time.time()) + (-60 if case == "expired" else 900)
+    with open(stamp, "w", encoding="utf-8") as fh:
+        fh.write(str(due))
+
+    # A paused pair is one whose timer is disabled, which is also what makes the
+    # tray read the stamp at all.
+    with open(os.path.join(os.environ["TRAY_CALLS"], "timer-disabled"), "w"):
+        pass
+    active = os.path.join(os.environ["TRAY_CALLS"], "pause-timer-active")
+    if case == "alive":
+        with open(active, "w"):
+            pass
+    elif os.path.exists(active):
+        os.remove(active)
+
+    shown = []
+    real_notify = MODULE.Notify
+    MODULE.Notify = install_fake_notify(shown)
+    clear_calls()
+    try:
+        tray = MODULE.Tray(CFG)
+        if case in ("gone", "alive"):
+            wait_for(lambda: any("is-active rclone-onedrive-tray-resume.timer" in x
+                                 for x in call_lines()), 8.0)
+        else:
+            wait_for(lambda: not os.path.exists(stamp) or shown, 8.0)
+        pump(0.5)
+        data = {
+            "case": case,
+            "stamp_left": os.path.exists(stamp),
+            "due_in_future": due > time.time(),
+            "rearmed": [x for x in call_lines() if x.startswith("systemd-run")],
+            "enabled_after": [x for x in call_lines() if "enable --now" in x],
+            "pause_label": tray.item_pause.get_label() or "",
+            "notices": list(shown),
+            "auto_seen": getattr(tray, "auto_seen", None),
+        }
+    finally:
+        MODULE.Notify = real_notify
+    return data
+
+
 SCENARIOS = {
     "menus": scenario_menus,
     "quota": scenario_quota,
@@ -1129,7 +1330,9 @@ SCENARIOS = {
     "pause-durations": scenario_pause_durations,
     "timer-state": scenario_timer_state,
     "folders": scenario_folders,
+    "excluded-name": scenario_excluded_name,
     "folder-delete": scenario_folder_delete,
+    "pause-recovery": scenario_pause_recovery,
     "openapp": scenario_openapp,
     "lock-hold": scenario_lock_hold,
     "lock-second": scenario_lock_second,
@@ -1377,6 +1580,83 @@ if run_driver pause-durations; then
         json_expr "'Resume now' in d['menu_labels']"
 fi
 
+title "A pause whose resume timer did not survive"
+# The timer that ends a pause is a transient systemd unit, so it lives only in
+# the running user manager: a reboot during the pause leaves both units disabled
+# with nothing to bring them back, while the stamp in the cache still holds a
+# future time. The stamp alone is not proof of anything, so each case here asks
+# what the tray does about it.
+if run_driver pause-recovery TRAY_PAUSE_CASE=gone; then
+    check "a stamp with no timer behind it is re-armed" json_py '
+armed = [x for x in d["rearmed"]
+         if "rclone-onedrive-tray-resume" in x and "enable --now" in x]
+if not armed:
+    print("nothing was scheduled for a pause still in the future: %r"
+          % (d["rearmed"],))
+    raise SystemExit(1)
+'
+    check "the re-armed timer covers what is left of the pause" json_py '
+import re
+armed = [x for x in d["rearmed"] if "rclone-onedrive-tray-resume" in x]
+left = [int(m.group(1))
+        for m in (re.search(r"--on-active=(\d+)s", x) for x in armed) if m]
+if not left or not all(0 < n <= 900 for n in left):
+    print("scheduled %r seconds for a pause with 900 left" % (left,))
+    raise SystemExit(1)
+'
+    check "and the pause the stamp claims is kept, not dropped" json_py '
+if not d["stamp_left"] or not d["due_in_future"]:
+    print("stamp_left=%r due_in_future=%r label=%r"
+          % (d["stamp_left"], d["due_in_future"], d["pause_label"]))
+    raise SystemExit(1)
+'
+fi
+
+if run_driver pause-recovery TRAY_PAUSE_CASE=alive; then
+    check "a stamp whose timer is still loaded is left alone" json_py '
+if d["rearmed"]:
+    print("a second resume timer was scheduled over a live one: %r"
+          % (d["rearmed"],))
+    raise SystemExit(1)
+if not d["stamp_left"]:
+    print("the stamp went away although its timer is loaded")
+    raise SystemExit(1)
+'
+fi
+
+if run_driver pause-recovery TRAY_PAUSE_CASE=expired; then
+    check "an expired stamp is dropped instead of claiming a pause" json_py '
+if d["stamp_left"]:
+    print("the expired stamp is still there")
+    raise SystemExit(1)
+if "paused" in d["pause_label"].lower():
+    print("the menu still claims a pause: %r" % (d["pause_label"],))
+    raise SystemExit(1)
+'
+fi
+
+: > "$WORK/calls/systemd-run-fail"
+if run_driver pause-recovery TRAY_PAUSE_CASE=fail; then
+    check "a resume that cannot be restored ends the pause and says so" json_py '
+if d["stamp_left"]:
+    print("the stamp survived a pause that cannot be kept")
+    raise SystemExit(1)
+if not any("enable --now ztraytest.timer" in x for x in d["enabled_after"]):
+    print("the units were left disabled with nothing to end the pause: %r"
+          % (d["enabled_after"],))
+    raise SystemExit(1)
+if not any("resume" in body for body in d["notices"]):
+    print("nothing was said about it: %r" % (d["notices"],))
+    raise SystemExit(1)
+if "paused" in d["pause_label"].lower():
+    print("the menu still claims a pause: %r" % (d["pause_label"],))
+    raise SystemExit(1)
+'
+fi
+rm -f "$WORK/calls/systemd-run-fail" "$WORK/calls/timer-disabled" \
+      "$WORK/calls/pause-timer-active" \
+      "$WORK/cache/rclone-onedrive-tray/paused-until"
+
 title "A disabled timer is not a pause"
 # Both timer-state scenarios ask this of a different systemctl answer: does
 # anything on screen claim a pause that never happened?
@@ -1413,6 +1693,50 @@ if run_driver folders; then
         json_expr "d['reverted']"
     check "the menu and the file still agree after a failed write" \
         json_expr "d['excluded_after_failure'] == ['Music'] and d['check_states']['Docs'] and not d['check_states']['Music']"
+fi
+
+title "A folder name the list cannot hold"
+# Both readers of exclude-folders.txt treat a line starting with # as a comment,
+# so unticking "#notes" cannot be written down. The menu used to say the folder
+# was out of the sync anyway and then offer to delete the local copy, which is
+# still synced: that delete is an ordinary local delete, and the next bisync
+# propagates it to the cloud.
+if run_driver excluded-name; then
+    check "unticking a name the file cannot hold puts the tick back" json_py '
+if not d["tick_back"]:
+    print("the tick stayed off with nothing written: excluded=%r"
+          % (d["excluded"],))
+    raise SystemExit(1)
+'
+    check "and nothing is written for it" json_py '
+if "#notes" in d["excluded"] or "#notes" in d["file_text"]:
+    print("the name reached the file: excluded=%r file=%r"
+          % (d["excluded"], d["file_text"]))
+    raise SystemExit(1)
+'
+    check "and the refusal is said out loud, not silently swallowed" json_py '
+if not any("comment" in body for body in d["notices"]):
+    print("notices: %r" % (d["notices"],))
+    raise SystemExit(1)
+if any("will not sync" in body for body in d["notices"]):
+    print("the menu claimed the folder is out of the sync: %r" % (d["notices"],))
+    raise SystemExit(1)
+'
+    check "no local copy is offered, or deleted, for it" json_py '
+if d["asked_after_untick"] or d["asked_direct"]:
+    print("a delete was offered: after the untick %r, when asked directly %r"
+          % (d["asked_after_untick"], d["asked_direct"]))
+    raise SystemExit(1)
+if not d["local_after_untick"] or not d["local_after_direct"]:
+    print("the local copy was deleted: after the untick %r, when asked directly %r"
+          % (d["local_after_untick"], d["local_after_direct"]))
+    raise SystemExit(1)
+'
+    check "every refusal it can give has a Chinese sentence" json_py '
+if not d["refusals_translated"]:
+    print("no Chinese entry for: %r" % (d["refusals"],))
+    raise SystemExit(1)
+'
 fi
 
 title "Deleting a deselected folder's local copy"
@@ -1500,6 +1824,36 @@ fi
 set_config OPEN_APP_CMD '""'
 
 title "The single-instance lock"
+# The lock lives under XDG_RUNTIME_DIR, which is this suite's $WORK/run: 0700 and
+# belonging to one user, so nobody else can take the name first. It used to be a
+# fixed name in TMPDIR, where another local user could leave a symlink behind and
+# have the tray truncate whatever it pointed at.
+LOCK_PATH="$WORK/run/rclone-onedrive-tray.lock"
+printf 'do not touch me\n' > "$WORK/victim"
+ln -s "$WORK/victim" "$LOCK_PATH"
+
+# A home to run from that has no config, so the run stops at the lock whichever
+# version of the tray is under test rather than going on to need a real display.
+# TMPDIR is the same directory as XDG_RUNTIME_DIR on purpose: the tray used to
+# build the lock path from TMPDIR alone, so that is where a symlink has to sit for
+# this to be about following one rather than about which directory wins.
+lock_probe() {
+    env -i PATH="$WORK/stubs:/usr/bin:/bin" HOME="$WORK" TMPDIR="$WORK/run" \
+        XDG_RUNTIME_DIR="$WORK/run" XDG_CONFIG_HOME="$WORK/no-config-here" \
+        DISPLAY=:77 LANG=C.UTF-8 python3 "$TRAY"
+}
+run "a symlink at the lock path is refused, not followed" \
+    1 "symbolic link" lock_probe
+check "the symlink's target was not truncated" \
+    grep -q 'do not touch me' "$WORK/victim"
+LOCK_OUT="$(lock_probe 2>&1)"
+if printf '%s' "$LOCK_OUT" | grep -q "already running"; then
+    bad "the symlink was reported as another tray running"
+else
+    ok "the refusal never pretends another tray is running"
+fi
+rm -f "$LOCK_PATH" "$WORK/victim"
+
 : > "$WORK/records"
 # The holder sleeps well past the second start's own startup cost, so the lock
 # is still held whatever this machine's process launch time happens to be.
@@ -1515,7 +1869,7 @@ if [ -s "$WORK/records" ]; then
         driver_both lock-second
     wait "$HOLDER" 2>/dev/null
     check_absent "the lock file does not outlive the process that held it" \
-        "$WORK/cache/rclone-onedrive-tray.lock"
+        "$WORK/run/rclone-onedrive-tray.lock"
 else
     bad "the first process never took the lock"
     kill "$HOLDER" 2>/dev/null
@@ -1805,6 +2159,75 @@ sourced = subprocess.run(["/bin/sh", "-c", '. "$1"; printf "%s" "$A_KEY"',
 if sourced.stdout != value:
     problems.append("after sourcing the file A_KEY is %r (%s)"
                     % (sourced.stdout, sourced.stderr.strip()))
+if problems:
+    print("; ".join(problems))
+    raise SystemExit(1)
+PY
+
+title "The autostart entry's Exec line"
+# A home directory can hold a space, and the desktop environment reads the line
+# as a command line: written bare, the path is two arguments and the tray never
+# starts at login. A % is a field code as well. The line is read back here with
+# GLib, which is what a desktop environment uses: the key-file reader first, then
+# the Exec parser, then the field codes.
+check "a path with a space, a % or a backslash is quoted and reads back whole" \
+    env -i PATH="$WORK/stubs:/usr/bin:/bin" HOME="$WORK" TMPDIR="$WORK/cache" \
+        XDG_RUNTIME_DIR="$WORK/run" XDG_CONFIG_HOME="$WORK/exec-home" \
+        GDK_BACKEND=broadway BROADWAY_DISPLAY=:9 DISPLAY=:77 LANG=C.UTF-8 \
+        python3 - "$TRAY" "$WORK/exec-home" <<'PY'
+import importlib.machinery
+import importlib.util
+import os
+import sys
+
+# env -i above means no PYTHONDONTWRITEBYTECODE is inherited, and loading bin/
+# would otherwise leave a __pycache__ directory in the source tree.
+sys.dont_write_bytecode = True
+
+import gi
+gi.require_version("GioUnix", "2.0")
+from gi.repository import GLib
+
+tray_path, work = sys.argv[1], sys.argv[2]
+os.makedirs(work, exist_ok=True)
+
+loader = importlib.machinery.SourceFileLoader("tray_exec", tray_path)
+spec = importlib.util.spec_from_loader("tray_exec", loader)
+module = importlib.util.module_from_spec(spec)
+loader.exec_module(module)
+
+problems = []
+paths = [
+    "/home/my user/bin/onedrive-tray",
+    "/home/100%/bin/onedrive-tray",
+    "/home/a\\b/bin/onedrive-tray",
+    '/home/o"d/bin/onedrive-tray',
+    "/home/a$b/bin/onedrive-tray",
+    "/home/space% and\\slash/onedrive-tray",
+]
+for index, path in enumerate(paths):
+    entry = os.path.join(work, "entry-%d.desktop" % index)
+    with open(entry, "w", encoding="utf-8") as fh:
+        fh.write(module.autostart_contents(path))
+    line = [x for x in open(entry, encoding="utf-8").read().splitlines()
+            if x.startswith("Exec=")][0]
+    value = line[len("Exec="):]
+    if not (value.startswith('"') and value.endswith('"')):
+        problems.append("%r was written unquoted: %s" % (path, line))
+        continue
+    # The key-file layer is what makes the file parse at all, so it is part of
+    # the check: an Escaped quote that GLib rejects is a file that never loads.
+    key_file = GLib.KeyFile()
+    try:
+        key_file.load_from_file(entry, GLib.KeyFileFlags.NONE)
+        raw = key_file.get_string("Desktop Entry", "Exec")
+        _, argv = GLib.shell_parse_argv(raw)
+    except Exception as exc:                      # noqa: BLE001
+        problems.append("%r does not parse: %s" % (path, exc))
+        continue
+    argv = [arg.replace("%%", "%") for arg in argv]
+    if argv != [path]:
+        problems.append("%r reads back as %r" % (path, argv))
 if problems:
     print("; ".join(problems))
     raise SystemExit(1)
