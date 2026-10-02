@@ -122,8 +122,10 @@ and `~$draft.docx` uploaded normally. The measurements are in
 
 ## Verified in CI
 
-Every push runs all five suites on a GitHub runner. That runner is a second
-environment rather than a repeat of the first:
+Every push runs all five suites on two GitHub runners, `ubuntu-latest` and
+`ubuntu-22.04`, with `fail-fast` off so one failing still reports what the other
+did. Neither is a repeat of the development machine, and they are not repeats of
+each other:
 
 | Component | Version |
 |---|---|
@@ -136,7 +138,12 @@ environment rather than a repeat of the first:
 
 systemd 255 is four major versions behind the development machine, python3 is
 3.12 rather than 3.14, and bash is 5.2 rather than 5.3, so a green run there
-does say something the local run cannot.
+does say something the local run cannot. The 22.04 runner is older again, with
+GLib 2.72 against 2.80 here, and it earned its place on the first run: it caught
+a test that imported `GioUnix`, a module that only exists from GLib 2.80, and so
+died before checking anything on the older distribution. Two floors move with the
+environment, because a case that needs a NetworkManager hook skips where there is
+none; the reasons are in `tests/floors.txt`.
 
 The runner's rclone being 1.60.1 helps in one direction only. `install.sh`
 warns about that version, which is one of the cases the matrix checks. The sync

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The suites run on two GitHub runners, `ubuntu-latest` and `ubuntu-22.04`, with
+  `fail-fast` off. It found a real portability defect on its first run: a test
+  imported `GioUnix`, which only exists from GLib 2.80, so it died on 22.04's
+  GLib 2.72 before checking anything.
+
 ### Fixed
 
 - `install.sh` wrote `ExecStart=` into the systemd unit without quoting, so a
