@@ -369,6 +369,48 @@ run "no config: explains which file is missing" 1 "config not found" \
     env -i PATH="$PATH" HOME="$HOME" XDG_CONFIG_HOME="$WORK/none" \
         XDG_CACHE_HOME="$WORK/none" TMPDIR="$WORK" bash "$SRC_DIR/bin/onedrive-watch"
 
+# Both cases above only reach the watcher's failure paths, so neither the
+# debounce default nor the arguments inotifywait is handed were ever seen. This
+# fixture leaves WATCH_DEBOUNCE unset and sets an exclude regex, and a stub
+# inotifywait records the command line it was given before failing. The watcher
+# answers a failing inotifywait by retrying, so each run is cut short with
+# timeout and its exit status deliberately ignored; the debounce line is printed
+# before the loop is entered, and the recorded call is what the second case
+# reads.
+WATCH_FIX="$WORK/watch"; rm -rf "$WATCH_FIX"
+mkdir -p "$WATCH_FIX/cfg/rclone-onedrive-tray" "$WATCH_FIX/local" \
+         "$WATCH_FIX/bin" "$WATCH_FIX/tmp"
+cat > "$WATCH_FIX/cfg/rclone-onedrive-tray/config" <<EOF
+REMOTE="r:x"
+LOCAL="$WATCH_FIX/local"
+LOG="$WATCH_FIX/sync.log"
+WATCH_EXCLUDE="zz-watch-exclude-probe"
+EOF
+cat > "$WATCH_FIX/bin/inotifywait" <<'EOF'
+#!/bin/bash
+printf '%s\n' "$*" >> "$WATCH_CALLS"
+exit 1
+EOF
+chmod +x "$WATCH_FIX/bin/inotifywait"
+WATCH_CALLS="$WATCH_FIX/calls"
+
+watch_run() {   # watch_run -- the watcher for a moment; timeout stops its loop
+    env -i PATH="$WATCH_FIX/bin:$PATH" HOME="$HOME" \
+        XDG_CONFIG_HOME="$WATCH_FIX/cfg" XDG_CACHE_HOME="$WATCH_FIX/cache" \
+        TMPDIR="$WATCH_FIX/tmp" WATCH_CALLS="$WATCH_CALLS" \
+        timeout 5 bash "$SRC_DIR/bin/onedrive-watch" 2>&1
+}
+
+watch_args() {  # watch_args -- the command line inotifywait was handed
+    : > "$WATCH_CALLS"
+    watch_run >/dev/null 2>&1
+    cat "$WATCH_CALLS"
+}
+
+run "the default debounce is the documented 8 seconds" - "debounce 8s, settle 12s" watch_run
+run "the watcher passes its exclude regex to inotifywait" - \
+    "--exclude zz-watch-exclude-probe" watch_args
+
 # ---------------------------------------------------------------- the installer
 # install.sh ends by enabling its units through systemctl. Replacing systemctl
 # keeps that from touching the units of the machine this suite runs on -- the

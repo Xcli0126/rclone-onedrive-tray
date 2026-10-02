@@ -92,6 +92,12 @@ run "the non-interactive wizard finishes" 0 "Wrote" \
 
 check "writes the config" test -f "$CFG"
 check "writes the filters" test -f "$CFG_DIR/filters.txt"
+# A filters file that exists but holds "# none" is the same as no filters at all,
+# and a user following the wizard would never see it. The copy of the example was
+# replaced by a stub and every case still passed, because nothing compared the
+# contents of the file the wizard wrote.
+check "the obsidian filters are the shipped example, rule for rule" \
+    cmp -s "$SRC_DIR/config/filters.example" "$CFG_DIR/filters.txt"
 check "writes the exclude list" test -f "$CFG_DIR/exclude-folders.txt"
 for line in "REMOTE=\"$REMOTE\"" "LOCAL=\"$LOCAL_DIR\"" "UNIT_NAME=\"$UNIT\"" \
             "INTERVAL_MIN=\"7\"" "WATCH=\"1\"" "MAX_DELETE=\"100\"" \
@@ -1090,6 +1096,15 @@ esac
 exit 0
 STUB
 chmod +x "$DOC_STUBS/rclone" "$DOC_STUBS/systemctl"
+# The tray check asks pgrep for onedrive-tray, and no fixture ever had one, so
+# its "running (pid ...)" line was never printed. This stub answers only when a
+# case sets DOC_TRAY_PID, which leaves every other fixture's tray verdict alone.
+cat > "$DOC_STUBS/pgrep" <<'STUB'
+#!/bin/bash
+[ -n "${DOC_TRAY_PID:-}" ] && printf '%s\n' "$DOC_TRAY_PID"
+exit 0
+STUB
+chmod +x "$DOC_STUBS/pgrep"
 DOCTOR_TMP="$WORK/doctor-tmp"
 mkdir -p "$DOCTOR_TMP"
 
@@ -1104,8 +1119,8 @@ doc_fixture() {
              "$d/cache/rclone-onedrive-tray" "$d/data/rclone-onedrive-tray/icons" \
              "$d/local" "$d/bin" "$d/tmp"
     printf '*.tmp\n' > "$d/cfg/rclone-onedrive-tray/filters.txt"
-    cp "$DOC_STUBS/rclone" "$DOC_STUBS/systemctl" "$d/bin/"
-    chmod +x "$d/bin/rclone" "$d/bin/systemctl"
+    cp "$DOC_STUBS/rclone" "$DOC_STUBS/systemctl" "$DOC_STUBS/pgrep" "$d/bin/"
+    chmod +x "$d/bin/rclone" "$d/bin/systemctl" "$d/bin/pgrep"
     cat > "$d/cfg/rclone-onedrive-tray/config" <<EOF
 REMOTE="docfake:Vault"
 LOCAL="$d/local"
@@ -1131,6 +1146,7 @@ doc_run() {
         XDG_DATA_HOME="$d/data" TMPDIR="$d/tmp" PATH="$path" \
         DOC_TIMER_ENABLED="$DOC_TIMER_ENABLED" DOC_TIMER_ACTIVE="$DOC_TIMER_ACTIVE" \
         DOC_LSD_RC="${DOC_LSD_RC:-0}" DOC_LSD_ERR="${DOC_LSD_ERR:-}" \
+        DOC_TRAY_PID="${DOC_TRAY_PID:-}" \
         "$DOCTOR_BIN" "$@"
 }
 
@@ -1148,6 +1164,24 @@ else
     bad "a healthy fixture: exit $DOCTOR_RC, $DOCTOR_BARE line(s) without a verdict"
     printf '%s\n' "$DOCTOR_OUT" | head -3 | sed 's/^/        /'
 fi
+
+# The ok line for a config that sources cleanly names the file and the two keys
+# every check after it depends on. Replacing that message with another string
+# left the case above passing, because only the exit status and the shape of the
+# line are looked at there.
+run "a clean config: the ok line names the file and both keys" 0 \
+    "$DOC_FX/cfg/rclone-onedrive-tray/config sets REMOTE and LOCAL" \
+    doc_run "$DOC_FX" --offline
+
+# The tray check prints its one distinctive line only when pgrep finds a tray,
+# and no fixture ever had one, so the line could be replaced with anything. The
+# stub pgrep answers for this case alone, through DOC_TRAY_PID.
+doc_fixture tray-running
+DOC_TRAY_PID=8123
+run "a running tray: the ok line names the pid and the icon directory" 0 \
+    "running (pid 8123), icons in $DOC_FX/data/rclone-onedrive-tray/icons" \
+    doc_run "$DOC_FX" --offline
+DOC_TRAY_PID=""
 
 doc_fixture no-config
 rm -f "$DOC_FX/cfg/rclone-onedrive-tray/config"
@@ -1216,6 +1250,15 @@ if [ "$DOCTOR_RC" -eq 2 ] && grep -q '^usage:' <<<"$DOCTOR_OUT" &&
 else
     bad "unknown flag: exit $DOCTOR_RC, $(head -1 <<<"$DOCTOR_OUT")"
 fi
+
+# The wrapper stops before it syncs when its log cannot be opened, so the doctor
+# reports that as a failure. Flipping that verdict to ok went unnoticed, because
+# no fixture ever made the log unwritable: the message, unlike the verdict, is
+# the same either way.
+doc_fixture unwritable-log
+chmod 0444 "$DOC_FX/cache/sync.log"
+run "an unwritable log is a failure, not an ok" 1 "fail logfile" \
+    doc_run "$DOC_FX" --quiet --offline
 
 # The whole point of the script is that it is safe to run at any time, so the
 # tree, the config's contents and the config's mtime are compared around a run.
