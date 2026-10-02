@@ -2218,7 +2218,10 @@ import sys
 sys.dont_write_bytecode = True
 
 import gi
-gi.require_version("GioUnix", "2.0")
+# Only GLib is used here. GioUnix is not, and requiring it would fail on any
+# distribution older than GLib 2.80, which is how this case first failed on
+# ubuntu-22.04 in CI.
+gi.require_version("GLib", "2.0")
 from gi.repository import GLib
 
 tray_path, work = sys.argv[1], sys.argv[2]
