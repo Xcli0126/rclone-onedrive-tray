@@ -978,7 +978,12 @@ def read_quota(remote: str):
 # rclone prints a stats block every --stats seconds. Only the last one matters.
 PROG_RE = re.compile(
     r"Transferred:\s+([\d.]+\s*\S+)\s*/\s*([\d.]+\s*\S+),\s*(\d+)%,\s*([\d.]+\s*\S+/s)")
-BUSY_RE = re.compile(r"^\s*\*\s+(.+?):\s", re.M)
+# rclone writes the file it is working on after a "*", and puts a space
+# after the colon while the transfer is in flight but not once it has
+# finished ("note.md:  0% ..." against "note.md:100% ..."). Requiring that
+# space lost the name on every finished block, which is the shape most
+# stats blocks end with.
+BUSY_RE = re.compile(r"^\s*\*\s+(.+?):\s*", re.M)
 STAMP_RE = re.compile(r"^(\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2})", re.M)
 
 

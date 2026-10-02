@@ -2460,4 +2460,53 @@ if "already running" in d["held_stderr"]:
 '
 fi
 
+title "Progress, in the shapes a real run writes"
+# The fixture above feeds one statistics block, the one with a percentage. A real
+# log is mostly the other shape: a run that transfers nothing prints "-" where the
+# percentage would be, and one that is starting prints the same while a file is
+# already in flight. Both are copied out of this machine's own log, which holds 68
+# blocks with a percentage and several hundred without.
+check "the block with no percentage means no progress, not 0%" \
+    python3 - "$TRAY" <<'PY'
+import importlib.machinery
+import importlib.util
+import sys
+
+sys.dont_write_bytecode = True
+loader = importlib.machinery.SourceFileLoader("tray_progress", sys.argv[1])
+spec = importlib.util.spec_from_loader("tray_progress", loader)
+module = importlib.util.module_from_spec(spec)
+loader.exec_module(module)
+
+problems = []
+nothing = ("2026/10/02 17:32:01 INFO  : \n"
+           "Transferred:   \t          0 B / 0 B, -, 0 B/s, ETA -\n"
+           "Checks:              1658 / 1658, 100%, Listed 1776\n")
+if module.read_progress(nothing, max_age=10 ** 9) is not None:
+    problems.append("an idle run reported progress: %r"
+                    % (module.read_progress(nothing, max_age=10 ** 9),))
+
+starting = ("Transferring:\n"
+            " *                  99-Daily/note.md:  0% / 752 B, 0 B/s, -\n"
+            "\n"
+            "Transferred:   \t          0 B / 752 B, -, 0 B/s, ETA -\n")
+if module.read_progress(starting, max_age=10 ** 9) is not None:
+    problems.append("a run that has moved no bytes reported progress: %r"
+                    % (module.read_progress(starting, max_age=10 ** 9),))
+
+real = ("Transferred:   \t        752 B / 752 B, 100%, 188 B/s, ETA 0s\n"
+        "Checks:              1657 / 1657, 100%, Listed 1884\n"
+        "Transferring:\n"
+        " *                  99-Daily/2026-10-02-dsh.md:100% / 752 B, 187 B/s, 0s\n")
+got = module.read_progress(real, max_age=10 ** 9)
+if not got or got.get("pct") != 100 or got.get("speed") != "188 B/s":
+    problems.append("a real finished block read as %r" % (got,))
+elif got.get("file") != "99-Daily/2026-10-02-dsh.md":
+    problems.append("the file in flight was reported as %r" % (got.get("file"),))
+
+if problems:
+    print("; ".join(problems))
+    raise SystemExit(1)
+PY
+
 summary

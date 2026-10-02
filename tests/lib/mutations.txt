@@ -36,3 +36,5 @@ doctor-tray-check	bin/onedrive-doctor	s|    report ok tray "running (pid $tray_p
 doctor-logfile-writable	bin/onedrive-doctor	s|        report fail logfile "$LOG is not writable|        report ok logfile "$LOG is not writable|	install-flow
 install-rclone-version-warning	install.sh	s|        warn "rclone $RCLONE_VER is older than 1.65: automatic recovery from an"|        warn "rclone $RCLONE_VER is fine"|	dependency-matrix
 setup-filters-choice	setup.sh	s|    obsidian\|default) cp -f "$SRC_DIR/config/filters.example" "$FILTERS_FILE" ;;|    obsidian\|default) printf "# none\n" > "$FILTERS_FILE" ;;|	install-flow
+# the colon-space rule, which lost the file name on finished transfers
+tray-busy-line-space	bin/onedrive-tray	s|:\\s\*", re.M)|:\\s+", re.M)|	tray
