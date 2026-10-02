@@ -25,3 +25,14 @@ uninstall-drop-in	uninstall.sh	s|rm -rf "$UNIT_DIR/$UNIT_NAME.timer.d"|true|	ins
 install-execstart-quoting	systemd/onedrive-sync.service.in	s|ExecStart="%SYNC_SCRIPT%"|ExecStart=%SYNC_SCRIPT%|	install-flow
 # and a --purge that leaves the cache, and with it the log and the pause stamp
 uninstall-purge-cache	uninstall.sh	s|rm -rf "$CACHE_DIR"|true|	install-flow
+watch-debounce	bin/onedrive-watch	s|DEBOUNCE="${WATCH_DEBOUNCE:-8}"|DEBOUNCE="${WATCH_DEBOUNCE:-0}"|	dependency-matrix
+watch-exclude-dropped	bin/onedrive-watch	s|ARGS+=(--exclude "$EXCLUDE_RE")|true|	dependency-matrix
+access-skip-local-marker	bin/onedrive-check-access	s|        > "$local_check" \|\| die "cannot write $local_check"|        true|	install-flow
+access-skip-remote-copy	bin/onedrive-check-access	s|run "$RCLONE" copyto "$local_check" "$remote_check"|true|	install-flow
+tray-quote-only-backslash	bin/onedrive-tray	s|    for ch in ("\\\\", '"', "$", "`"):|    for ch in ("\\\\",):|	tray
+tray-pause-durations	bin/onedrive-tray	s|PAUSE_CHOICES = ((30, "30 minutes"), (120, "2 hours"), (480, "8 hours"))|PAUSE_CHOICES = ((30, "30 minutes"), (120, "2 hours"), (240, "4 hours"))|	tray
+doctor-config-read	bin/onedrive-doctor	s|        report ok config "$CONFIG_FILE sets REMOTE and LOCAL|        report ok config "anything at all|	install-flow
+doctor-tray-check	bin/onedrive-doctor	s|    report ok tray "running (pid $tray_pid), icons in $icons_dir"|    report ok tray "not checked"|	install-flow
+doctor-logfile-writable	bin/onedrive-doctor	s|        report fail logfile "$LOG is not writable|        report ok logfile "$LOG is not writable|	install-flow
+install-rclone-version-warning	install.sh	s|        warn "rclone $RCLONE_VER is older than 1.65: automatic recovery from an"|        warn "rclone $RCLONE_VER is fine"|	dependency-matrix
+setup-filters-choice	setup.sh	s|    obsidian\|default) cp -f "$SRC_DIR/config/filters.example" "$FILTERS_FILE" ;;|    obsidian\|default) printf "# none\n" > "$FILTERS_FILE" ;;|	install-flow
