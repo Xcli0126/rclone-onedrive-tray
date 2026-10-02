@@ -35,11 +35,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `tests/lib/mutate.sh` and `tests/lib/mutations.txt`: fifteen deliberate changes
-  to the shipped scripts, applied one at a time against the suite that covers
-  them, to find behaviour no test would notice. Fourteen are caught. The survivor
-  is a branch in `onedrive-check` that a local filesystem cannot reach, which is
-  now written down rather than assumed tested.
+- `tests/lib/mutate.sh` and `tests/lib/mutations.txt`: twenty-nine deliberate
+  changes to the shipped scripts, applied one at a time against the suite that
+  covers them, to find behaviour no test would notice. Twenty-eight are caught.
+  The survivor is a branch in `onedrive-check` that a local filesystem cannot
+  reach, which is now written down rather than assumed tested.
 
 ### Fixed
 
