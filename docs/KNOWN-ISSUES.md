@@ -76,6 +76,12 @@ test is allowed to touch before anyone starts.
   reinstalled copy therefore starts with the old log and, if a pause was in
   progress, its stamp. Nothing breaks, and the argument for deleting a log on
   uninstall is not obvious, so it stays until somebody wants it gone.
+- `onedrive-check`'s name-length branch cannot fire on a local filesystem: the
+  limit is the documented 255, and a filesystem refuses a name longer than 255
+  bytes, so nothing on disk can reach it. It was found by mutating the limit to
+  99999 and watching every suite stay green. The branch is kept for filesystems
+  that allow longer names, and it is not tested because there is nothing to test
+  it with.
 - `install.sh` quotes the `Exec=` line of the autostart entry but not `ExecStart=`
   in the systemd unit, so a prefix containing a space would still produce a unit
   whose `ExecStart` is two arguments. The default prefix has no space, so this is

@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+#
+# mutate.sh: which of the shipped behaviours would the suites actually notice?
+#
+#   tests/lib/mutate.sh              every row
+#   tests/lib/mutate.sh <id>...      named rows only
+#   RESULTS=mutations.txt tests/lib/mutate.sh     also write the table to a file
+#
+# Each row of mutations.txt describes one small, deliberate change to a shipped
+# script: a rule removed, a comparison flipped, a default changed, a flag
+# dropped. The harness copies the tree, applies that one change with sed, runs
+# the named suite against the copy, and records whether the suite failed. A
+# change no suite notices is a hole in the suite, not a curiosity: this is how a
+# branch in onedrive-check that no filesystem can reach, and one assertion of the
+# tray suite's delete scenario that could not fail, were found.
+#
+# Not part of CI: it takes ten minutes, and it answers a question rather than
+# guarding a door. It is not named tests/*.sh on purpose, so the documentation
+# check does not count it as a sixth suite.
+set -uo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="$(cd "$HERE/../.." && pwd)"
+TABLE="$HERE/mutations.txt"
+WORK="$(mktemp -d)" || exit 1
+trap 'rm -rf "$WORK"' EXIT
+
+[ -f "$TABLE" ] || { echo "no $TABLE" >&2; exit 1; }
+wanted=("$@")
+
+note() {
+    printf '%s\n' "$*"
+    [ -n "${RESULTS:-}" ] && printf '%s\n' "$*" >> "$RESULTS"
+}
+
+[ -n "${RESULTS:-}" ] && : > "$RESULTS"
+survived=0
+caught=0
+skipped=0
+
+while IFS=$'\t' read -r id target expr suite; do
+    case "$id" in ''|'#'*) continue ;; esac
+    if [ "${#wanted[@]}" -gt 0 ]; then
+        hit=0
+        for w in "${wanted[@]}"; do [ "$w" = "$id" ] && hit=1; done
+        [ "$hit" = 1 ] || continue
+    fi
+
+    rm -rf "${WORK:?}/tree"
+    mkdir -p "$WORK/tree"
+    tar -C "$REPO" --exclude=.git -cf - . | tar -C "$WORK/tree" -xf -
+
+    before="$(md5sum < "$WORK/tree/$target")"
+    sed -i "$expr" "$WORK/tree/$target" 2>/dev/null
+    after="$(md5sum < "$WORK/tree/$target")"
+    if [ "$before" = "$after" ]; then
+        note "$(printf '%-34s SKIPPED  the expression matched nothing' "$id")"
+        skipped=$((skipped + 1))
+        continue
+    fi
+
+    out="$(cd "$WORK/tree" && timeout 900 bash "tests/$suite.sh" 2>&1 | tail -1 |
+        sed -e 's/\x1b\[[0-9;]*m//g')"
+    case "$out" in
+        *"0 failed"*)
+            note "$(printf '%-34s SURVIVED %s' "$id" "$out")"
+            survived=$((survived + 1)) ;;
+        *)
+            note "$(printf '%-34s caught   %s' "$id" "$out")"
+            caught=$((caught + 1)) ;;
+    esac
+done < "$TABLE"
+
+note "$(printf '\n%d caught, %d survived, %d skipped' "$caught" "$survived" "$skipped")"
+[ "$survived" -eq 0 ]

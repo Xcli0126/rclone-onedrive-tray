@@ -1,0 +1,23 @@
+# One row per deliberate change to a shipped script, tab separated:
+#
+#   id <TAB> file <TAB> sed-expression <TAB> suite
+#
+# The expression is applied to a private copy of the tree, the named suite runs
+# against it, and a suite that still passes means the change went unnoticed. Each
+# change is a behaviour a user would care about, so a survivor is a hole in the
+# suite rather than a curiosity.
+sync-max-delete-as-count	bin/onedrive-sync	s|max_delete_pct=$(( MAX_DELETE \* 100 / pair_total ))|max_delete_pct=\"$MAX_DELETE\"|	install-flow
+sync-drop-bwlimit	bin/onedrive-sync	s|ARGS+=(--bwlimit "$bw_limit")|true|	install-flow
+sync-drop-check-access	bin/onedrive-sync	s|ARGS+=(--check-access)|true|	install-flow
+sync-drop-resync-notice	bin/onedrive-sync	s|log_line "NOTICE: --resync requested, rebuilding baseline"|true|	install-flow
+sync-unknown-pair-allows-all	bin/onedrive-sync	s|max_delete_pct=5|max_delete_pct=100|	install-flow
+check-drop-reserved-names	bin/onedrive-check	s|con.prn.aux.nul.com\[0-9\].lpt\[0-9\]) return 0 ;;|zzz) return 0 ;;|	filters
+check-name-limit	bin/onedrive-check	s|LIMIT_NAME=255|LIMIT_NAME=99999|	filters
+check-long-path-exit	bin/onedrive-check	s|    exit 1|    exit 0|	filters
+doctor-network-is-fail	bin/onedrive-doctor	s|network) report warn remote|network) report fail remote|	install-flow
+doctor-exit	bin/onedrive-doctor	s|^exit 1$|exit 0|	install-flow
+tray-delete-prefix	bin/onedrive-tray	s|prefix = root if root.endswith(os.sep) else root + os.sep|prefix = root|	tray
+tray-hash-rule	bin/onedrive-tray	s|if name.startswith("#"):|if False:|	tray
+install-exec-quoting	install.sh	s|tray_exec="$(desktop_exec_arg "$BIN_DIR/onedrive-tray")"|tray_exec="$BIN_DIR/onedrive-tray"|	install-flow
+install-prefix-guard	install.sh	s|PREFIX="${2:?--prefix needs a directory}"|PREFIX="$2"|	install-flow
+uninstall-drop-in	uninstall.sh	s|rm -rf "$UNIT_DIR/$UNIT_NAME.timer.d"|true|	install-flow

@@ -528,6 +528,11 @@ def scenario_folder_delete():
     nested = os.path.join(local, "a", "b")
     link = os.path.join(local, "link-to-outside")
     selflink = os.path.join(local, "self-link")
+    # A sibling directory whose name merely starts with the root's name. Without
+    # the trailing separator on the prefix check this one passes for "inside the
+    # root", and a symlink to it would hand the whole directory to rmtree.
+    sibling = local + "-old"
+    oldlink = os.path.join(local, "link-to-sibling")
 
     os.makedirs(os.path.join(ordinary, "sub"), exist_ok=True)
     with open(os.path.join(ordinary, "sub", "inner.txt"), "w",
@@ -540,7 +545,12 @@ def scenario_folder_delete():
     with open(os.path.join(outside, "precious.txt"), "w",
               encoding="utf-8") as fh:
         fh.write("keep me\n")
-    for path, destination in ((link, outside), (selflink, local)):
+    os.makedirs(sibling, exist_ok=True)
+    with open(os.path.join(sibling, "older.txt"), "w",
+              encoding="utf-8") as fh:
+        fh.write("still synced elsewhere\n")
+    for path, destination in ((link, outside), (selflink, local),
+                              (oldlink, sibling)):
         if os.path.lexists(path):
             os.remove(path)
         os.symlink(destination, path)
@@ -586,12 +596,25 @@ def scenario_folder_delete():
             pump(0.3)
             data["asked"][name] = len(asked)
 
+        # The prefix check needs a name that passes the exclusion gate, or that
+        # gate refuses it first and the assertion below proves nothing. This is
+        # the one case here where the name is genuinely on the exclusion list and
+        # only the path guard stands between it and rmtree.
+        MODULE.write_excluded_folders(tray.exclude_file,
+                                      ["ordinary", "link-to-sibling"])
+        del asked[:]
+        tray._offer_local_delete("link-to-sibling")
+        pump(0.3)
+        data["asked"]["link-to-sibling"] = len(asked)
+
         data["nested_intact"] = os.path.isfile(
             os.path.join(nested, "kept.txt"))
         data["outside_kept"] = os.path.isdir(outside)
         data["outside_files"] = sorted(os.listdir(outside))
         data["link_intact"] = (os.path.islink(link)
                                and os.path.realpath(link) == os.path.realpath(outside))
+        data["sibling_kept"] = os.path.isdir(sibling)
+        data["sibling_files"] = sorted(os.listdir(sibling))
         data["local_listing"] = sorted(os.listdir(local))
     finally:
         MODULE.Gtk.MessageDialog = real
@@ -1779,6 +1802,16 @@ if d["asked"][""] != 0:
           % (d["asked"][""],))
     raise SystemExit(1)
 '
+    check "a symlink to a sibling named like the root is refused" json_py '
+if d["asked"]["link-to-sibling"] != 0:
+    print("a dialog was put on screen for a sibling directory: %r"
+          % (d["asked"]["link-to-sibling"],))
+    raise SystemExit(1)
+if not d["sibling_kept"] or d["sibling_files"] != ["older.txt"]:
+    print("the sibling directory was touched: kept=%r files=%r"
+          % (d["sibling_kept"], d["sibling_files"]))
+    raise SystemExit(1)
+'
     check "a symlink that leaves LOCAL is refused" json_py '
 if d["asked"]["link-to-outside"] != 0:
     print("a dialog was put on screen for the symlink: %r"
@@ -1799,7 +1832,7 @@ if not d["outside_kept"] or d["outside_files"] != ["precious.txt"]:
     check "the symlink still points at the outside directory" \
         json_expr "d['link_intact']"
     check "the refused names left the rest of LOCAL where it was" json_py '
-if d["local_listing"] != ["a", "link-to-outside", "self-link"]:
+if d["local_listing"] != ["a", "link-to-outside", "link-to-sibling", "self-link"]:
     print("LOCAL holds %r" % (d["local_listing"],))
     raise SystemExit(1)
 '

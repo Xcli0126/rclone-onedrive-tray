@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `tests/lib/mutate.sh` and `tests/lib/mutations.txt`: fifteen deliberate changes
+  to the shipped scripts, applied one at a time against the suite that covers
+  them, to find behaviour no test would notice. Fourteen are caught. The survivor
+  is a branch in `onedrive-check` that a local filesystem cannot reach, which is
+  now written down rather than assumed tested.
+
+### Fixed
+
+- The tray suite's case for the delete guard's sibling-directory prefix check
+  could not fail: the exclusion gate refused the name before the guard under test
+  ran. It now puts the name on the exclusion list first, so only the prefix check
+  can refuse it, and mutating that check turns the case red.
+
 ## [1.4.0] - 2026-10-01
 
 ### Added

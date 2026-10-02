@@ -22,6 +22,22 @@ list can be checked against the tree in a few seconds.
 
 Add `--verbose` to any of them to see each command and its output.
 
+How much those cases would notice is a separate question from how many there are,
+so the tree is also put through a mutation pass: fifteen deliberate changes to the
+shipped scripts, one at a time, each run against the suite that covers it.
+`tests/lib/mutate.sh` runs it and `tests/lib/mutations.txt` lists the rows.
+Fourteen are caught, several by a dozen assertions at once. The one that survives
+is the name-length branch in `onedrive-check`, and it survives for a reason worth
+writing down: a local filesystem refuses a name longer than 255 bytes, so with the
+limit set at the documented 255 there is no name on disk that can reach it. The
+branch is kept for filesystems that allow more, and `docs/KNOWN-ISSUES.md` records
+that it is unreachable here rather than pretending a test covers it.
+
+The pass earned its keep on its first run twice over: it found that branch, and it
+found that the tray suite's new case for the sibling-directory prefix check could
+not fail, because the exclusion gate refused the name before the check under test
+ever ran. Both are fixed.
+
 `dependency-matrix.sh` hides a single dependency and checks that what happens
 matches what the documentation promises: the tray must name the apt package it
 needs, the wrapper must refuse to run rather than quietly skip, the installer
