@@ -45,10 +45,16 @@ jobs:
           grep -q '%TRAY_SCRIPT%'  autostart/rclone-onedrive-tray.desktop.in
 
   tests:
-    # Second environment on purpose: this runner's distribution, systemd, bash and
-    # rclone are all older than the machine the project was written on, so a green
-    # job is a data point rather than a repeat of the same run.
-    runs-on: ubuntu-latest
+    # Two environments on purpose. ubuntu-latest is this project's own
+    # distribution and ubuntu-22.04 is two years older, with an older systemd,
+    # bash and rclone, so a green job is a data point rather than a repeat of the
+    # same run. fail-fast is off so one distribution failing still tells you what
+    # the other one did.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
