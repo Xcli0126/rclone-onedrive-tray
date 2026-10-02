@@ -21,3 +21,7 @@ tray-hash-rule	bin/onedrive-tray	s|if name.startswith("#"):|if False:|	tray
 install-exec-quoting	install.sh	s|tray_exec="$(desktop_exec_arg "$BIN_DIR/onedrive-tray")"|tray_exec="$BIN_DIR/onedrive-tray"|	install-flow
 install-prefix-guard	install.sh	s|PREFIX="${2:?--prefix needs a directory}"|PREFIX="$2"|	install-flow
 uninstall-drop-in	uninstall.sh	s|rm -rf "$UNIT_DIR/$UNIT_NAME.timer.d"|true|	install-flow
+# the unit's ExecStart unquoted, which systemd reads as two arguments
+install-execstart-quoting	systemd/onedrive-sync.service.in	s|ExecStart="%SYNC_SCRIPT%"|ExecStart=%SYNC_SCRIPT%|	install-flow
+# and a --purge that leaves the cache, and with it the log and the pause stamp
+uninstall-purge-cache	uninstall.sh	s|rm -rf "$CACHE_DIR"|true|	install-flow

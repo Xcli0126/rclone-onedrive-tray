@@ -542,7 +542,7 @@ STRINGS = {
         "Show the icon in the panel": "在面板上显示图标",
         "Sync interval (minutes)": "同步间隔（分钟）",
         "Realtime sync": "实时同步",
-        "Tell me when a sync succeeds": "同步成功时通知我",
+        "Tell me when a sync I start succeeds": "我手动发起的同步成功时通知我",
         "Delete cap (files)": "删除上限（文件数）",
         "Bandwidth limit": "带宽限制",
         "Unlimited": "不限速",
@@ -2144,7 +2144,7 @@ def _settings_dialog_class():
             grid.attach(self.check_watch, 0, 4, 2, 1)
 
             self.check_notify = Gtk.CheckButton(
-                label=self.t("Tell me when a sync succeeds"))
+                label=self.t("Tell me when a sync I start succeeds"))
             self.check_notify.set_active(truthy(self.original["NOTIFY_ON_SUCCESS"]))
             grid.attach(self.check_notify, 0, 5, 2, 1)
 

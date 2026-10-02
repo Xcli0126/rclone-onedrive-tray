@@ -32,6 +32,7 @@ done
 
 BIN_DIR="$PREFIX/bin"
 CONFIG_DIR="$XDG_CONFIG/rclone-onedrive-tray"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/rclone-onedrive-tray"
 UNIT_DIR="$XDG_CONFIG/systemd/user"
 AUTOSTART="$XDG_CONFIG/autostart/rclone-onedrive-tray.desktop"
 
@@ -105,6 +106,10 @@ if [ "$PURGE" -eq 1 ]; then
     say "Removing configuration"
     rm -rf "$CONFIG_DIR"
     rm -rf "${XDG_DATA_HOME:-$HOME/.local/share}/rclone-onedrive-tray"
+    # The cache holds the sync log, the lock and the pause stamp. They describe
+    # the install that is being removed, so --purge takes them too; a plain
+    # uninstall keeps everything, which is what makes a repair easy.
+    rm -rf "$CACHE_DIR"
     warn "the rclone remote config (~/.config/rclone/rclone.conf) was kept"
 else
     warn "configuration kept in $CONFIG_DIR (use --purge to remove it)"

@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `install.sh` wrote `ExecStart=` into the systemd unit without quoting, so a
+  prefix containing a space produced a unit whose command systemd read as two
+  arguments, and `systemd-analyze verify` rejected it outright. Both templates
+  quote the path now, and the installer escapes what systemd treats specially
+  inside a unit, including the `%` that starts a specifier. The desktop entry
+  had the same bug one release earlier; this is the other half of it.
+- `uninstall.sh --purge` removed the configuration and the icon directory but
+  left the cache behind, so a reinstall started with the old log, the old lock
+  and, if a pause had been in progress, its stamp.
+
+### Changed
+
+- The notification setting reads "Tell me when a sync I start succeeds", which
+  is what it does: scheduled runs stay quiet, because a five-minute timer
+  announcing every success would train people to ignore the notifications that
+  matter. A failure always notifies. The wording was the only thing wrong.
+
 ### Added
 
 - `tests/lib/mutate.sh` and `tests/lib/mutations.txt`: fifteen deliberate changes

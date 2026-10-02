@@ -1984,7 +1984,7 @@ if d["title"] != "Settings" or d["config_line"] != want:
     check "every control is there" json_py '
 needed = ["Language", "Show the icon in the panel", "Start tray at login",
           "Sync interval (minutes)", "Realtime sync",
-          "Tell me when a sync succeeds", "Delete cap (files)",
+          "Tell me when a sync I start succeeds", "Delete cap (files)",
           "Bandwidth limit", "Access check", "Create the marker files",
           "Save", "Cancel"]
 missing = [name for name in needed if name not in d["labels"]]

@@ -213,8 +213,10 @@ check "installs the autostart entry" \
 check "autostart points at the installed tray" \
     grep -qF "Exec=$HOME/.local/bin/onedrive-tray" \
     "$XDG_CONFIG_HOME/autostart/rclone-onedrive-tray.desktop"
+# Quoted, because systemd splits ExecStart on whitespace and a prefix can
+# contain a space. A path that needs no quoting still reads the same to systemd.
 check "ExecStart points at the installed wrapper" \
-    grep -qF "ExecStart=$HOME/.local/bin/onedrive-sync" "$UNIT_DIR/$UNIT.service"
+    grep -qF "ExecStart=\"$HOME/.local/bin/onedrive-sync\"" "$UNIT_DIR/$UNIT.service"
 check "the timer uses OnUnitInactiveSec, so runs cannot overlap" \
     grep -q '^OnUnitInactiveSec=7min' "$UNIT_DIR/$UNIT.timer"
 # The units are in the sandbox, which the running user manager does not read, so
@@ -252,6 +254,18 @@ if grep -qxF "Exec=\"$SPACE_HOME/.local/bin/onedrive-tray\"" "$SPACE_DESKTOP"; t
     ok "Exec double quotes the tray path, so the space stays one argument"
 else
     bad "Exec is not quoted for a path with a space: $(grep '^Exec=' "$SPACE_DESKTOP" 2>/dev/null)"
+fi
+
+# The unit file is not a desktop entry, but it has the same problem: systemd
+# splits ExecStart on whitespace unless the path is quoted, and it expands %i and
+# friends inside a unit, so a percent in the path has to be written twice.
+# This install has no config to take a unit name from, so it uses the default.
+SPACE_UNIT="$SPACE_HOME/.config/systemd/user/onedrive-sync.service"
+check "the unit is written for a prefix with a space" test -f "$SPACE_UNIT"
+if grep -qxF "ExecStart=\"$SPACE_HOME/.local/bin/onedrive-sync\"" "$SPACE_UNIT"; then
+    ok "ExecStart quotes the sync path, so the space stays one argument"
+else
+    bad "ExecStart is not quoted for a path with a space: $(grep '^ExecStart=' "$SPACE_UNIT" 2>/dev/null)"
 fi
 
 PCT_HOME="$WORK/pct%home"
@@ -1341,5 +1355,8 @@ else
     printf '%s\n' "$PURGE_OUT" | head -3 | sed 's/^/        /'
 fi
 check_absent "--purge removes the configuration directory" "$CFG_DIR"
+# The cache holds the log, the lock and the pause stamp: state that describes the
+# install being removed rather than the user's data.
+check_absent "--purge removes the cache directory" "$XDG_CACHE_HOME/rclone-onedrive-tray"
 
 summary

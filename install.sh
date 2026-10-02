@@ -38,6 +38,28 @@ CONFIG_DIR="$XDG_CONFIG/rclone-onedrive-tray"
 UNIT_DIR="$XDG_CONFIG/systemd/user"
 AUTOSTART_DIR="$XDG_CONFIG/autostart"
 
+# systemd reads ExecStart with its own quoting rules, and expands %i, %n and
+# friends inside a unit file. A path that needs quoting is wrapped in double
+# quotes (the templates do that) and its backslashes, quotes and percents are
+# escaped here, so a prefix like "/home/x/My Files" or one holding a % still
+# starts the right program.
+systemd_exec_arg() {  # systemd_exec_arg <path>
+    local text="$1"
+    text="${text//\\/\\\\}"
+    text="${text//\"/\\\"}"
+    text="${text//%/%%}"
+    printf '%s' "$text"
+}
+
+# sed's replacement text gives \ and & a meaning of their own, and | ends the s
+# command, so the value is escaped for sed before it goes in.
+sed_replacement() {  # sed_replacement <text>
+    local text="$1"
+    text="${text//\\/\\\\}"
+    text="${text//&/\\&}"
+    text="${text//|/\\|}"
+    printf '%s' "$text"
+}
 say()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31m[x]\033[0m %s\n' "$*" >&2; exit 1; }
@@ -155,7 +177,7 @@ INTERVAL_MIN="$(sed -n 's/^[[:space:]]*INTERVAL_MIN="\{0,1\}\([0-9]*\)"\{0,1\}.*
                  "$CONFIG_DIR/config" | tail -1)"
 INTERVAL_MIN="${INTERVAL_MIN:-5}"
 
-sed -e "s|%SYNC_SCRIPT%|$BIN_DIR/onedrive-sync|g" \
+sed -e "s|%SYNC_SCRIPT%|$(sed_replacement "$(systemd_exec_arg "$BIN_DIR/onedrive-sync")")|g" \
     "$SRC_DIR/systemd/onedrive-sync.service.in" > "$UNIT_DIR/$UNIT_NAME.service"
 sed -e "s|%INTERVAL%|$INTERVAL_MIN|g" \
     "$SRC_DIR/systemd/onedrive-sync.timer.in" > "$UNIT_DIR/$UNIT_NAME.timer"
@@ -165,7 +187,7 @@ WATCH="$(sed -n 's/^[[:space:]]*WATCH="\{0,1\}\([^"]*\)"\{0,1\}.*/\1/p' \
          "$CONFIG_DIR/config" | tail -1)"
 WATCH="${WATCH:-1}"
 if [ "$WATCH" = "1" ]; then
-    sed -e "s|%WATCH_SCRIPT%|$BIN_DIR/onedrive-watch|g" \
+    sed -e "s|%WATCH_SCRIPT%|$(sed_replacement "$(systemd_exec_arg "$BIN_DIR/onedrive-watch")")|g" \
         "$SRC_DIR/systemd/onedrive-watch.service.in" \
         > "$UNIT_DIR/$UNIT_NAME-watch.service"
     chmod 0644 "$UNIT_DIR/$UNIT_NAME-watch.service"
@@ -193,15 +215,6 @@ desktop_exec_arg() {  # desktop_exec_arg <path> -> the Exec argument
     esac
 }
 
-# sed's replacement text gives \ and & a meaning of their own, and | ends the s
-# command, so the value is escaped for sed before it goes in.
-sed_replacement() {  # sed_replacement <text>
-    local text="$1"
-    text="${text//\\/\\\\}"
-    text="${text//&/\\&}"
-    text="${text//|/\\|}"
-    printf '%s' "$text"
-}
 
 say "Installing autostart entry"
 mkdir -p "$AUTOSTART_DIR"

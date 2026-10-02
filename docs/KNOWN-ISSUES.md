@@ -42,13 +42,6 @@ walk, which reads as a permissions problem rather than an unsupported option.
 The supported target is Ubuntu, and [COMPATIBILITY](COMPATIBILITY.md) says so.
 Changing this is a support-matrix decision rather than a cleanup.
 
-### `NOTIFY_ON_SUCCESS=1` is silent for a scheduled run
-
-The success notification only fires when the run was asked for from the tray. A
-scheduled run that succeeds says nothing, which is not what the key's name
-promises. The suite asserts today's behaviour in both directions, so changing it
-has to be a deliberate decision rather than a tidy.
-
 ### `Tray` is one 900-line class
 
 Menu construction, the three-second poll, the six actions, the folder submenu and
@@ -71,24 +64,21 @@ test is allowed to touch before anyone starts.
 - The duplication figures quoted in the 1.2.0 audit came from a hand-written
   six-line window script, not a clone detector, and `extras/` was never measured
   at all.
-- `uninstall.sh --purge` removes the configuration and the icon directory but not
-  the cache directory, which holds the sync log, the lock and the pause stamp. A
-  reinstalled copy therefore starts with the old log and, if a pause was in
-  progress, its stamp. Nothing breaks, and the argument for deleting a log on
-  uninstall is not obvious, so it stays until somebody wants it gone.
 - `onedrive-check`'s name-length branch cannot fire on a local filesystem: the
   limit is the documented 255, and a filesystem refuses a name longer than 255
   bytes, so nothing on disk can reach it. It was found by mutating the limit to
   99999 and watching every suite stay green. The branch is kept for filesystems
   that allow longer names, and it is not tested because there is nothing to test
   it with.
-- `install.sh` quotes the `Exec=` line of the autostart entry but not `ExecStart=`
-  in the systemd unit, so a prefix containing a space would still produce a unit
-  whose `ExecStart` is two arguments. The default prefix has no space, so this is
-  only reachable with `--prefix` pointing somewhere unusual.
 
 ## Accepted, with the reason
 
+- `NOTIFY_ON_SUCCESS` covers a sync you start from the tray, not the scheduled
+  runs. The window says so ("Tell me when a sync I start succeeds"), and the
+  reason is that a five-minute timer announcing every success would train people
+  to ignore the notifications that matter. A failure always notifies. Whether a
+  scheduled run that recovers from an earlier failure deserves one is a fair
+  question and is not implemented.
 - `rclone bisync` is experimental upstream. See the "Known limitations" section of
   the README.
 - The panel icon needs an AppIndicator-compatible shell, which on stock GNOME
