@@ -316,10 +316,9 @@ report "$lock_verdict" lock "$lock_msg"
 
 # ---- 7. log ---------------------------------------------------------------
 # The last line carrying a timestamp says when the wrapper last wrote. The
-# newest failure hint is classified with the wrapper's own patterns, in its
-# order: a failure that never reached Microsoft talks about tokens, so the
-# network patterns are tested before the sign-in ones, and a network problem is
-# never reported as an expiry.
+# newest failure hint is classified with the wrapper's own patterns; the order
+# they are asked in is in classify_hint, below, and the sign-in markers come
+# first for the reason written there.
 RE_LOCK='prior lock file found'
 RE_MAXDELETE='too many deletes|excessive deletes|deletion limit'
 RE_ACCESS='access test failed|check file check failed'

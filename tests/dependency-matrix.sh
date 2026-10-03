@@ -494,6 +494,62 @@ run "rclone older than 1.65: installs, but warns about recovery" 0 "older than 1
         XDG_CACHE_HOME="$WORK/i5c" XDG_DATA_HOME="$WORK/i5d" \
     bash "$SRC_DIR/install.sh" --prefix "$WORK/i5p" --no-start
 
+# config.example documents RCLONE as "the rclone binary to run, by name or by path.
+# Change it to use a build outside PATH", and onedrive-sync and onedrive-doctor
+# honour it. install.sh gated the whole install on `command -v rclone` and took its
+# version warning from whatever PATH held, so the user who followed that advice
+# could not install at all. These two cases are the two halves: nothing called
+# rclone on PATH, and an old rclone on PATH beside a good one in the config.
+ALT_DIR="$WORK/altbin"; ALT_CALLS="$WORK/alt-calls"
+rm -rf "$ALT_DIR" "$WORK/alt-cfg"; mkdir -p "$ALT_DIR" "$WORK/alt-cfg/rclone-onedrive-tray"
+cat > "$ALT_DIR/rclone" <<EOF
+#!/bin/bash
+printf '%s\n' "\$*" >> "$ALT_CALLS"
+[ "\$1" = version ] && echo "rclone v1.75.1"
+exit 0
+EOF
+chmod +x "$ALT_DIR/rclone"
+cat > "$WORK/alt-cfg/rclone-onedrive-tray/config" <<EOF
+REMOTE="r:x"
+LOCAL="$WORK/alt-local"
+UNIT_NAME="zz-alt-probe"
+INTERVAL_MIN="5"
+WATCH="0"
+RCLONE="$ALT_DIR/rclone"
+EOF
+: > "$ALT_CALLS"
+build_reduced_path rclone
+run "a config naming a path with nothing called rclone on PATH still installs" 0 \
+    "Installed" \
+    env PATH="$STUB:$REDUCED" HOME="$HOME" XDG_CONFIG_HOME="$WORK/alt-cfg" \
+        XDG_CACHE_HOME="$WORK/alt-cache" XDG_DATA_HOME="$WORK/alt-data" \
+    bash "$SRC_DIR/install.sh" --prefix "$WORK/alt-prefix" --no-start
+check "and the version check asked the binary the config names" \
+    grep -qxF 'version' "$ALT_CALLS"
+
+# The other half: an rclone on PATH that is too old, and a current one named by
+# the config. The warning has to be about the binary the project will actually
+# run, or it sends the user to upgrade something nothing uses.
+mkdir -p "$WORK/oldpath"
+cat > "$WORK/oldpath/rclone" <<'EOF'
+#!/bin/bash
+[ "$1" = version ] && echo "rclone v1.60.1"
+exit 0
+EOF
+chmod +x "$WORK/oldpath/rclone"
+: > "$ALT_CALLS"
+ALTB_OUT="$(env PATH="$WORK/oldpath:$STUB:$PATH" HOME="$HOME" \
+    XDG_CONFIG_HOME="$WORK/alt-cfg" XDG_CACHE_HOME="$WORK/alt-cache" \
+    XDG_DATA_HOME="$WORK/alt-data" \
+    bash "$SRC_DIR/install.sh" --prefix "$WORK/alt-prefix" --no-start 2>&1)"
+if grep -qF 'older than 1.65' <<<"$ALTB_OUT"; then
+    bad "the old rclone on PATH was warned about instead of the config's"
+elif grep -qxF 'version' "$ALT_CALLS"; then
+    ok "an old rclone on PATH is not what the config's RCLONE gets warned about"
+else
+    bad "the config's rclone was never asked its version"
+fi
+
 # ---------------------------------------------------------------- the wizard
 title "setup.sh"
 build_reduced_path rclone

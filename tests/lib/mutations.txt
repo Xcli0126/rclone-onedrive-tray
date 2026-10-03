@@ -43,6 +43,11 @@ install-systemd-percent	install.sh	s|    text="${text//%/%%}"|    :|	install-flo
 sync-glob-escape-dropped	bin/onedrive-sync	s#ARGS+=(--exclude "/\${literal}/\*\*")#ARGS+=(--exclude "/${folder}/**")#	install-flow
 sync-verbose-log-level	bin/onedrive-sync	s|    ARGS+=(--log-file "$LOG")|    ARGS+=(--log-level INFO --log-file "$LOG")|	install-flow
 check-rename-subtree	bin/onedrive-check	s|                  \[ -d "$LOCAL/$2" \] && renamed_dirs\["$2"\]=1 ;;|                  : ;;|	filters
+# two more of the six rename groups docs/TROUBLESHOOTING.md promises: the leading
+# tilde, and the name that is not valid UTF-8. Both arms could be deleted with
+# every suite green before the group cases existed.
+check-rename-tilde	bin/onedrive-check	s|bad_part="leading tilde in '\$part'" ;;|: ;;|	filters
+check-rename-utf8	bin/onedrive-check	s|! is_valid_utf8 "\$part"|false|	filters
 tray-setunits-invalidate	bin/onedrive-tray	/def _set_units/,/^$/ s/^        self\._units_changed()$/        pass/	tray
 tray-bw-limit-fallback	bin/onedrive-tray	s|                             else self.original\["BW_LIMIT"\]),|                             else ""),|	tray
 doctor-pattern-drift	bin/onedrive-doctor	s|^RE_LOCK='prior lock file found'|RE_LOCK='prior lock file present'|	docs
@@ -62,6 +67,15 @@ docs-duplicate-heading	docs/KNOWN-ISSUES.md	s|^### Two sync pairs cannot coexist
 doctor-standing-old-hint	bin/onedrive-doctor	s|\[ "$standing_at" -gt "$last_ok" \]|true|	install-flow
 # a second Added inside one release, which the format allows only one of
 docs-duplicate-changelog	CHANGELOG.md	s|^### Changed|### Added\n\n### Changed|	docs
+# three rules that live in two files each, compared only by tests/docs.sh: the
+# listing slug, the positive-integer key list, and the set of keys the doctor
+# claims to know
+docs-doctor-slug-drift	bin/onedrive-doctor	s#sed -e 's|^/||' -e 's|\[/: \]|_|g'#sed -e 's|^/||' -e 's|\[/:. \]|_|g'#	docs
+docs-doctor-key-list-drift	bin/onedrive-doctor	s|    for key in RETRIES RETRY_DELAY MAX_LOG_BYTES; do|    for key in RETRIES RETRY_DELAY; do|	docs
+docs-doctor-known-keys-drift	bin/onedrive-doctor	s|SHOW_ICON WATCH|WATCH|	docs
+# the README config sample losing its BISYNC_ARGS line, which used to be reported
+# as a skip when the line was indented out of the gate's sight
+docs-readme-args-dropped	README.md	s|^BISYNC_ARGS=".*"$||	docs
 # rclone's one-line refusal matches both tables, so the marker that can only come
 # from Microsoft has to be asked about first. These stand for that order: with the
 # auth markers out of the way the mixed line is read as a network failure, which
@@ -114,3 +128,42 @@ tray-reload-log-cache	bin/onedrive-tray	/if name == "log":/,/self\.log_result = 
 # pattern is a character class and the row tests something the comment does not say.
 tray-hint-regex-length	bin/onedrive-tray	s|^HINT_RE = re.compile(r".*)$|HINT_RE = re.compile(r"\\[(\\d+)\\]\\s*(.*)$")|	tray
 tray-hint-regex-group	bin/onedrive-tray	s|^HINT_RE = re.compile(r".*)$|HINT_RE = re.compile(r"\\[(\\w)\\]\\s*(.*)$")|	tray
+# The Desktop Entry quoting rule: one pass is not enough for a key file, and the
+# second pass is what GLib needs for a prefix holding a dollar or a quote.
+install-desktop-exec-second-pass	install.sh	s|^            arg="${arg//\\\\/\\\\\\\\}"$|            :|	install-flow
+install-nm-hook-path	install.sh	s|NM_DISPATCHER_DIR/90-rclone-onedrive-tray|/etc/NetworkManager/dispatcher.d/90-rclone-onedrive-tray|	install-flow
+install-nm-home-override	install.sh	s|real_home="${REAL_HOME_OVERRIDE:-$(getent passwd|real_home="$(getent passwd|	install-flow
+install-nm-uninstall-override	uninstall.sh	s|real_home="${REAL_HOME_OVERRIDE:-$(getent passwd|real_home="$(getent passwd|	install-flow
+install-nm-home-guard	install.sh	s|if \[ -n "$real_home" \] && \[ "$HOME" != "$real_home" \]; then|if false; then|	install-flow
+install-nm-guard-still-installs	install.sh	/so it is not installed/,/^        if \[/ s|^    else$|    fi; if :; then|	install-flow
+install-rclone-probe-from-config	install.sh	s|command -v "$RCLONE_BIN" >/dev/null 2>&1|command -v rclone >/dev/null 2>\&1|	dependency-matrix
+install-rclone-version-from-config	install.sh	s|RCLONE_VER="$("$RCLONE_BIN" version|RCLONE_VER="$(rclone version|	dependency-matrix
+install-watch-on-spellings	install.sh	s|if watch_on "$WATCH" && \[ "$HAVE_INOTIFY" -eq 1 \]; then|if [ "$WATCH" = "1" ] \&\& [ "$HAVE_INOTIFY" -eq 1 ]; then|	install-flow
+install-summary-third-copy	install.sh	s|\$(scripts_summary)|  scripts   $BIN_DIR/onedrive-sync, $BIN_DIR/onedrive-tray, $BIN_DIR/onedrive-watch\n            $BIN_DIR/onedrive-check, $BIN_DIR/onedrive-check-access|	install-flow
+install-systemd-dollar	install.sh	s|^    text="\${text//\\\$/\\\$\\\$}"|    :|	install-flow
+# The NetworkManager hook: the dispatcher directory, the real-home guard that
+# keeps a redirected HOME from writing into /etc, and the installer actually
+# honouring the guard instead of reporting it and installing anyway.
+# The config RCLONE key reaching the probe and the version check, the WATCH
+# spellings, the systemd dollar rule, and the summary read from one list.
+# The wizard carries the keys it is not asking about over from the config it is
+# rewriting, and reads RCLONE from that config before it probes PATH.
+setup-carry-ignored	setup.sh	s|^OLD_CONFIG="\$(cat "\$CONFIG_FILE" 2>/dev/null \|\| true)"$|OLD_CONFIG=""|	install-flow
+setup-rclone-from-config	setup.sh	s|command -v "\$RCLONE_BIN" >/dev/null 2>&1|command -v rclone >/dev/null 2>\&1|	install-flow
+docs-wizard-args-drift	setup.sh	s|^DEFAULT_BISYNC_ARGS="--resilient --recover --max-lock 2m --conflict-resolve none --conflict-loser num --stats 2s"$|DEFAULT_BISYNC_ARGS="--resilient --recover --max-lock 2m --conflict-resolve none --conflict-loser num"|	docs
+# The tray half of round six: the RCLONE key, the UTF-8 config fault, the
+# systemd refusal and its fallback, the folder row that said Loading forever,
+# the enabled spelling and the spelling a Save keeps, the autostart checkbox
+# reading the file, and the missing-REMOTE sentence naming the real fix.
+tray-rclone-binary	bin/onedrive-tray	s|self.rclone = cfg.get("RCLONE") or "rclone"|self.rclone = "rclone"|	tray
+tray-config-bad-utf8	bin/onedrive-tray	s|raise ConfigFault(config_utf8_problem(exc)) from exc|pass|	tray
+tray-config-reload-bad-utf8	bin/onedrive-tray	s|        except ConfigFault:|        except ZeroDivisionError:|	tray
+tray-start-checks-rc	bin/onedrive-tray	/def _run(self, mode):/,/^        finally:$/ s|rc, out, err = self._sc("start", "--no-block", self.service)|rc, out, err = 0, "", ""|	tray
+tray-start-fallback	bin/onedrive-tray	/def _start_service/,/def _start_reason/ s|            return self._run_wrapper(err or out)|            return rc|	tray
+tray-start-failed-status	bin/onedrive-tray	s|            self.start_error = why|            pass|	tray
+tray-folder-failure-row	bin/onedrive-tray	s|            if self.folders_error:|            if False:|	tray
+tray-folder-error-rebuild	bin/onedrive-tray	s|                or self.folders_error != self.folders_error_seen):|                ):|	tray
+tray-truthy-enabled	bin/onedrive-tray	s|in ("1", "true", "yes", "on", "enabled")|in ("1", "true", "yes", "on")|	tray
+tray-settings-keeps-spelling	bin/onedrive-tray	s|            if truthy(original) == active:|            if False:|	tray
+tray-boot-reads-the-file	bin/onedrive-tray	s|self.check_boot.set_active(self.original_boot)|self.check_boot.set_active(False)|	tray
+tray-remote-fix-names-writer	bin/onedrive-tray	s|or add REMOTE="yourremote:" to that file.|or run onedrive-doctor to set it up.|	tray

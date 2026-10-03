@@ -176,6 +176,72 @@ run "a second --yes run overwrites it instead of aborting" 0 "Wrote" \
 check "and the second run's value is the one on disk" \
     grep -qxF 'INTERVAL_MIN="11"' "$RERUN_CFG"
 
+# The same re-run rewrote every key the wizard never asks about from its template,
+# and dropped the ones its template did not know: a hand-set bandwidth cap, access
+# check, log size, icon and notification setting were reset to their defaults on a
+# documented re-run, and RCLONE, the key a user sets to point at a build outside
+# PATH, was deleted. The flags own REMOTE, LOCAL, UNIT_NAME, INTERVAL_MIN, WATCH
+# and the two file paths; the rest are the user's unless the file gives no value.
+title "what the wizard keeps of the config it is not asking about"
+HAND_HOME="$WORK/hand-home"
+HAND_CFG="$HAND_HOME/.config/rclone-onedrive-tray/config"
+rm -rf "$HAND_HOME"; mkdir -p "$HAND_HOME/.config/rclone-onedrive-tray" "$HAND_HOME/bin"
+cat > "$HAND_HOME/bin/rclone-custom" <<'STUB'
+#!/bin/bash
+printf '%s\n' "$1" >> "$HOME/rclone-calls"
+case "$1" in
+    listremotes) echo "handfake:" ;;
+    lsd) echo "          -1 2026-01-01 00:00:00        -1 Notes" ;;
+    *) : ;;
+esac
+exit 0
+STUB
+chmod +x "$HAND_HOME/bin/rclone-custom"
+cat > "$HAND_CFG" <<EOF
+REMOTE="handfake:"
+LOCAL="$HAND_HOME/OneDrive"
+UNIT_NAME="zz-hand-probe"
+RCLONE="$HAND_HOME/bin/rclone-custom"
+MAX_DELETE="42"
+BW_LIMIT="1M"
+CHECK_ACCESS="1"
+MAX_LOG_BYTES="1048576"
+SHOW_ICON="0"
+NOTIFY_ON_SUCCESS="0"
+RETRIES="5"
+EOF
+# The key is read before the probe, so a machine whose rclone is outside PATH can
+# still run the wizard: with a PATH holding no rclone at all, the config's binary is
+# the only one that can answer, and the stub records that it did.
+rm -f "$HAND_HOME/rclone-calls"
+WIZARD_PATH="$WORK/wizard-path"; mkdir -p "$WIZARD_PATH"
+run "the wizard runs the binary the config names when PATH has no rclone" 0 "Wrote" \
+    env -i PATH="$WIZARD_PATH:/usr/bin:/bin" HOME="$HAND_HOME" \
+        XDG_CONFIG_HOME="$HAND_HOME/.config" XDG_CACHE_HOME="$HAND_HOME/.cache" \
+    bash "$SRC_DIR/setup.sh" --remote handfake: --local "$HAND_HOME/OneDrive" \
+        --filters none --interval 11 --unit-name zz-hand-probe --yes --no-install
+check "and the binary it names is the one that was asked for the remotes" \
+    grep -qx 'listremotes' "$HAND_HOME/rclone-calls"
+run "a re-run of the wizard finishes with the config it was given" 0 "Wrote" \
+    env HOME="$HAND_HOME" XDG_CONFIG_HOME="$HAND_HOME/.config" \
+        XDG_CACHE_HOME="$HAND_HOME/.cache" \
+    bash "$SRC_DIR/setup.sh" --remote handfake: --local "$HAND_HOME/OneDrive" \
+        --filters none --interval 11 --unit-name zz-hand-probe --yes --no-install
+check "and the bandwidth cap the user set is still there" \
+    grep -qxF 'BW_LIMIT="1M"' "$HAND_CFG"
+check "and so is the access check" grep -qxF 'CHECK_ACCESS="1"' "$HAND_CFG"
+check "and the delete cap the wizard never asks about" \
+    grep -qxF 'MAX_DELETE="42"' "$HAND_CFG"
+check "and the log size, which its template did not even carry" \
+    grep -qxF 'MAX_LOG_BYTES="1048576"' "$HAND_CFG"
+check "and the icon setting" grep -qxF 'SHOW_ICON="0"' "$HAND_CFG"
+check "and the notification setting" grep -qxF 'NOTIFY_ON_SUCCESS="0"' "$HAND_CFG"
+check "and RCLONE, which a re-run used to delete" \
+    grep -qxF "RCLONE=\"$HAND_HOME/bin/rclone-custom\"" "$HAND_CFG"
+check "and the wrapper's retry count" grep -qxF 'RETRIES="5"' "$HAND_CFG"
+check "while the key the flag owns follows the flag" \
+    grep -qxF 'INTERVAL_MIN="11"' "$HAND_CFG"
+
 # ---------------------------------------------------------------- what a re-run keeps
 # ask() returns the prompt's default without reading anything under --yes or
 # when stdin is not a terminal. The exclude list was truncated on every run and
@@ -322,6 +388,19 @@ check "the timer uses OnUnitInactiveSec, so runs cannot overlap" \
 run "it does not enable a unit the manager cannot see" 0 "nothing was enabled" \
     bash "$SRC_DIR/install.sh" --prefix "$HOME/.local" --no-start
 
+# The "Installed" summary is the only place a user reads what was put where, and
+# the scripts line used to be a second hand-written copy of the list the install
+# loop iterates: a script could be installed and then left out of the report. The
+# summary now reads that list, and this is the check that it names every entry at
+# the path it was really installed to -- an earlier draft of the shared line
+# printed $BIN_DIR/bin/<name>, which nothing else noticed.
+INSTALL_OUT="$(bash "$SRC_DIR/install.sh" --prefix "$HOME/.local" --no-start 2>&1)"
+for s in onedrive-sync onedrive-tray onedrive-watch onedrive-check \
+         onedrive-check-access onedrive-doctor; do
+    check "the Installed summary names $s at its installed path" \
+        grep -qF "$HOME/.local/bin/$s" <<<"$INSTALL_OUT"
+done
+
 if command -v systemd-analyze >/dev/null 2>&1; then
     check "systemd accepts $UNIT.service" \
         systemd-analyze --user verify "$UNIT_DIR/$UNIT.service"
@@ -433,6 +512,24 @@ env HOME="$WATCH_HOME" XDG_CONFIG_HOME="$WATCH_HOME/.config" \
 check "an install that rewrites the watcher unit restarts a running one" \
     grep -qF -- "try-restart $WATCH_PROBE-watch.service" "$WATCH_CALLS"
 
+# The on-spellings are written down in four places and three of them agree on
+# 1|true|yes|on|enabled; install.sh tested for the literal "1". A config saying
+# WATCH="yes" therefore had the installer disable a watcher that onedrive-sync,
+# onedrive-doctor and the tray all consider on.
+sed -i 's/^WATCH=.*/WATCH="yes"/' "$WATCH_CFG_DIR/config"
+: > "$WATCH_CALLS"
+env HOME="$WATCH_HOME" XDG_CONFIG_HOME="$WATCH_HOME/.config" \
+    XDG_CACHE_HOME="$WATCH_HOME/.cache" XDG_DATA_HOME="$WATCH_HOME/.data" \
+    PATH="$WATCH_STUB_DIR:$PATH" \
+    bash "$SRC_DIR/install.sh" --prefix "$WATCH_HOME/.local" --no-start \
+    >"$WORK/watch-yes-out.txt" 2>&1
+if grep -qF -- "enable --now $WATCH_PROBE-watch.service" "$WATCH_CALLS"; then
+    ok "WATCH=yes enables the watcher, the spelling the rest of the project takes"
+else
+    bad "WATCH=yes left the watcher disabled"
+    grep -i 'watch' "$WORK/watch-yes-out.txt" | head -3 | sed 's/^/        /'
+fi
+
 # A UNIT_NAME changed between installs leaves the old timer enabled forever, and
 # nothing said so. The timer is the entry point systemd starts.
 title "a sibling timer left by an earlier unit name"
@@ -492,6 +589,80 @@ check "a percent in the path is escaped as a literal field code" \
 PCT_UNIT="$PCT_HOME/.config/systemd/user/onedrive-sync.service"
 check "the unit escapes the percent in ExecStart the same way" \
     grep -qxF "ExecStart=\"${PCT_HOME//%/%%}/.local/bin/onedrive-sync\"" "$PCT_UNIT"
+
+# systemd documents a dollar in ExecStart as the start of a variable reference,
+# with $$ written for a literal one. This case asserts the documented rule rather
+# than a measured expansion: proving what systemd would expand means starting a
+# unit, and this suite never touches the service manager.
+DOL_HOME="$WORK/dollar\$home"
+rm -rf "$DOL_HOME"; mkdir -p "$DOL_HOME"
+env HOME="$DOL_HOME" XDG_CONFIG_HOME="$DOL_HOME/.config" \
+    XDG_CACHE_HOME="$DOL_HOME/.cache" XDG_DATA_HOME="$DOL_HOME/.data" \
+    bash "$SRC_DIR/install.sh" --no-start >"$WORK/dollar-out.txt" 2>&1
+DOL_UNIT="$DOL_HOME/.config/systemd/user/onedrive-sync.service"
+DOL_EXPECT="$(printf '%s' "$DOL_HOME" | sed 's/\$/$$/g')"
+check "a dollar in the path is written \$\$ in ExecStart, per systemd's documented rule" \
+    grep -qxF "ExecStart=\"$DOL_EXPECT/.local/bin/onedrive-sync\"" "$DOL_UNIT"
+
+# The tray writes the same file through its own copy of the rule, and tests/tray.sh
+# pins that copy against GLib. install.sh's copy escaped the same characters in one
+# pass and wrapped the result in quotes, which is one pass short: GLib's key-file
+# reader refuses `\$` with "Key file contains key Exec which has a value that cannot
+# be interpreted", and a file that does not load is a tray that never starts at
+# login while the "Start tray at login" checkbox still reports the setting as on.
+# The list is the tray suite's, plus a backtick, which that list does not carry.
+check "install.sh's Exec line parses with GLib for every path the tray suite uses" \
+    python3 - "$SRC_DIR" "$WORK/exec-quoting" <<'PY'
+import os
+import subprocess
+import sys
+
+import gi
+gi.require_version("GLib", "2.0")
+from gi.repository import GLib
+
+src, work = sys.argv[1], sys.argv[2]
+os.makedirs(work, exist_ok=True)
+# The same shapes tests/tray.sh hands the tray's writer, plus a backtick.
+suffixes = ["my user", "100%", "a\\b", 'o"d', "a$b", "space% and\\slash", "a`b"]
+problems = []
+for index, suffix in enumerate(suffixes):
+    prefix = os.path.join(work, "prefix-%d" % index, suffix)
+    home = os.path.join(work, "home-%d" % index)
+    cfg = os.path.join(work, "cfg-%d" % index)
+    os.makedirs(home, exist_ok=True)
+    env = dict(os.environ, HOME=home, XDG_CONFIG_HOME=cfg,
+               XDG_CACHE_HOME=cfg + "-cache", XDG_DATA_HOME=cfg + "-data")
+    proc = subprocess.run(["bash", os.path.join(src, "install.sh"),
+                           "--prefix", prefix, "--no-start"],
+                          env=env, capture_output=True, text=True)
+    entry = os.path.join(cfg, "autostart", "rclone-onedrive-tray.desktop")
+    path = os.path.join(prefix, "bin", "onedrive-tray")
+    if not os.path.exists(entry):
+        problems.append("%r: no entry was written (rc=%d) %s"
+                        % (prefix, proc.returncode, proc.stdout[-300:]))
+        continue
+    line = [x for x in open(entry, encoding="utf-8").read().splitlines()
+            if x.startswith("Exec=")][0]
+    value = line[len("Exec="):]
+    if not (value.startswith('"') and value.endswith('"')):
+        problems.append("%r was written unquoted: %s" % (path, line))
+        continue
+    key_file = GLib.KeyFile()
+    try:
+        key_file.load_from_file(entry, GLib.KeyFileFlags.NONE)
+        raw = key_file.get_string("Desktop Entry", "Exec")
+        _, argv = GLib.shell_parse_argv(raw)
+    except Exception as exc:                      # noqa: BLE001
+        problems.append("%r does not parse: %s" % (path, exc))
+        continue
+    argv = [arg.replace("%%", "%") for arg in argv]
+    if argv != [path]:
+        problems.append("%r reads back as %r" % (path, argv))
+if problems:
+    print("; ".join(problems))
+    raise SystemExit(1)
+PY
 
 # ---------------------------------------------------------------- the wrapper
 title "onedrive-sync against a stub remote"
@@ -1829,7 +2000,10 @@ check "keeps the configuration (documented; --purge removes it)" test -f "$CFG"
 check_absent "never ran sudo" "$WORK/sudo-calls"
 HOOK=/etc/NetworkManager/dispatcher.d/90-rclone-onedrive-tray
 if [ -f "$HOOK" ]; then
-    if grep -q "Leaving" <<<"$UNINSTALL_OUT"; then
+    # The sentence the HOME-redirect guard prints, not the shared word "Leaving":
+    # that word alone was satisfied by this guard on every run, because the suite
+    # always redirects HOME.
+    if grep -qF "Leaving $HOOK alone: HOME is redirected" <<<"$UNINSTALL_OUT"; then
         ok "left the machine-wide hook to the install that owns it"
     else
         bad "a hook exists for another unit and uninstall did not say it left it alone"
@@ -1869,5 +2043,186 @@ else
 fi
 run "an uninstall with nothing left to keep says so" 0 "nothing to remove" \
     bash "$SRC_DIR/uninstall.sh" --prefix "$HOME/.local"
+
+# ---------------------------------------------------------------- the NM hook
+# README, docs/DEPENDENCIES.md and docs/TROUBLESHOOTING.md all tell the user to
+# run `install.sh --with-nm-dispatcher`, and no suite ran it: the coverage trace
+# showed the whole `if [ "$NM_DISPATCHER" -eq 1 ]` body counting zero, and the
+# case above ("left the machine-wide hook to the install that owns it") was
+# satisfied by the HOME-redirect guard, which always fires here because the suite
+# redirects HOME. The unit-name guard and the removal below it were never
+# reached. NM_DISPATCHER_DIR and REAL_HOME_OVERRIDE are what point both scripts at
+# a sandbox hook, so the three guards can be told apart without writing into /etc.
+title "the NetworkManager dispatcher hook"
+NM_HOME="$WORK/nm-home"
+NM_CFG_DIR="$NM_HOME/.config/rclone-onedrive-tray"
+NM_UNIT="zz-nm-probe"
+NM_DIR="$WORK/nm-dispatch"
+NM_SUDO_CALLS="$WORK/nm-sudo-calls"
+NM_STUB="$WORK/nm-stubs"
+NM_FAIL_STUB="$WORK/nm-stubs-refuse"
+rm -rf "$NM_HOME" "$NM_DIR" "$NM_STUB" "$NM_FAIL_STUB"
+mkdir -p "$NM_CFG_DIR" "$NM_DIR" "$NM_STUB" "$NM_FAIL_STUB"
+cat > "$NM_CFG_DIR/config" <<EOF
+REMOTE="$REMOTE"
+LOCAL="$NM_HOME/OneDrive"
+UNIT_NAME="$NM_UNIT"
+INTERVAL_MIN="5"
+WATCH="0"
+EOF
+# sudo is replaced by one that runs the call only when its target is inside this
+# sandbox, so a run against the unfixed scripts cannot reach the machine's real
+# hook -- and the unfixed run is the one these cases were written against.
+cat > "$NM_STUB/sudo" <<EOF
+#!/bin/bash
+printf '%s\n' "\$*" >> "$NM_SUDO_CALLS"
+target="\${@: -1}"
+case "\$1:\$target" in
+    install:"$WORK"/*) exec install -m 0755 "\${@: -2:1}" "\$target" ;;
+    rm:"$WORK"/*)      exec rm -f "\$target" ;;
+esac
+exit 1
+EOF
+chmod +x "$NM_STUB/sudo"
+NM_HOOK="$NM_DIR/90-rclone-onedrive-tray"
+
+# First the guard this suite used to satisfy with the word "Leaving": with HOME
+# redirected and no override, the hook would start a unit belonging to a user this
+# run never touched, so it must not be installed -- the guard says "so it is not
+# installed", and this is what makes that sentence true. Nothing here may write
+# into /etc: the stub above only executes a target inside the sandbox.
+rm -f "$NM_SUDO_CALLS" "$NM_HOOK"
+NM_GUARD_OUT="$(env HOME="$NM_HOME" XDG_CONFIG_HOME="$NM_HOME/.config" \
+    XDG_CACHE_HOME="$NM_HOME/.cache" XDG_DATA_HOME="$NM_HOME/.data" \
+    NM_DISPATCHER_DIR="$NM_DIR" PATH="$NM_STUB:$PATH" \
+    bash "$SRC_DIR/install.sh" --prefix "$NM_HOME/.local" --no-start \
+        --with-nm-dispatcher 2>&1)"
+if grep -qF "so it is not installed" <<<"$NM_GUARD_OUT"; then
+    ok "a redirected HOME says the machine-wide hook is not installed"
+else
+    bad "the HOME-redirect guard printed no refusal"
+    printf '%s\n' "$NM_GUARD_OUT" | grep -i 'hook\|HOME' | head -3 | sed 's/^/        /'
+fi
+check_absent "and it really did not install one" "$NM_HOOK" "$NM_SUDO_CALLS"
+
+: > "$NM_SUDO_CALLS"
+NM_OUT="$(env HOME="$NM_HOME" XDG_CONFIG_HOME="$NM_HOME/.config" \
+    XDG_CACHE_HOME="$NM_HOME/.cache" XDG_DATA_HOME="$NM_HOME/.data" \
+    NM_DISPATCHER_DIR="$NM_DIR" REAL_HOME_OVERRIDE="$NM_HOME" \
+    PATH="$NM_STUB:$PATH" \
+    bash "$SRC_DIR/install.sh" --prefix "$NM_HOME/opt" --no-start \
+        --with-nm-dispatcher 2>&1)"
+NM_RC=$?
+if [ "$NM_RC" -eq 0 ] && grep -qF "installed $NM_HOOK" <<<"$NM_OUT"; then
+    ok "--with-nm-dispatcher installs the hook"
+else
+    bad "--with-nm-dispatcher did not install the hook (rc=$NM_RC)"
+    printf '%s\n' "$NM_OUT" | tail -4 | sed 's/^/        /'
+fi
+check "and the hook names the configured unit" \
+    grep -qxF "UNIT=\"$NM_UNIT.service\"" "$NM_HOOK"
+run "and no %UNIT_NAME% placeholder survives it" 1 "" \
+    grep -qF '%UNIT_NAME%' "$NM_HOOK"
+check "and the install went through sudo" \
+    grep -qF -- "install -m 0755 -o root -g root" "$NM_SUDO_CALLS"
+check "and sudo was handed the hook path the installer named" \
+    grep -qF -- " $NM_HOOK" "$NM_SUDO_CALLS"
+# The prefix is not ~/.local here, which is the branch that warns the hook is
+# machine-wide and starts a unit outside the default prefix.
+check "and a prefix outside ~/.local is called out as machine-wide" \
+    grep -qF "this hook is machine-wide and will start $NM_UNIT.timer" <<<"$NM_OUT"
+
+# The machine may have no dispatcher directory at all -- NetworkManager is not
+# installed, or it keeps them elsewhere. The run has to skip the hook and say so.
+NM_ABSENT="$WORK/nm-absent"
+rm -rf "$NM_ABSENT" "$NM_HOOK" "$NM_SUDO_CALLS"
+NM_NODIR_OUT="$(env HOME="$NM_HOME" XDG_CONFIG_HOME="$NM_HOME/.config" \
+    XDG_CACHE_HOME="$NM_HOME/.cache" XDG_DATA_HOME="$NM_HOME/.data" \
+    NM_DISPATCHER_DIR="$NM_ABSENT" REAL_HOME_OVERRIDE="$NM_HOME" \
+    PATH="$NM_STUB:$PATH" \
+    bash "$SRC_DIR/install.sh" --prefix "$NM_HOME/.local" --no-start \
+        --with-nm-dispatcher 2>&1)"
+if grep -qF "no $NM_ABSENT on this system; skipping." <<<"$NM_NODIR_OUT"; then
+    ok "a missing dispatcher directory is skipped, and named"
+else
+    bad "a missing dispatcher directory was not reported"
+    printf '%s\n' "$NM_NODIR_OUT" | grep -i 'dispatcher\|hook' | head -3 | sed 's/^/        /'
+fi
+check_absent "and nothing was installed and no sudo was run" "$NM_HOOK" "$NM_SUDO_CALLS"
+
+# The unit-name guard: a hook that belongs to an install of a different unit.
+# Removing it would take the working install's hook with it.
+printf 'UNIT="zz-other-unit.service"\n' > "$NM_HOOK"
+rm -f "$NM_SUDO_CALLS"
+NM_OTHER_OUT="$(env HOME="$NM_HOME" XDG_CONFIG_HOME="$NM_HOME/.config" \
+    XDG_CACHE_HOME="$NM_HOME/.cache" NM_DISPATCHER_DIR="$NM_DIR" \
+    REAL_HOME_OVERRIDE="$NM_HOME" PATH="$NM_STUB:$PATH" \
+    bash "$SRC_DIR/uninstall.sh" --prefix "$NM_HOME/.local" 2>&1)"
+if grep -qF "Leaving $NM_HOOK alone: it does not mention $NM_UNIT" <<<"$NM_OTHER_OUT"; then
+    ok "a hook naming another unit is left alone, and the sentence names it"
+else
+    bad "the unit-name guard did not fire"
+    printf '%s\n' "$NM_OTHER_OUT" | grep -i 'networkmanager\|hook' | head -3 | sed 's/^/        /'
+fi
+check "and that hook is still on disk" test -f "$NM_HOOK"
+check_absent "and sudo was not asked to remove it" "$NM_SUDO_CALLS"
+
+# The removal path: the hook names the unit being uninstalled, so it goes.
+printf 'UNIT="%s.service"\n' "$NM_UNIT" > "$NM_HOOK"
+: > "$NM_SUDO_CALLS"
+NM_RM_OUT="$(env HOME="$NM_HOME" XDG_CONFIG_HOME="$NM_HOME/.config" \
+    XDG_CACHE_HOME="$NM_HOME/.cache" NM_DISPATCHER_DIR="$NM_DIR" \
+    REAL_HOME_OVERRIDE="$NM_HOME" PATH="$NM_STUB:$PATH" \
+    bash "$SRC_DIR/uninstall.sh" --prefix "$NM_HOME/.local" 2>&1)"
+if grep -qF "Removing the NetworkManager hook (needs root)" <<<"$NM_RM_OUT"; then
+    ok "a hook naming the configured unit is removed, and the run says so"
+else
+    bad "the removal path was not reached"
+    printf '%s\n' "$NM_RM_OUT" | grep -i 'networkmanager\|hook' | head -3 | sed 's/^/        /'
+fi
+check "and sudo was asked for exactly that file" \
+    grep -qxF "rm -f $NM_HOOK" "$NM_SUDO_CALLS"
+check_absent "and the hook is gone" "$NM_HOOK"
+
+# sudo can refuse or be absent, and the hook then stays. The run has to say that
+# and name the command that would finish the job, instead of reporting a removal
+# that did not happen.
+printf 'UNIT="%s.service"\n' "$NM_UNIT" > "$NM_HOOK"
+cat > "$NM_FAIL_STUB/sudo" <<EOF
+#!/bin/bash
+printf '%s\n' "\$*" >> "$NM_SUDO_CALLS"
+exit 1
+EOF
+chmod +x "$NM_FAIL_STUB/sudo"
+: > "$NM_SUDO_CALLS"
+NM_FAIL_OUT="$(env HOME="$NM_HOME" XDG_CONFIG_HOME="$NM_HOME/.config" \
+    XDG_CACHE_HOME="$NM_HOME/.cache" NM_DISPATCHER_DIR="$NM_DIR" \
+    REAL_HOME_OVERRIDE="$NM_HOME" PATH="$NM_FAIL_STUB:$PATH" \
+    bash "$SRC_DIR/uninstall.sh" --prefix "$NM_HOME/.local" 2>&1)"
+if grep -qF "could not remove it; run: sudo rm -f $NM_HOOK" <<<"$NM_FAIL_OUT"; then
+    ok "a refused sudo leaves the hook and names the command that removes it"
+else
+    bad "a failed removal was not reported"
+    printf '%s\n' "$NM_FAIL_OUT" | grep -i 'hook\|remove' | head -3 | sed 's/^/        /'
+fi
+check "and the hook is still there for that command to remove" test -f "$NM_HOOK"
+
+# The prefix guard, the one below the HOME guard and above the unit-name guard:
+# this uninstall is for a scratch prefix, so a hook naming the configured unit is
+# still not this run's to remove. Like the other two, its sentence is quoted.
+printf 'UNIT="%s.service"\n' "$NM_UNIT" > "$NM_HOOK"
+rm -f "$NM_SUDO_CALLS"
+NM_PFX_OUT="$(env HOME="$NM_HOME" XDG_CONFIG_HOME="$NM_HOME/.config" \
+    XDG_CACHE_HOME="$NM_HOME/.cache" NM_DISPATCHER_DIR="$NM_DIR" \
+    REAL_HOME_OVERRIDE="$NM_HOME" PATH="$NM_STUB:$PATH" \
+    bash "$SRC_DIR/uninstall.sh" --prefix "$NM_HOME/opt" 2>&1)"
+if grep -qF "Leaving $NM_HOOK alone: this uninstall is for $NM_HOME/opt" <<<"$NM_PFX_OUT"; then
+    ok "an uninstall for another prefix is left alone, and the sentence names it"
+else
+    bad "the prefix guard did not fire"
+    printf '%s\n' "$NM_PFX_OUT" | grep -i 'networkmanager\|hook' | head -3 | sed 's/^/        /'
+fi
+check "and that hook is still on disk" test -f "$NM_HOOK"
+check_absent "and sudo was not asked to remove it" "$NM_SUDO_CALLS"
 
 summary

@@ -124,8 +124,11 @@ What is left is the worth-having column, ordered:
 2. Per-file status in the file manager, which needs a Nautilus or Dolphin
    extension rather than anything in this repository.
 3. Pausing on a metered connection, read from NetworkManager, behind a setting.
-4. Bandwidth presets, written into `BISYNC_ARGS`.
-5. Naming the files in a mass-delete report.
+4. Naming the files in a mass-delete report.
+
+Bandwidth limiting is not on that list. `BW_LIMIT` is offered as a preset list in
+the settings window and reaches rclone as `--bwlimit`, which is what the table
+above records; nothing appends it to `BISYNC_ARGS`.
 
 Two things that came out of building the two above, and are worth knowing:
 

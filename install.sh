@@ -37,17 +37,26 @@ XDG_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}"
 CONFIG_DIR="$XDG_CONFIG/rclone-onedrive-tray"
 UNIT_DIR="$XDG_CONFIG/systemd/user"
 AUTOSTART_DIR="$XDG_CONFIG/autostart"
+# The NetworkManager hook is one machine-wide file. Naming its directory here,
+# overridable like every other path in this script, is what lets a test drive the
+# hook branches without writing into /etc; the default is what NetworkManager reads.
+NM_DISPATCHER_DIR="${NM_DISPATCHER_DIR:-/etc/NetworkManager/dispatcher.d}"
 
-# systemd reads ExecStart with its own quoting rules, and expands %i, %n and
-# friends inside a unit file. A path that needs quoting is wrapped in double
-# quotes (the templates do that) and its backslashes, quotes and percents are
-# escaped here, so a prefix like "/home/x/My Files" or one holding a % still
-# starts the right program.
+# systemd reads ExecStart with its own quoting rules, expands %i, %n and friends
+# inside a unit file, and expands $NAME as a variable reference; a literal dollar
+# is written $$. A path that needs quoting is wrapped in double quotes (the
+# templates do that) and its backslashes, quotes, percents and dollars are escaped
+# here, so a prefix like "/home/x/My Files", one holding a % or one holding a $
+# still starts the right program.
+#
+# The dollar rule is systemd's documented one, not a measured expansion: proving
+# what systemd would do with it means starting a unit, and no test here does that.
 systemd_exec_arg() {  # systemd_exec_arg <path>
     local text="$1"
     text="${text//\\/\\\\}"
     text="${text//\"/\\\"}"
     text="${text//%/%%}"
+    text="${text//\$/\$\$}"
     printf '%s' "$text"
 }
 
@@ -72,7 +81,30 @@ say "Checking dependencies"
 missing=()
 optional=()
 
-command -v rclone >/dev/null 2>&1 || missing+=("rclone")
+# config.example documents RCLONE as "the rclone binary to run, by name or by
+# path. Change it to use a build outside PATH", and onedrive-sync and
+# onedrive-doctor honour it. This script used to probe and version whatever
+# `rclone` PATH held, so a user who followed that advice could not install, and
+# one with an old rclone on PATH was warned about a binary the project never runs.
+# The key is read here, before the probe, and read the same way UNIT_NAME is
+# below. A first install has no config yet; the default is the name the shipped
+# example carries.
+RCLONE_BIN="rclone"
+if [ -f "$CONFIG_DIR/config" ]; then
+    parsed_rclone="$(sed -n 's/^[[:space:]]*RCLONE="\{0,1\}\([^"]*\)"\{0,1\}.*/\1/p' \
+                     "$CONFIG_DIR/config" | tail -1)"
+    if [ -n "$parsed_rclone" ]; then
+        RCLONE_BIN="$parsed_rclone"
+    fi
+fi
+
+if ! command -v "$RCLONE_BIN" >/dev/null 2>&1; then
+    if [ "$RCLONE_BIN" = "rclone" ]; then
+        missing+=("rclone")
+    else
+        missing+=("the rclone RCLONE names in $CONFIG_DIR/config ($RCLONE_BIN)")
+    fi
+fi
 
 # flock is not optional: without it onedrive-sync cannot serialise runs.
 command -v flock >/dev/null 2>&1 || missing+=("util-linux (flock)")
@@ -142,7 +174,7 @@ if [ "${#optional[@]}" -gt 0 ]; then
     printf '    - %s\n' "${optional[@]}" >&2
 fi
 
-RCLONE_VER="$(rclone version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+' | head -1 || true)"
+RCLONE_VER="$("$RCLONE_BIN" version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+' | head -1 || true)"
 if [ -n "$RCLONE_VER" ]; then
     major="${RCLONE_VER%%.*}"; minor="${RCLONE_VER##*.}"
     if [ "$major" -eq 0 ] || { [ "$major" -eq 1 ] && [ "$minor" -lt 65 ]; }; then
@@ -164,6 +196,22 @@ if [ "$HAVE_INOTIFY" -eq 0 ]; then
 fi
 
 # --------------------------------------------------------------- scripts
+# Every script this installer ships, in the order the summary reports them. The
+# install loop and the "Installed" summary both read this one list, because the
+# summary used to be written out by hand beside the loop and could name a script
+# the loop had stopped installing -- or miss one it had just installed. The paths
+# are written in full rather than built from a name, because tests/docs.sh reads
+# the list out of this file and compares it with what uninstall.sh removes and
+# what docs/UPDATING.md's loop names.
+SCRIPTS=(
+    "$SRC_DIR/bin/onedrive-sync"
+    "$SRC_DIR/bin/onedrive-tray"
+    "$SRC_DIR/bin/onedrive-watch"
+    "$SRC_DIR/bin/onedrive-check"
+    "$SRC_DIR/bin/onedrive-check-access"
+    "$SRC_DIR/bin/onedrive-doctor"
+)
+
 # Whether the tray was already here is one half of "is this a first install".
 # setup.sh writes the config before it hands over, so on the documented first
 # run the config exists by the time this script starts and cannot tell a first
@@ -173,12 +221,9 @@ if [ -x "$BIN_DIR/onedrive-tray" ]; then TRAY_WAS_INSTALLED=1; fi
 
 say "Installing scripts into $BIN_DIR"
 mkdir -p "$BIN_DIR"
-install -m 0755 "$SRC_DIR/bin/onedrive-sync" "$BIN_DIR/onedrive-sync"
-install -m 0755 "$SRC_DIR/bin/onedrive-tray" "$BIN_DIR/onedrive-tray"
-install -m 0755 "$SRC_DIR/bin/onedrive-watch" "$BIN_DIR/onedrive-watch"
-install -m 0755 "$SRC_DIR/bin/onedrive-check" "$BIN_DIR/onedrive-check"
-install -m 0755 "$SRC_DIR/bin/onedrive-check-access" "$BIN_DIR/onedrive-check-access"
-install -m 0755 "$SRC_DIR/bin/onedrive-doctor" "$BIN_DIR/onedrive-doctor"
+for script in "${SCRIPTS[@]}"; do
+    install -m 0755 "$script" "$BIN_DIR/${script##*/}"
+done
 
 # --------------------------------------------------------------- config
 say "Installing configuration into $CONFIG_DIR"
@@ -220,6 +265,19 @@ chmod 0644 "$UNIT_DIR/$UNIT_NAME.service" "$UNIT_DIR/$UNIT_NAME.timer"
 WATCH="$(sed -n 's/^[[:space:]]*WATCH="\{0,1\}\([^"]*\)"\{0,1\}.*/\1/p' \
          "$CONFIG_DIR/config" | tail -1)"
 WATCH="${WATCH:-1}"
+
+# The spellings that mean on are the same set onedrive-sync, onedrive-doctor and
+# the tray's truthy() accept: 1|true|yes|on|enabled. This script tested for the
+# literal "1", so a config saying WATCH="yes" -- which the wizard's own prompt
+# accepts and the rest of the project reads as on -- had the installer disable a
+# watcher it considered off. The off set is 0|false|no|off|disabled, and anything
+# this does not recognise is off, the same way the tray treats an unknown value.
+watch_on() {  # watch_on <value>
+    case "$1" in
+        1|true|yes|on|enabled) return 0 ;;
+        *) return 1 ;;
+    esac
+}
 # The unit is written whether or not WATCH is on: the settings dialog's
 # "Realtime sync" switch enables this unit, and it cannot enable one that was
 # never created. Whether it runs is decided at the enable step below.
@@ -266,6 +324,15 @@ done
 # quote, backtick, dollar and backslash escaped inside it, and a literal percent
 # written as %% because a single one is a field code. A path made only of
 # unreserved characters is left bare, which is how the entry read before.
+#
+# The quoting layer is only half of it. A desktop entry is a key file, and the
+# key-file reader unescapes the value once more before the Exec parser sees it, so
+# the specification's general string-value rule doubles every backslash the
+# quoting layer left behind. Without that second pass GLib refuses the file with
+# "Key file contains key Exec which has a value that cannot be interpreted", and
+# the desktop never starts the tray. This is the same rule the tray's own
+# desktop_exec() applies; the two copies are pinned against GLib by the same list
+# of paths in tests/install-flow.sh and tests/tray.sh.
 desktop_exec_arg() {  # desktop_exec_arg <path> -> the Exec argument
     local arg="$1"
     arg="${arg//%/%%}"
@@ -275,6 +342,7 @@ desktop_exec_arg() {  # desktop_exec_arg <path> -> the Exec argument
             arg="${arg//\"/\\\"}"
             arg="${arg//\`/\\\`}"
             arg="${arg//\$/\\\$}"
+            arg="${arg//\\/\\\\}"
             printf '"%s"' "$arg" ;;
         *) printf '%s' "$arg" ;;
     esac
@@ -313,35 +381,44 @@ fi
 # --------------------------------------------------------------- NM dispatcher
 if [ "$NM_DISPATCHER" -eq 1 ]; then
     say "Installing the NetworkManager dispatcher hook"
-    real_home="$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6)"
+    # The real home comes from the password database, because a test that
+    # redirects HOME is not the user this machine-wide hook would act for; the
+    # override is what lets a test take the install path without /etc.
+    real_home="${REAL_HOME_OVERRIDE:-$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6)}"
     if [ -n "$real_home" ] && [ "$HOME" != "$real_home" ]; then
+        # This used to say "it is not installed" and then install it anyway: the
+        # guard set NM_DISPATCHER=0 and the rest of the block ran regardless, so a
+        # redirected HOME still wrote a machine-wide hook naming the unit of a
+        # scratch config. Nothing below runs now.
         warn "HOME is redirected to $HOME while this hook is machine-wide."
         warn "It would start $UNIT_NAME.timer for the real user, so it is not installed."
         NM_DISPATCHER=0
-    elif [ "$PREFIX" != "$HOME/.local" ]; then
-        warn "this hook is machine-wide and will start $UNIT_NAME.timer,"
-        warn "which lives outside $HOME/.local. Install the units normally if that is"
-        warn "not what you meant."
-    fi
-    NM_TARGET="/etc/NetworkManager/dispatcher.d/90-rclone-onedrive-tray"
-    NM_TMP="$(mktemp)"
-    sed -e "s|%UNIT_NAME%|$UNIT_NAME|g" \
-        "$SRC_DIR/extras/networkmanager-dispatcher.sh" > "$NM_TMP"
-    if [ -d /etc/NetworkManager/dispatcher.d ]; then
-        if sudo install -m 0755 -o root -g root "$NM_TMP" "$NM_TARGET"; then
-            say "installed $NM_TARGET"
-            say "a sync starts as soon as a connection comes up"
-        else
-            warn "could not install the hook. Run this yourself:"
-            warn "    sudo install -m 0755 $NM_TMP $NM_TARGET"
-            warn "the script has been left at $NM_TMP"
-            NM_TMP=""
-        fi
     else
-        warn "no /etc/NetworkManager/dispatcher.d on this system; skipping."
-        warn "NetworkManager will re-sync on the next timer tick instead."
+        if [ "$PREFIX" != "$HOME/.local" ]; then
+            warn "this hook is machine-wide and will start $UNIT_NAME.timer,"
+            warn "which lives outside $HOME/.local. Install the units normally if that is"
+            warn "not what you meant."
+        fi
+        NM_TARGET="$NM_DISPATCHER_DIR/90-rclone-onedrive-tray"
+        NM_TMP="$(mktemp)"
+        sed -e "s|%UNIT_NAME%|$UNIT_NAME|g" \
+            "$SRC_DIR/extras/networkmanager-dispatcher.sh" > "$NM_TMP"
+        if [ -d "$NM_DISPATCHER_DIR" ]; then
+            if sudo install -m 0755 -o root -g root "$NM_TMP" "$NM_TARGET"; then
+                say "installed $NM_TARGET"
+                say "a sync starts as soon as a connection comes up"
+            else
+                warn "could not install the hook. Run this yourself:"
+                warn "    sudo install -m 0755 $NM_TMP $NM_TARGET"
+                warn "the script has been left at $NM_TMP"
+                NM_TMP=""
+            fi
+        else
+            warn "no $NM_DISPATCHER_DIR on this system; skipping."
+            warn "NetworkManager will re-sync on the next timer tick instead."
+        fi
+        [ -n "$NM_TMP" ] && rm -f "$NM_TMP"
     fi
-    [ -n "$NM_TMP" ] && rm -f "$NM_TMP"
 fi
 
 # --------------------------------------------------------------- enable
@@ -361,7 +438,7 @@ if systemctl --user daemon-reload 2>/dev/null; then
         systemctl --user enable --now "$UNIT_NAME.timer" 2>/dev/null || \
             warn "could not enable $UNIT_NAME.timer (no user systemd session?)"
         systemctl --user list-timers "$UNIT_NAME.timer" --no-pager 2>/dev/null | head -3 || true
-        if [ "$WATCH" = "1" ] && [ "$HAVE_INOTIFY" -eq 1 ]; then
+        if watch_on "$WATCH" && [ "$HAVE_INOTIFY" -eq 1 ]; then
             systemctl --user enable --now "$UNIT_NAME-watch.service" 2>/dev/null || \
                 warn "could not enable $UNIT_NAME-watch.service"
             # enable --now is a no-op on a unit that is already active, and the
@@ -369,13 +446,13 @@ if systemctl --user daemon-reload 2>/dev/null; then
             # code running until reboot. try-restart touches only a running unit
             # and does nothing when it is not there.
             systemctl --user try-restart "$UNIT_NAME-watch.service" 2>/dev/null || true
-        elif [ "$WATCH" = "1" ]; then
+        elif watch_on "$WATCH"; then
             : # inotifywait is missing; the unit exists but cannot run (warned above)
         else
             # WATCH was turned off, by hand or through the wizard, and nothing
             # used to stop a watcher that was already running.
             systemctl --user disable --now "$UNIT_NAME-watch.service" 2>/dev/null || true
-            say "watcher disabled: WATCH is not 1 in $CONFIG_DIR/config"
+            say "watcher disabled: WATCH is off in $CONFIG_DIR/config"
         fi
     fi
 else
@@ -384,13 +461,31 @@ else
 fi
 
 # --------------------------------------------------------------- done
+# The summary reads $SCRIPTS, the list the install loop above iterates, so the
+# two cannot disagree about what was installed. Three per line is only a layout
+# choice here; adding a script to the list adds it to both places at once.
+scripts_summary() {
+    local i=0 script
+    printf '  scripts   '
+    for script in "${SCRIPTS[@]}"; do
+        if [ "$i" -gt 0 ]; then
+            if [ $((i % 3)) -eq 0 ]; then
+                printf '\n            '
+            else
+                printf ', '
+            fi
+        fi
+        printf '%s/%s' "$BIN_DIR" "${script##*/}"
+        i=$((i + 1))
+    done
+    printf '\n'
+}
+
 cat <<EOF
 
 $(say "Installed")
 
-  scripts   $BIN_DIR/onedrive-sync, $BIN_DIR/onedrive-tray, $BIN_DIR/onedrive-watch
-            $BIN_DIR/onedrive-check, $BIN_DIR/onedrive-check-access
-            $BIN_DIR/onedrive-doctor
+$(scripts_summary)
   config    $CONFIG_DIR/config
   filters   $CONFIG_DIR/filters.txt
   units     $UNIT_DIR/$UNIT_NAME.{service,timer}

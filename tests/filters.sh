@@ -49,8 +49,19 @@ else
     bad "these rules are quoted, and rclone will treat the quote as part of the pattern"
     grep -nE "^[[:space:]]*[+-][[:space:]]+.*['\"]" "$FILTERS" || true
 fi
-check "the rules do not include a whitespace-only line" \
-    grep -qvE '^[[:space:]]*$' "$FILTERS"
+# The property is that no line is made only of blanks. An empty line is not one of
+# those, and the shipped file has five of them on purpose, so the expression asks
+# for one or more whitespace characters. The previous form,
+# `grep -qvE '^[[:space:]]*$'`, exits 0 as soon as ANY line is not blank, which is
+# true of every file with a rule in it, so it could not fail.
+check "no line is made only of blanks" \
+    bash -c '! grep -qE "^[[:space:]]+$" "$1"' _ "$FILTERS"
+# And the same expression has to notice one, or the check above proves nothing.
+BLANKS_PROBE="$WORK/blanks-probe"
+cp "$FILTERS" "$BLANKS_PROBE"
+printf '   \t \n' >> "$BLANKS_PROBE"
+check "and a line of blanks would be caught" \
+    grep -qE '^[[:space:]]+$' "$BLANKS_PROBE"
 
 # The check itself has to fail on a quoted rule, or it proves nothing. Both
 # positions are exercised: at the end of the pattern and in the middle of it.
@@ -190,6 +201,30 @@ rm -rf "$CHK_TREE/renamed:dir"
 : > "$CHK_TREE/a:b.md"
 run "a renamed name does not fail the check" 0 "will rename these" \
     env XDG_CONFIG_HOME="$WORK/checkcfg" "$CHECKER"
+
+# docs/TROUBLESHOOTING.md promises six groups of names OneDrive rewrites, and only
+# the illegal-character one was exercised: the other five arms of the checker could
+# each be deleted with every suite still green. One name per group, through the real
+# checker, so a group that stops being reported is a failure.
+title "the rename groups the docs promise"
+rename_case() {  # rename_case <the name> <the phrase the report must use>
+    local name="$1" phrase="$2" out
+    : > "$CHK_TREE/$name"
+    out="$(env XDG_CONFIG_HOME="$WORK/checkcfg" "$CHECKER" 2>&1)"
+    if grep -qF "$phrase" <<<"$out"; then
+        ok "the checker reports: $phrase"
+    else
+        bad "the checker did not report: $phrase"
+    fi
+    rm -f "$CHK_TREE/$name"
+}
+rename_case $'~tilde.md' 'leading tilde'
+rename_case ' leadspace.md' 'space at the start or end'
+rename_case 'trailspace.md ' 'space at the start or end'
+rename_case 'trailperiod.' 'period at the end'
+rename_case $'del\x7fname' 'DEL (0x7f)'
+rename_case $'ctrl\x01name' 'control character'
+rename_case $'bad\xffname' 'not valid UTF-8'
 
 # One name that is both renamed and over-long is two problems behind one path,
 # so the closing line has to give both numbers. While it printed only the group

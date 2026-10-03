@@ -244,7 +244,11 @@ fi
 title "the recovery flags are the same string everywhere"
 wrapper_args="$(sed -n 's/^DEFAULT_BISYNC_ARGS="\(.*\)"$/\1/p' bin/onedrive-sync)"
 example_args="$(sed -n 's/^BISYNC_ARGS="\(.*\)"$/\1/p' config/config.example)"
-wizard_args="$(sed -n 's/^BISYNC_ARGS="\(.*\)"$/\1/p' setup.sh)"
+# setup.sh writes the value through config_quote/carry now, so the string it falls
+# back to lives in DEFAULT_BISYNC_ARGS. Reading that constant is what this checks:
+# the line it writes is not a literal any more.
+wizard_args="$(sed -n 's/^DEFAULT_BISYNC_ARGS="\([^"]*\)"$/\1/p' setup.sh |
+    tail -1)"
 if [ -z "$wrapper_args" ] || [ -z "$example_args" ] || [ -z "$wizard_args" ]; then
     bad "could not read the flag string out of one of the three files"
 else
@@ -256,17 +260,28 @@ else
     # nothing read them. Any BISYNC_ARGS= sample a README shows has to be the
     # wrapper's default, or the live progress line the README promises stops
     # working for a config copied out of it.
+    #
+    # The sample is matched at any indentation, and a README that shows a config
+    # but no BISYNC_ARGS line is a failure rather than a skip: indenting the line
+    # used to take the sample out of the grep's sight, and the skip then hid the
+    # lost check behind a passing count.
     for f in README.md README.zh-CN.md; do
         [ -f "$f" ] || continue
-        found=0
+        samples="$(grep -E '^[[:space:]]*BISYNC_ARGS="' "$f")"
+        if [ -z "$samples" ]; then
+            if [ "$(grep -cE '^[[:space:]]*(REMOTE|LOCAL)="' "$f")" -gt 0 ]; then
+                bad "$f shows a config sample but no BISYNC_ARGS line"
+            else
+                skip "$f carries no config sample"
+            fi
+            continue
+        fi
         while IFS= read -r line; do
             [ -n "$line" ] || continue
-            found=$((found + 1))
-            sample="$(sed -n 's/^BISYNC_ARGS="\(.*\)"$/\1/p' <<<"$line")"
+            sample="$(sed -n 's/^[[:space:]]*BISYNC_ARGS="\(.*\)"$/\1/p' <<<"$line")"
             check "$f quotes the wrapper's default BISYNC_ARGS" \
                 test "$sample" = "$wrapper_args"
-        done < <(grep -E '^BISYNC_ARGS="' "$f")
-        [ "$found" -gt 0 ] || skip "$f carries no BISYNC_ARGS sample"
+        done <<<"$samples"
     done
 fi
 
@@ -291,6 +306,55 @@ else
             bad "the wrapper and the doctor disagree about RE_$name"
         fi
     done <<<"$wrapper_re"
+fi
+
+# ------------------------------------------------- the rules written twice
+# Three more pieces of knowledge live in two files with nothing keeping them
+# equal, and each has drifted or nearly so: the listing slug decides whether the
+# doctor finds the baseline the wrapper wrote, the positive-integer key list
+# decides which config values the doctor judges, and KNOWN_KEYS decides which keys
+# the doctor calls unread. A drifted copy is silent until a user hits it.
+title "the rules two files are supposed to share"
+lists_agree() {  # lists_agree <label> <the lines only one side has>
+    if [ -z "$2" ]; then
+        ok "$1"
+    else
+        bad "$1"
+        printf '%s\n' "$2" | sed 's/^/        /'
+    fi
+}
+slug_of() {  # slug_of <file> -- the sed rule that turns a path into rclone's slug
+    grep -oE "sed -e 's\|\^/\|\|' -e 's\|\[/: \]\|_\|g'" "$1" | head -1
+}
+if [ -z "$(slug_of bin/onedrive-sync)" ]; then
+    bad "no listing-slug rule was found in bin/onedrive-sync"
+else
+    check "the doctor looks for the listing the wrapper writes" \
+        test "$(slug_of bin/onedrive-sync)" = "$(slug_of bin/onedrive-doctor)"
+fi
+
+wrapper_ints="$(grep -oE '^require_positive_int [A-Z_]+' bin/onedrive-sync |
+    sed 's/^require_positive_int //' | sort)"
+doctor_ints="$(sed -n 's/^    for key in \(.*\); do$/\1/p' bin/onedrive-doctor |
+    tr ' ' '\n' | sort -u)"
+if [ -z "$wrapper_ints" ] || [ -z "$doctor_ints" ]; then
+    bad "could not read the positive-integer key list out of one of the two files"
+else
+    lists_agree "the doctor judges the keys the wrapper refuses" \
+        "$(comm -3 <(printf '%s\n' "$wrapper_ints") <(printf '%s\n' "$doctor_ints"))"
+fi
+
+known_keys="$(sed -n '/^KNOWN_KEYS="/,/"/p' bin/onedrive-doctor | tr -s ' \n' ' ' |
+    sed -e 's/^KNOWN_KEYS="//' -e 's/" *$//' | tr ' ' '\n' |
+    grep -E '^[A-Z_]+$' | sort)"
+example_keys="$(grep -oE '^[A-Z_]+=' config/config.example | tr -d '=' | sort)"
+if [ -z "$known_keys" ] || [ -z "$example_keys" ]; then
+    bad "could not read the key list out of bin/onedrive-doctor or config/config.example"
+else
+    lists_agree "every key in config.example is one the doctor knows" \
+        "$(comm -13 <(printf '%s\n' "$known_keys") <(printf '%s\n' "$example_keys"))"
+    lists_agree "and every key the doctor knows is in config.example" \
+        "$(comm -23 <(printf '%s\n' "$known_keys") <(printf '%s\n' "$example_keys"))"
 fi
 
 # ---------------------------------------------------------------- installer drift

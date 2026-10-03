@@ -92,6 +92,10 @@ test is allowed to touch before anyone starts.
   hand-written file losing its style rather than a setting changing; it is written
   down because the reader now accepts the prefix and the writer does not produce
   it.
+- A `RCLONE` that moves is re-resolved and the menu is rebuilt, but the folder list
+  and the quota row are not cleared the way they are when `REMOTE` moves: they were
+  fetched from the binary being left behind, so they can describe the wrong build
+  until the next refresh. It needs the same clear-and-re-ask the remote gets.
 
 ### The tray's state is read out of English prose in a shared log
 
@@ -154,3 +158,12 @@ have to derive it from three file names.
   `config.example` says where such a pattern belongs instead. A shell-like split
   (shlex) is the alternative and is not implemented, because the value is a list of
   rclone flags rather than a shell command.
+- The yes/no keys (`WATCH`, `CHECK_ACCESS`, `SHOW_ICON`, `NOTIFY_ON_SUCCESS`) accept
+  `1`, `true`, `yes`, `on` or `enabled` for on, and anything else for off, in the
+  wrapper, the doctor, the tray and `install.sh`. Only `1` and `0` are documented,
+  and `enabled` was invented by the wrapper alone, which is how it came to read a
+  config as on while the tray read the same value as off and a Save wrote `0` over
+  it. The readers were brought onto one list rather than the spelling being
+  removed, because a user who has it in their config would otherwise lose the
+  access check without being told. Each reader has a case for the spelling it
+  gained, so a drift shows up as a failing case rather than as a lost setting.

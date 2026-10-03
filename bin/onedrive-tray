@@ -240,6 +240,30 @@ def strip_inline_comment(value: str) -> str:
     return value
 
 
+class ConfigFault(Exception):
+    """The config file is there, but not the text this reader can parse.
+
+    Separate from OSError on purpose: a file that cannot be opened is a config
+    that answers the defaults, and main()'s missing-REMOTE sentence is the right
+    thing to say about it. A file that is not UTF-8 is a different fault with a
+    different repair, and answering the defaults for it would point the user at
+    the wrong one.
+    """
+
+
+def config_utf8_problem(exc: UnicodeDecodeError) -> str:
+    """The sentence for a config file that is not the UTF-8 it has to be.
+
+    The offending byte is named because that is all the reader can honestly say
+    about where the fault is: the file is opened as UTF-8 and nothing else, and
+    "invalid UTF-8" alone leaves a hand-edited file to be searched byte by byte.
+    """
+    byte = exc.object[exc.start:exc.start + 1]
+    where = "0x" + byte.hex() if byte else "?"
+    return (f"{CONFIG_FILE} is not valid UTF-8 (byte {where}); "
+            f"fix the file or run setup.sh.")
+
+
 def load_config() -> dict:
     """Parse the shell-style KEY="value" config (no shell execution).
 
@@ -277,6 +301,13 @@ def load_config() -> dict:
                         and key[len("export"):len("export") + 1].isspace()):
                     key = key[len("export"):].strip()
                 cfg[key] = os.path.expandvars(val)
+    except UnicodeDecodeError as exc:
+        # One bad byte used to travel out of main() as a traceback, in a process
+        # whose autostart entry has Terminal=false, while the shell half sourced
+        # the same file happily and kept syncing. It is a config fault with a
+        # sentence, not an unreadable file: the offending byte is named, and no
+        # value is guessed at, because LOCAL is a path.
+        raise ConfigFault(config_utf8_problem(exc)) from exc
     except OSError:
         pass
 
@@ -292,8 +323,14 @@ def load_config() -> dict:
 
 
 def truthy(value) -> bool:
-    """Read a 1/0 config value the way the settings dialog writes it."""
-    return str(value).strip().lower() in ("1", "true", "yes", "on")
+    """Read a 1/0 config value the way the settings dialog writes it.
+
+    The accepted on-spellings are the set onedrive-sync reads for CHECK_ACCESS
+    and onedrive-doctor reads for WATCH: 1, true, yes, on, enabled. Anything
+    else is off, which is what makes "disabled" and an unrecognised value behave
+    the same way without needing a second table.
+    """
+    return str(value).strip().lower() in ("1", "true", "yes", "on", "enabled")
 
 
 def shell_quote_value(value) -> str:
@@ -523,6 +560,11 @@ STRINGS = {
             "仅在同步持续失败、或你确实批量删除了大量文件后使用。\n\n"
             "重建会把两边的文件按当前状态重新对齐，过程中请勿关机。"),
         "Syncing…": "正在同步…",
+        "systemd did not start the sync: {why}": "systemd 未能启动同步：{why}",
+        "systemd could not start the sync ({why}); running onedrive-sync directly":
+            "systemd 无法启动同步（{why}），改为直接运行 onedrive-sync",
+        "Could not start the sync: {why}": "无法启动同步：{why}",
+        "The resync did not finish: {why}": "重建同步基线未完成：{why}",
         "Rebuilding sync baseline…": "正在重建同步基线…",
         "Automatic sync paused": "已暂停自动同步",
         "Automatic sync resumed": "已恢复自动同步",
@@ -539,6 +581,8 @@ STRINGS = {
         "Could not start {app}": "无法启动 {app}",
         "Folders to sync": "同步的文件夹",
         "Loading…": "加载中…",
+        "Could not list the folders of {remote}; click to try again":
+            "无法列出 {remote} 上的文件夹；点击重试",
         "No sub-folders": "没有子文件夹",
         "{name} will sync": "「{name}」将同步到本地",
         "{name} will not sync": "「{name}」不再同步，云端不受影响",
@@ -955,10 +999,16 @@ def read_last_result(text: str):
 
 
 # ---------------------------------------------------------------- selected folders
-def remote_folders(remote: str):
-    """Top-level folder names under REMOTE, or None when the listing failed."""
+def remote_folders(remote: str, rclone: str = "rclone"):
+    """Top-level folder names under REMOTE, or None when the listing failed.
+
+    `rclone` is the binary the config names: RCLONE exists so a build outside
+    PATH can be used, and the tray asking the one on PATH would describe a
+    different build's remote than the one onedrive-sync syncs.
+    """
     rc, out, _ = sh(
-        f"rclone lsf --dirs-only --max-depth 1 {shlex.quote(remote)}", timeout=120)
+        f"{shlex.quote(rclone)} lsf --dirs-only --max-depth 1 {shlex.quote(remote)}",
+        timeout=120)
     if rc != 0:
         return None
     return [line.rstrip("/") for line in out.splitlines() if line.strip()]
@@ -1031,10 +1081,11 @@ def fmt_size(n) -> str:
     return f"{n:.1f} PiB"
 
 
-def read_quota(remote: str):
+def read_quota(remote: str, rclone: str = "rclone"):
     """Ask the remote how much of the account is used. Returns (used, total)."""
     name = remote.split(":", 1)[0] + ":"
-    _, out, _ = sh(f"rclone about {shlex.quote(name)} --json", timeout=90)
+    _, out, _ = sh(f"{shlex.quote(rclone)} about {shlex.quote(name)} --json",
+                   timeout=90)
     try:
         data = json.loads(out)
         total = data.get("total")
@@ -1119,6 +1170,11 @@ class Tray:
         # main() refuses such a config before it gets here, and this keeps a
         # caller that builds a Tray itself from raising.
         self.remote = cfg.get("REMOTE") or ""
+        # The rclone binary every query below runs. RCLONE is documented as the
+        # build to use, and onedrive-sync, onedrive-check-access and
+        # onedrive-doctor all honour it; asking the one on PATH here described a
+        # different build's remote - and account - than the one that syncs.
+        self.rclone = cfg.get("RCLONE") or "rclone"
         self.local = cfg["LOCAL"]
         self.log = cfg["LOG"]
         self.exclude_file = cfg["EXCLUDE_FOLDERS_FILE"]
@@ -1138,6 +1194,10 @@ class Tray:
         self.notified_error_at = None
         self.manual_requested = False
         self.busy = False
+        # The first line of what systemd said the last time it refused a start,
+        # or "". The status row reads it so a start that did not happen cannot
+        # be dressed up as a run in flight.
+        self.start_error = ""
         # One flag per piece of state a worker fills in. Each is set before the
         # thread starts and cleared on the main loop when its answer lands.
         self.quota = None          # (used, total) once a query has succeeded
@@ -1147,6 +1207,11 @@ class Tray:
         self.folders = None        # top-level names, None until the first listing
         self.folders_busy = False
         self.folders_seen = None
+        # What the last listing attempt answered when it failed, or "". A listing
+        # that has never arrived and one that is on its way look identical in
+        # self.folders, and the submenu has to say which it is.
+        self.folders_error = ""
+        self.folders_error_seen = ""
         self.building_folders = False
         self.check_busy = False
         self.icon_visible = truthy(self.cfg.get("SHOW_ICON", "1"))
@@ -1209,13 +1274,18 @@ class Tray:
 
             def worker():
                 try:
-                    listed = remote_folders(self.remote)
+                    listed = remote_folders(self.remote, self.rclone)
                     # None means the listing failed. Storing it turned the submenu
                     # into one greyed "Loading…" row, and a folder the user had
                     # deselected could not be ticked again until the next
-                    # half-hour refresh.
+                    # half-hour refresh. The failure is remembered instead, so a
+                    # listing that has never arrived can say so and offer the
+                    # retry rather than wait for that refresh.
                     if listed is not None:
                         self.folders = listed
+                        self.folders_error = ""
+                    else:
+                        self.folders_error = self.remote or self.rclone
                 finally:
                     self.folders_busy = False
 
@@ -1227,8 +1297,18 @@ class Tray:
         self.building_folders = True
         sub = Gtk.Menu()
         if self.folders is None:
-            entry = Gtk.MenuItem(label=self.t("Loading…"))
-            entry.set_sensitive(False)
+            if self.folders_error:
+                # Nothing has ever been listed and the last attempt failed, so
+                # the row says which remote could not be listed and is itself the
+                # retry: waiting up to 1800 seconds is not a way out of a state
+                # the user can see. The quota row hides itself in the same state.
+                entry = Gtk.MenuItem(label=self.t(
+                    "Could not list the folders of {remote}; click to try again",
+                    remote=self.folders_error))
+                entry.connect("activate", lambda *_: self.refresh_folders())
+            else:
+                entry = Gtk.MenuItem(label=self.t("Loading…"))
+                entry.set_sensitive(False)
             sub.append(entry)
         elif not self.folders:
             entry = Gtk.MenuItem(label=self.t("No sub-folders"))
@@ -1323,7 +1403,84 @@ class Tray:
                   + " ".join(shlex.quote(str(a)) for a in args), timeout=timeout)
 
     def _start_service(self):
-        self._sc("start", "--no-block", self.service)
+        """Ask systemd for one run, and say so when it will not take the job.
+
+        The (rc, out, err) `systemctl start` answers with used to be dropped, so
+        a refused start left whatever the caller had already drawn - the "Syncing…"
+        notification - standing over a run that never began. The wrapper is the
+        same sync without needing the user manager to be reachable, which is the
+        road the resync item already takes; what systemd said is still said out
+        loud, so a unit that cannot start stays visible.
+        """
+        rc, out, err = self._sc("start", "--no-block", self.service)
+        if rc != 0:
+            return self._run_wrapper(err or out)
+        self._clear_start_error()
+        return rc
+
+    def _run_wrapper(self, detail):
+        """Run onedrive-sync directly, off systemd, and report what happened.
+
+        systemd is the scheduler here, not the sync: the wrapper takes the same
+        flock and applies the same delete cap, so a manager that will not
+        schedule the run does not have to mean no run.
+        """
+        rc, out, err = sh(shlex.quote(self.sync_script), timeout=3600)
+        if rc == 0:
+            self._started_directly(detail)
+        else:
+            self._start_failed(err or out or detail)
+        return rc
+
+    def _start_reason(self, detail) -> str:
+        """The first line of what systemd said, short enough to show."""
+        lines = [line.strip() for line in str(detail or "").splitlines()
+                 if line.strip()]
+        return lines[0][:120] if lines else "?"
+
+    def _started_directly(self, detail):
+        """Say the run is happening without systemd, from the main loop.
+
+        Only a notification: a run really is under way, so there is nothing for
+        the status row to retract. The start_error sentence is for the case where
+        the fallback failed as well and nothing is running.
+        """
+        why = self._start_reason(detail)
+
+        def report():
+            self.notify(APP_NAME, self.t(
+                "systemd could not start the sync ({why}); running "
+                "onedrive-sync directly", why=why))
+            return False
+
+        GLib.idle_add(report)
+
+    def _start_failed(self, detail):
+        """Put a start that did not happen on screen, from the main loop.
+
+        The sentence names what systemd said, the way the settings window and a
+        pause that cannot be re-armed already report a systemd failure, and the
+        status row reads the same value so nothing on screen claims a run.
+        """
+        why = self._start_reason(detail)
+
+        def report():
+            self.start_error = why
+            # The request was never a run, so the bookkeeping that watches for
+            # one has to let it go rather than announce a success that is not
+            # coming.
+            self.manual_requested = False
+            self.manual_seen_syncing = False
+            self.manual_ticks = 0
+            self.notify(APP_NAME, self.t("Could not start the sync: {why}", why=why))
+            self._refresh_now()
+            return False
+
+        GLib.idle_add(report)
+
+    def _clear_start_error(self):
+        """A start systemd accepted: nothing may still claim it did not."""
+        self.start_error = ""
 
     def _confirm(self, kind, text, body, cancel: str, confirm: str) -> bool:
         """Ask a question; True when the second button was chosen.
@@ -1364,7 +1521,8 @@ class Tray:
 
     def _reauth_worker(self, remote):
         quoted = shlex.quote(remote)
-        reconnect = f"printf 'y\\n' | rclone config reconnect {quoted}"
+        reconnect = (f"printf 'y\\n' | {shlex.quote(self.rclone)} "
+                     f"config reconnect {quoted}")
         script = (f"{reconnect}; printf '\\nDone. You can close this window.\\n'; "
                   "read -r _ || true")
         term = terminal_command(script)
@@ -1380,8 +1538,8 @@ class Tray:
     def _wait_for_remote(self, remote, tries: int = 36) -> bool:
         """Poll until the remote answers again, or give up quietly."""
         for _ in range(tries):
-            rc, _, _ = sh(f"rclone lsd {shlex.quote(remote)} --max-depth 1",
-                          timeout=30)
+            rc, _, _ = sh(f"{shlex.quote(self.rclone)} lsd {shlex.quote(remote)} "
+                          f"--max-depth 1", timeout=30)
             if rc == 0:
                 return True
             time.sleep(5)
@@ -1558,7 +1716,7 @@ class Tray:
 
             def worker():
                 try:
-                    result = read_quota(self.remote)
+                    result = read_quota(self.remote, self.rclone)
                     if result:
                         self.quota = result
                         # Show it now, not at the next poll tick up to three
@@ -1757,14 +1915,15 @@ class Tray:
         return (info.st_size, info.st_mtime_ns)
 
     def _config_changed(self, fresh: dict) -> bool:
-        """Re-resolve the six config values that are read as attributes.
+        """Re-resolve the config values that are read as attributes.
 
         __init__ turns these into attributes once and every later read goes
         through the attribute: the two menu rows that open a path, the "Open
         {app}" label and its command, the exclusion file the folder submenu reads,
-        the remote the quota and folder listing ask about, and the root the delete
-        guard checks against. Refilling self.cfg alone left all six pointing at
-        the old file while the menu and the settings window said otherwise.
+        the remote the quota and folder listing ask about, the rclone binary all
+        four of those queries run, and the root the delete guard checks against.
+        Refilling self.cfg alone left every one of them pointing at the old file
+        while the menu and the settings window said otherwise.
 
         Returns True when one of them actually moved, because then the menu has to
         be rebuilt: the labels and the handlers were built from the old paths.
@@ -1788,6 +1947,7 @@ class Tray:
             "exclude_file": fresh["EXCLUDE_FOLDERS_FILE"],
             "open_cmd": fresh["OPEN_APP_CMD"],
             "open_name": fresh["OPEN_APP_NAME"],
+            "rclone": fresh.get("RCLONE") or "rclone",
         }
         moved = False
         remote_moved = False
@@ -1812,6 +1972,8 @@ class Tray:
                     # hidden rather than showing the old account.
                     self.folders = None
                     self.folders_seen = None
+                    self.folders_error = ""
+                    self.folders_error_seen = ""
                     self.quota = None
                     remote_moved = True
                 setattr(self, name, value)
@@ -1849,7 +2011,13 @@ class Tray:
         # resolved from it when the tray started, and the poll keeps asking about
         # those; letting the file move it would have the dialog write a drop-in
         # for a unit nothing polls.
-        fresh = load_config()
+        try:
+            fresh = load_config()
+        except ConfigFault:
+            # A file that cannot be decoded is not a file with news in it. The
+            # same rule as the REMOTE check below: keep what is already in use
+            # rather than move onto anything read out of a file that is broken.
+            return
         if not fresh.get("REMOTE"):
             # The rule main() applies to a config before it builds a tray:
             # load_config() leaves REMOTE alone because nothing sensible can be
@@ -1908,17 +2076,52 @@ class Tray:
         self.manual_requested = True
         self.manual_seen_syncing = False
         self.manual_ticks = 0
-        self.notify(APP_NAME, self.t("Syncing…"))
+        # No "Syncing…" here: it was announced before systemd had answered, and a
+        # refused start then left that sentence standing over nothing. The status
+        # row says what is happening three seconds later, and the same notification
+        # is dropped by _start_failed when the start really did not happen.
         threading.Thread(target=self._run, args=("start",), daemon=True).start()
 
     def _run(self, mode):
         try:
             if mode == "resync":
-                sh(f"{shlex.quote(self.sync_script)} --resync", timeout=3600)
-            else:
-                self._sc("start", self.service, timeout=3600)
+                rc, out, err = sh(f"{shlex.quote(self.sync_script)} --resync",
+                                  timeout=3600)
+                if rc != 0:
+                    # The resync runs the wrapper itself, so this is the run's
+                    # own failure and not a start systemd refused. It is still
+                    # reported: nothing else watches a resync, which the poll
+                    # never sees as a run of the unit.
+                    self._resync_failed(err or out)
+                else:
+                    self._clear_start_error()
+                return
+            # --no-block first: its exit status is systemd's answer about the job.
+            # The status of the blocking start below also carries the sync's own
+            # failure, and reading that as "the start failed" would report a run
+            # that really happened - and would run the fallback over it.
+            rc, out, err = self._sc("start", "--no-block", self.service)
+            if rc != 0:
+                self._run_wrapper(err or out)
+                return
+            self._clear_start_error()
+            # The job is queued, and this waits for it the way this always did, so
+            # self.busy still covers the whole run.
+            self._sc("start", self.service, timeout=3600)
         finally:
             self.busy = False
+
+    def _resync_failed(self, detail):
+        """Report a resync that ended non-zero, from the main loop."""
+        why = self._start_reason(detail)
+
+        def report():
+            self.notify(APP_NAME, self.t("The resync did not finish: {why}",
+                                         why=why))
+            self._refresh_now()
+            return False
+
+        GLib.idle_add(report)
 
     def on_resync(self, *_):
         # Explicit buttons, not Gtk.ButtonsType.*: the stock ones follow the
@@ -2311,6 +2514,13 @@ class Tray:
 
     def _status_text(self, syncing, prog, auto, kind, when, hint) -> str:
         """The sentence under the header: what is happening, and when it last did."""
+        if not syncing and self.start_error:
+            # A start systemd refused is the newest thing that happened, and
+            # "No sync recorded yet" or the last run's date would both read as
+            # though the click had done something. Cleared by the first poll that
+            # sees a real run, or by a start systemd accepted.
+            return self.t("systemd did not start the sync: {why}",
+                          why=self.start_error)
         if syncing:
             if not prog:
                 return self.t("Syncing…")
@@ -2343,9 +2553,16 @@ class Tray:
         self.item_quota.set_visible(True)
 
     def _show_folders(self):
-        """Rebuild the folder submenu when, and only when, the listing changed."""
-        if self.folders != self.folders_seen:
+        """Rebuild the folder submenu when, and only when, what it shows changed.
+
+        The failure is part of what is shown: a listing that fails before one has
+        ever arrived moves the row from "Loading…" to the retry, and comparing
+        self.folders alone never noticed that.
+        """
+        if (self.folders != self.folders_seen
+                or self.folders_error != self.folders_error_seen):
             self.folders_seen = self.folders
+            self.folders_error_seen = self.folders_error
             self._build_folder_menu()
 
     def _log_snapshot(self):
@@ -2375,6 +2592,13 @@ class Tray:
         returns True, forever.
         """
         self.state_busy = False
+
+        # A run really in flight is proof the units are working again, so the
+        # start failure stops being the newest thing on screen. The log is not
+        # used for this: a success from before the failure is still in the tail
+        # and would wipe the sentence the click just earned.
+        if self.start_error and syncing:
+            self.start_error = ""
 
         auto = self._auto_state(timer_state)
         if auto != self.auto_seen:
@@ -2573,21 +2797,37 @@ def _settings_dialog_class():
             self.save_button.connect("clicked", self.on_save)
             self.add_action_widget(self.save_button, Gtk.ResponseType.OK)
 
+        def _bool_value(self, key, widget) -> str:
+            """The checkbox's answer, spelled the way the file already spells it.
+
+            A hand-edited CHECK_ACCESS="enabled" is on to onedrive-sync and to the
+            doctor's WATCH reader, so the box opens ticked. Writing "1" over it
+            would be a rewrite nobody asked for, and a Save that touched nothing
+            must leave the file as it found it; a real change is still written as
+            the 1/0 this dialog has always produced.
+            """
+            active = bool(widget.get_active())
+            original = self.original.get(key, "")
+            if truthy(original) == active:
+                return original
+            return "1" if active else "0"
+
         def values(self) -> dict:
             """The config values the widgets hold right now."""
             return {
                 "UI_LANG": self.combo_lang.get_active_id() or "",
-                "SHOW_ICON": "1" if self.check_show.get_active() else "0",
+                "SHOW_ICON": self._bool_value("SHOW_ICON", self.check_show),
                 "INTERVAL_MIN": str(int(self.spin_interval.get_value())),
-                "WATCH": "1" if self.check_watch.get_active() else "0",
-                "NOTIFY_ON_SUCCESS": "1" if self.check_notify.get_active() else "0",
+                "WATCH": self._bool_value("WATCH", self.check_watch),
+                "NOTIFY_ON_SUCCESS": self._bool_value("NOTIFY_ON_SUCCESS",
+                                                      self.check_notify),
                 "MAX_DELETE": str(int(self.spin_delete.get_value())),
                 # No matching entry means the combo lost the value rather than
                 # the user clearing it, so the config keeps what it had.
                 "BW_LIMIT": (bw_value(self.combo_bw.get_active_id())
                              if self.combo_bw.get_active_id() is not None
                              else self.original["BW_LIMIT"]),
-                "CHECK_ACCESS": "1" if self.check_access.get_active() else "0",
+                "CHECK_ACCESS": self._bool_value("CHECK_ACCESS", self.check_access),
             }
 
         def set_status(self, text):
@@ -2869,14 +3109,26 @@ def main(argv=None):
                   file=sys.stderr)
             return 1
 
-        cfg = load_config()
+        try:
+            cfg = load_config()
+        except ConfigFault as exc:
+            # One sentence and exit 1, the way the missing-REMOTE case below is
+            # handled: the autostart entry has Terminal=false, so a traceback
+            # goes nowhere and the tray simply never appears.
+            print(f"{APP_ID}: {exc}", file=sys.stderr)
+            return 1
         if not cfg.get("REMOTE"):
             # load_config() leaves REMOTE alone: it has no sensible default, and
             # everything the tray does needs one. Hand-edited configs do lose the
             # line, and a tray started from the autostart entry has no terminal to
             # show a traceback in, so this is one sentence and exit 1.
-            print(f"{APP_ID}: REMOTE is not set in {CONFIG_FILE}; "
-                  f"run setup.sh or onedrive-doctor to set it up.",
+            #
+            # The repair named has to be one that can write the file: this key is
+            # missing, and onedrive-doctor is read-only by construction - its own
+            # header says so. A REMOTE that is present but wrong is the doctor's
+            # business, and the tray's other rows say so.
+            print(f'{APP_ID}: REMOTE is not set in {CONFIG_FILE}; run setup.sh, '
+                  f'or add REMOTE="yourremote:" to that file.',
                   file=sys.stderr)
             return 1
         if not icon_dir_ok():

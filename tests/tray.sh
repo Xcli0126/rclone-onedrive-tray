@@ -30,6 +30,12 @@ SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 TRAY="$SRC_DIR/bin/onedrive-tray"
 
+# The version the script carries, read out of it the way
+# tests/dependency-matrix.sh does. A literal here went stale once already, and the
+# next release bump would then fail this case for no reason at all.
+WANT_VERSION="$(sed -n 's/^VERSION = "\([0-9.]*\)"/\1/p' "$TRAY" | head -1)"
+[ -n "$WANT_VERSION" ] || bad "could not read VERSION out of bin/onedrive-tray"
+
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/tray-test.XXXXXX")"
 mkdir -p "$WORK/run" "$WORK/cache" "$WORK/config/rclone-onedrive-tray" \
          "$WORK/data" "$WORK/state" "$WORK/stubs" "$WORK/calls" "$WORK/local"
@@ -155,6 +161,19 @@ printf '$name %s\n' "\$*" >> "$WORK/calls/calls"
 exit 0
 STUB
 done
+
+# A second rclone, so a config that names RCLONE can be shown to use it: the
+# literal "rclone" on PATH records under its own name, and the two lines in this
+# file make the difference visible without reading the tray's mind.
+cat > "$WORK/stubs/rclone-other" <<STUB
+#!/bin/sh
+printf 'rclone-other %s\n' "\$*" >> "$WORK/calls/calls"
+case "\$1" in
+    about) [ -f "$WORK/calls/quota-json" ] && cat "$WORK/calls/quota-json" ;;
+    lsf)   [ -f "$WORK/calls/folders" ] && cat "$WORK/calls/folders" ;;
+esac
+exit 0
+STUB
 
 # The re-authorise item opens a terminal when the desktop has one, and this
 # machine does (ptyxis, xdg-terminal-exec). Stub them so the suite records the
@@ -779,7 +798,14 @@ def scenario_reauth():
 
 # ---------------------------------------------------------------- settings
 def scenario_settings_view():
-    """What the settings window opens with, before anything is touched."""
+    """What the settings window opens with, before anything is touched.
+
+    The autostart control is read back twice: once with the entry the shell put
+    there, and once after this scenario removes it. A fixture without the file
+    could not tell "reads the file" from "always unchecked", so the mutation
+    that hardwires the box off left the suite green - and on a machine where the
+    entry exists, a Save then deletes it without the user touching the control.
+    """
     tray = MODULE.Tray(CFG)
     pump(0.3)
     dialog = MODULE.SettingsDialog(tray)
@@ -798,8 +824,22 @@ def scenario_settings_view():
         "notice_visible": bool(dialog.label_notice.get_visible()),
         "status_visible": bool(dialog.label_status.get_visible()),
         "boot": bool(dialog.check_boot.get_active()),
+        "autostart_path": MODULE.AUTOSTART,
+        "autostart": read_text(MODULE.AUTOSTART),
     }
     dialog.destroy()
+    # The other half of the same read: with no entry the box is unchecked. The
+    # file goes away here rather than in the fixture, because the scenarios after
+    # this one drive the write path and need it to start from nothing.
+    try:
+        os.remove(MODULE.AUTOSTART)
+    except OSError:
+        pass
+    again = MODULE.SettingsDialog(tray)
+    again.show_all()
+    pump(0.3)
+    data["boot_without_entry"] = bool(again.check_boot.get_active())
+    again.destroy()
     return data
 
 
@@ -2421,9 +2461,267 @@ def scenario_diagnostics():
     return data
 
 
+def scenario_rclone_binary():
+    """A config that names an rclone binary sends all four queries to it.
+
+    RCLONE exists so a build outside PATH can be used, and onedrive-sync,
+    onedrive-check-access and onedrive-doctor all honour it. The tray ran the
+    literal "rclone" in every query it makes, so the quota row, the folder
+    submenu and the sign-in could describe a different binary's remote than the
+    one that actually syncs.
+    """
+    cfg = dict(CFG)
+    cfg["RCLONE"] = os.path.join(WORK, "stubs", "rclone-other")
+    clear_calls()
+    tray = MODULE.Tray(cfg)
+    GLib.timeout_add(200, tray.poll)
+    wait_for(lambda: any("rclone-other" in line for line in call_lines()), 8.0)
+    pump(0.5)
+    shown = []
+    asked = {}
+    real_notify = MODULE.Notify
+    real_dialog = MODULE.Gtk.MessageDialog
+    MODULE.Notify = install_fake_notify(shown)
+    MODULE.Gtk.MessageDialog = fake_message_dialog(
+        asked, MODULE.Gtk.ResponseType.OK)
+    try:
+        find_at(tray.menu, "Re-authorise OneDrive…").activate()
+        reconnect = wait_for(
+            lambda: any("config reconnect" in line for line in call_lines()), 8.0)
+        listed = wait_for(
+            lambda: any(" lsd " in line for line in call_lines()), 8.0)
+    finally:
+        MODULE.Notify = real_notify
+        MODULE.Gtk.MessageDialog = real_dialog
+    pump(0.3)
+    data = {"binary": getattr(tray, "rclone", ""),
+            "calls": call_lines()}
+    # A reload that moves RCLONE has to move with it, the same way the other
+    # startup snapshots do. The config file is a module global, so a private one
+    # is the whole fixture.
+    moved = os.path.join(WORK, "rclone-moved-config")
+    with open(moved, "w", encoding="utf-8") as fh:
+        fh.write('REMOTE="%s"\n' % tray.remote)
+        fh.write('LOCAL="%s"\n' % tray.local)
+        fh.write('LOG="%s"\n' % tray.log)
+        fh.write('EXCLUDE_FOLDERS_FILE="%s"\n' % tray.exclude_file)
+        fh.write('OPEN_APP_CMD=""\n')
+        fh.write('OPEN_APP_NAME="%s"\n' % tray.open_name)
+        fh.write('RCLONE="%s"\n' % os.path.join(WORK, "stubs", "rclone-third"))
+    real_config = MODULE.CONFIG_FILE
+    MODULE.CONFIG_FILE = moved
+    try:
+        tray._reload_config()
+    finally:
+        MODULE.CONFIG_FILE = real_config
+    data["binary_after_reload"] = getattr(tray, "rclone", "")
+    return data
+
+
+def scenario_bad_bytes():
+    """A config that is not UTF-8 is a sentence, not a traceback.
+
+    load_config() caught OSError only, so one bad byte raised
+    UnicodeDecodeError out of main(): the tray died with a traceback in a
+    process whose autostart entry has Terminal=false, while the shell half kept
+    syncing the same file happily. A value that holds the byte is refused rather
+    than repaired, because LOCAL is a path.
+    """
+    import subprocess
+
+    home = os.environ["TRAY_BAD_BYTES_HOME"]
+    os.makedirs(os.path.join(home, "rclone-onedrive-tray"), exist_ok=True)
+    path = os.path.join(home, "rclone-onedrive-tray", "config")
+    env = dict(os.environ)
+    env["XDG_CONFIG_HOME"] = home
+    local = os.path.join(WORK, "local")
+
+    def run_main(raw):
+        with open(path, "wb") as fh:
+            fh.write(raw)
+        proc = subprocess.run([sys.executable, sys.argv[2]],
+                              capture_output=True, text=True, timeout=120, env=env)
+        return {"exit_code": proc.returncode, "stdout": proc.stdout,
+                "stderr": proc.stderr}
+
+    prefix = ('REMOTE="traytest-remote:"\nLOCAL="%s"\n' % local).encode("utf-8")
+    in_comment = run_main(prefix + b"# a caf\xe9 folder\n")
+    # The same byte inside a value, which is the half that must not be guessed
+    # at: LOCAL is the root the delete guard checks.
+    in_value = run_main(b'REMOTE="traytest-remote:"\nLOCAL="'
+                        + os.path.join(WORK, "caf").encode("utf-8")
+                        + b'\xe9"\n')
+    data = {"config_file": path, "in_comment": in_comment, "in_value": in_value}
+
+    # And a running tray that meets the same file keeps what it has rather than
+    # dying inside the reload its own poll asked for.
+    tray = MODULE.Tray(CFG)
+    pump(0.3)
+    held_local = tray.local
+    real_config = MODULE.CONFIG_FILE
+    MODULE.CONFIG_FILE = path
+    try:
+        crashed = ""
+        try:
+            tray._reload_config()
+        except Exception as exc:                    # noqa: BLE001
+            crashed = "%s: %s" % (type(exc).__name__, exc)
+    finally:
+        MODULE.CONFIG_FILE = real_config
+    data["reload_crashed"] = crashed
+    data["reload_kept_local"] = (tray.local == held_local)
+    return data
+
+
+def scenario_sync_fail():
+    """A start systemd refuses is reported, and the wrapper runs instead.
+
+    _start_service and _run dropped the (rc, out, err) that systemctl answered
+    with, so a refused start still left "Syncing…" on screen over a run that
+    never began: no error, no status change and no retry. The wrapper is the
+    same sync without the scheduler, which is what the resync item already
+    relies on.
+
+    systemctl is replaced here rather than stubbed by a file, so the direct run
+    the fallback makes is recorded rather than executed.
+    """
+    case = os.environ.get("TRAY_SYNC_FAIL", "fallback")
+    tray = build()
+    pump(0.5)
+    calls = []
+    real_sh = MODULE.sh
+
+    def failing(cmd, timeout=30):
+        calls.append(cmd)
+        if cmd.startswith("systemctl --user start"):
+            return 1, "", "mock systemctl failure: the unit could not be started"
+        if "onedrive-sync" in cmd:
+            if case == "both":
+                return 1, "", ""
+            return 0, "", ""
+        return real_sh(cmd, timeout=timeout)
+
+    shown = []
+    real_notify = MODULE.Notify
+    MODULE.sh = failing
+    MODULE.Notify = install_fake_notify(shown)
+    try:
+        find_at(tray.menu, "Sync now").activate()
+        told = wait_for(
+            lambda: any("mock systemctl failure" in body for body in shown), 8.0)
+        # The status row is the other half: it may not go on claiming a run.
+        settled = wait_for(
+            lambda: "mock systemctl failure" in (tray.item_status.get_label() or ""),
+            8.0)
+        pump(0.5)
+        data = {"told": told, "settled": settled, "notices": list(shown),
+                "status": tray.item_status.get_label() or "",
+                "busy": bool(tray.busy),
+                "manual": bool(tray.manual_requested),
+                "starts": [c for c in calls if c.startswith("systemctl --user start")],
+                "direct": [c for c in calls if "onedrive-sync" in c]}
+        # The folder toggle's own start shares the silence, and shares the fix.
+        del shown[:]
+        del calls[:]
+        tray._start_service()
+        pump(0.8)
+        data["service_notices"] = list(shown)
+        data["service_direct"] = [c for c in calls if "onedrive-sync" in c]
+    finally:
+        MODULE.sh = real_sh
+        MODULE.Notify = real_notify
+    return data
+
+
+def scenario_folders_unlisted():
+    """A remote that has never listed says so, and offers the retry now.
+
+    Until a listing succeeded, self.folders stayed None and the submenu held one
+    greyed "Loading…" row. A tray started offline, with an expired sign-in, or
+    against the wrong REMOTE therefore said "Loading…" for up to half an hour:
+    the selective-sync feature was unusable and the label was wrong. The quota
+    row already hides itself in the same state.
+    """
+    failure = os.path.join(os.environ["TRAY_CALLS"], "rclone-lsf-fail")
+    with open(failure, "w", encoding="utf-8"):
+        pass
+    try:
+        clear_calls()
+        tray = build()
+        wait_for(lambda: not tray.folders_busy, 8.0)
+        pump(0.8)
+        data = {"folders": (list(tray.folders) if tray.folders is not None else None),
+                "labels": visible_labels(tray.menu),
+                "remote": tray.remote}
+        sub = find_at(tray.menu, "Folders to sync").get_submenu()
+        retry = [item for item in sub.get_children()
+                 if item.get_label() and "try again" in item.get_label()]
+        data["retry_label"] = retry[0].get_label() if retry else ""
+        data["retry_sensitive"] = bool(retry[0].get_sensitive()) if retry else False
+        # The row has to be a way out: clicking it asks again, and this time the
+        # remote answers, so the folders arrive without the 1800-second timer.
+        os.remove(failure)
+        with open(os.path.join(os.environ["TRAY_CALLS"], "folders"), "w",
+                  encoding="utf-8") as fh:
+            fh.write("Docs/\nMusic/\n")
+        clear_calls()
+        if retry:
+            retry[0].activate()
+        data["asked_again"] = wait_for(
+            lambda: any("lsf" in line for line in call_lines()), 8.0)
+        data["retried"] = wait_for(
+            lambda: tray.folders == ["Docs", "Music"], 8.0)
+        pump(0.5)
+        data["labels_after"] = visible_labels(tray.menu)
+    finally:
+        try:
+            os.remove(failure)
+        except OSError:
+            pass
+    return data
+
+
+def scenario_settings_enabled():
+    """A yes/no value spelled "enabled" is on, and a Save leaves it alone.
+
+    onedrive-sync accepts 1|true|yes|on|enabled for CHECK_ACCESS and the doctor
+    the same set for WATCH, while the tray's truthy() knew four of the five. The
+    wrapper therefore turned the access check on while the window drew it
+    unchecked, and a Save wrote 0 over it, dropping the one guard that stops a
+    run treating an unreadable side as mass deletion.
+    """
+    tray = MODULE.Tray(CFG)
+    pump(0.3)
+    dialog = MODULE.SettingsDialog(tray)
+    dialog.show_all()
+    pump(0.3)
+    before = read_text(MODULE.CONFIG_FILE)
+    data = {"access": bool(dialog.check_access.get_active()),
+            "watch": bool(dialog.check_watch.get_active()),
+            "values": dialog.values(),
+            "original": {key: dialog.original[key]
+                         for key in ("WATCH", "CHECK_ACCESS")},
+            "config_before": before}
+    # Nothing is touched: a Save here is the "the user opened the window and
+    # closed it again" case, which must not rewrite the file.
+    dialog.on_save()
+    saved = wait_for(lambda: dialog.done or dialog.failures, 20.0)
+    pump(0.5)
+    data["saved"] = bool(saved and dialog.done)
+    data["failures"] = dialog.failures
+    data["config_after"] = read_text(MODULE.CONFIG_FILE)
+    dialog.destroy()
+    return data
+
+
 SCENARIOS = {
     "menus": scenario_menus,
     "diagnostics": scenario_diagnostics,
+    "rclone-binary": scenario_rclone_binary,
+    "bad-bytes": scenario_bad_bytes,
+    "sync-fail": scenario_sync_fail,
+    "folders-unlisted": scenario_folders_unlisted,
+    "settings-enabled": scenario_settings_enabled,
     "quota": scenario_quota,
     "sync": scenario_sync,
     "pause-durations": scenario_pause_durations,
@@ -2603,7 +2901,7 @@ if len(labels) != len(set(labels)):
     raise SystemExit(1)
 '
     check "the English menu has the expected labels" \
-        json_expr "all(x in d['menu_labels'] for x in ['Sync now', 'Open sync folder', 'View sync log', 'Folders to sync', 'Pause automatic sync', 'Start tray at login', 'Check file names', 'Re-authorise OneDrive…', 'Rebuild sync baseline (resync)…', 'Settings…', 'About', 'Quit', 'Docs', 'Music', '.config', '30 minutes', '2 hours', '8 hours', 'Resume now'])"
+        json_expr "all(x in d['menu_labels'] for x in ['Sync now', 'Open sync folder', 'View sync log', 'Folders to sync', 'Pause automatic sync', 'Start tray at login', 'Check file names', 'Diagnostics…', 'Re-authorise OneDrive…', 'Rebuild sync baseline (resync)…', 'Settings…', 'About', 'Quit', 'Docs', 'Music', '.config', '30 minutes', '2 hours', '8 hours', 'Resume now'])"
     check "the first row names the application and the version" json_py '
 want = "OneDrive " + d["version"]
 if d["header_label"] != want:
@@ -2623,7 +2921,7 @@ fi
 
 if run_driver menus TRAY_LANG=zh; then
     check "the Chinese menu has the expected labels" \
-        json_expr "all(x in d['menu_labels'] for x in ['立即同步', '打开同步文件夹', '查看同步日志', '同步的文件夹', '暂停自动同步', '开机自动启动托盘', '检查文件名', '重新登录 OneDrive…', '设置…', '关于', '退出', '30 分钟', '2 小时', '8 小时', '立即恢复'])"
+        json_expr "all(x in d['menu_labels'] for x in ['立即同步', '打开同步文件夹', '查看同步日志', '同步的文件夹', '暂停自动同步', '开机自动启动托盘', '检查文件名', '诊断…', '重新登录 OneDrive…', '设置…', '关于', '退出', '30 分钟', '2 小时', '8 小时', '立即恢复'])"
     check "no Chinese label is left in English" json_py '
 left = [x for x in d["menu_labels"]
         if x in ("Sync now", "View sync log", "Quit", "Resume now", "Settings…",
@@ -2666,10 +2964,105 @@ if run_driver quota; then
         json_expr "d['quota_label'] == '232.8 GiB of 931.3 GiB used (25%)'"
 fi
 
+title "The rclone binary the config names"
+# RCLONE is documented as "the rclone binary to run, by name or by path", and
+# onedrive-sync, onedrive-check-access and onedrive-doctor all honour it. The tray
+# ran the literal "rclone" from PATH in all four of its own queries, so the quota
+# row, the folder menu and the sign-in could describe a different binary's remote
+# than the one that syncs - which is the case the key exists for.
+if run_driver rclone-binary; then
+    check "the tray resolved the binary RCLONE names" json_py '
+if not d["binary"].endswith("rclone-other"):
+    print("rclone=%r" % (d["binary"],))
+    raise SystemExit(1)
+'
+    check "the folder listing asks that binary" json_py '
+if not any(x.startswith("rclone-other lsf") for x in d["calls"]):
+    print("calls: %r" % (d["calls"],))
+    raise SystemExit(1)
+'
+    check "the quota row asks that binary" json_py '
+if not any(x.startswith("rclone-other about") for x in d["calls"]):
+    print("calls: %r" % (d["calls"],))
+    raise SystemExit(1)
+'
+    check "the sign-in asks that binary" json_py '
+if not any("rclone-other config reconnect" in x for x in d["calls"]):
+    print("calls: %r" % (d["calls"],))
+    raise SystemExit(1)
+'
+    check "the check after the sign-in asks that binary" json_py '
+if not any(x.startswith("rclone-other lsd") for x in d["calls"]):
+    print("calls: %r" % (d["calls"],))
+    raise SystemExit(1)
+'
+    check "and the rclone on PATH is never run" json_py '
+path = [x for x in d["calls"] if x.startswith("rclone ")]
+if path:
+    print("the binary on PATH was run anyway: %r" % (path,))
+    raise SystemExit(1)
+'
+    check "a reload that moves RCLONE moves with it" json_py '
+if not d["binary_after_reload"].endswith("rclone-third"):
+    print("rclone after the reload: %r" % (d["binary_after_reload"],))
+    raise SystemExit(1)
+'
+fi
+
 title "Sync now"
 if run_driver sync; then
     check "activating Sync now records a start of the configured service" \
         json_expr "any(x == 'systemctl --user start ztraytest.service' for x in d['calls'])"
+fi
+
+title "Sync now when systemctl refuses the start"
+# _start_service and _run threw away the (rc, out, err) systemctl answered with,
+# so a refused start still drew "Syncing…" over a run that never began: no error,
+# no status change and no retry. The same file already reports systemd's failures
+# from the settings window and from a pause that cannot be re-armed, and the
+# resync item runs the wrapper directly - which is the retry the fallback uses.
+if run_driver sync-fail TRAY_SYNC_FAIL=fallback; then
+    check "the failure names what systemd said" json_py '
+if not d["told"] or not any("mock systemctl failure" in body
+                            for body in d["notices"]):
+    print("notices: %r" % (d["notices"],))
+    raise SystemExit(1)
+'
+    check "the status row does not claim a sync is running" json_py '
+if "Syncing" in d["status"]:
+    print("status: %r" % (d["status"],))
+    raise SystemExit(1)
+if d["busy"]:
+    print("the run is still marked busy after the fallback came back")
+    raise SystemExit(1)
+'
+    check "and the wrapper runs directly rather than nothing happening" json_py '
+if not d["direct"]:
+    print("starts: %r direct: %r" % (d["starts"], d["direct"]))
+    raise SystemExit(1)
+'
+    check "the folder toggle's own start is reported the same way" json_py '
+if not any("mock systemctl failure" in body for body in d["service_notices"]):
+    print("notices: %r" % (d["service_notices"],))
+    raise SystemExit(1)
+if not d["service_direct"]:
+    print("no direct run: %r" % (d["service_notices"],))
+    raise SystemExit(1)
+'
+fi
+
+if run_driver sync-fail TRAY_SYNC_FAIL=both; then
+    check "a fallback that fails too is reported, and drops the run" json_py '
+if not any("Could not start the sync" in body for body in d["notices"]):
+    print("notices: %r" % (d["notices"],))
+    raise SystemExit(1)
+if not d["settled"] or "Syncing" in d["status"]:
+    print("status: %r" % (d["status"],))
+    raise SystemExit(1)
+if d["manual"]:
+    print("a request that never started is still marked as a manual run")
+    raise SystemExit(1)
+'
 fi
 
 title "Pausing for a while"
@@ -3099,8 +3492,9 @@ if not d["third_reloaded"]:
 if d["folders_third"] is not None:
     print("the previous remote listing is still held: %r" % (d["folders_third"],))
     raise SystemExit(1)
-if "Docs" in d["labels_third"] or "Loading…" not in d["labels_third"]:
-    print("the folder submenu is not back to Loading…: %r" % (d["labels_third"],))
+if "Docs" in d["labels_third"] or not any("try again" in x for x in d["labels_third"]):
+    print("the folder submenu does not say the listing failed: %r"
+          % (d["labels_third"],))
     raise SystemExit(1)
 if d["quota_third_visible"] or d["quota_third"] is not None:
     print("the old quota is still held: visible=%r quota=%r label=%r"
@@ -3302,6 +3696,39 @@ if missing:
 '
 fi
 rm -f "$WORK/calls/rclone-lsf-fail"
+
+title "Folders that have never been listed"
+# The other half of the same state: a tray started offline, with an expired
+# sign-in, against the wrong REMOTE or with rclone missing has never stored a
+# listing at all, so the submenu held one greyed "Loading…" row while the label
+# was wrong and the retry was up to 1800 seconds away. The quota row hides itself
+# in the same state; the folder row has to say what happened and offer the retry.
+if run_driver folders-unlisted; then
+    check "there is no listing, and the row says the listing failed" json_py '
+if d["folders"] is not None:
+    print("a listing appeared from a failing stub: %r" % (d["folders"],))
+    raise SystemExit(1)
+if "Loading…" in d["labels"]:
+    print("the submenu still says Loading…: %r" % (d["labels"],))
+    raise SystemExit(1)
+'
+    check "and it names the remote the listing failed on" json_py '
+if d["remote"] not in d["retry_label"]:
+    print("row: %r, remote: %r" % (d["retry_label"], d["remote"]))
+    raise SystemExit(1)
+'
+    check "the row is a way to try again now, not a dead end" json_py '
+if not d["retry_sensitive"]:
+    print("the retry row is not sensitive: %r" % (d["retry_label"],))
+    raise SystemExit(1)
+if not d["asked_again"]:
+    print("activating it never asked rclone again")
+    raise SystemExit(1)
+if not d["retried"] or "Docs" not in d["labels_after"]:
+    print("the retry did not bring the folders in: %r" % (d["labels_after"],))
+    raise SystemExit(1)
+'
+fi
 
 title "A folder name the list cannot hold"
 # Both readers of exclude-folders.txt treat a line starting with # as a comment,
@@ -3558,6 +3985,22 @@ WATCH="1"
 CHECK_ACCESS="0"
 EOF
 
+# The autostart entry the settings window reads is the one for the config home
+# this scenario runs under, which is the sandbox's own. A fixture without the
+# file made os.path.exists(AUTOSTART) false no matter what, so the "Start tray at
+# login" control could not tell "reads the file" from "always unchecked" - and on
+# a machine where the entry exists, a Save wrote it away without the user
+# touching the control. scenario_settings_view removes it again for the cases
+# below, which drive the write path from nothing.
+mkdir -p "$WORK/config/autostart"
+cat > "$WORK/config/autostart/rclone-onedrive-tray.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=OneDrive tray
+Exec="$SRC_DIR/bin/onedrive-tray"
+X-GNOME-Autostart-enabled=true
+EOF
+
 title "The settings window"
 if run_driver settings-view; then
     check "the window names where the config lives" json_py '
@@ -3591,7 +4034,50 @@ if d["values"] != want:
 '
     check "nothing is reported before anything is done" \
         json_expr "not d['notice_visible'] and not d['status_visible']"
-    check "start at login follows the autostart file" json_expr "not d['boot']"
+    check "start at login follows the autostart file" json_py '
+if not d["boot"]:
+    print("the box is unchecked while %s exists (%r)"
+          % (d["autostart_path"], d["autostart"]))
+    raise SystemExit(1)
+'
+    check "and is unchecked when the entry is not there" \
+        json_expr "not d['boot_without_entry']"
+fi
+
+title "A yes/no value spelled enabled"
+# The accepted spellings are 1|true|yes|on|enabled, and three of the four readers
+# disagree about the last one: onedrive-sync and onedrive-doctor take it, the
+# tray's truthy() did not. The wrapper then turned CHECK_ACCESS on while the
+# window drew the box unchecked, and a Save wrote 0 over it - dropping the one
+# guard that stops a run treating an unreadable side as mass deletion.
+ACCESS_HOME="$WORK/access"
+mkdir -p "$ACCESS_HOME/rclone-onedrive-tray"
+cat > "$ACCESS_HOME/rclone-onedrive-tray/config" <<EOF
+# Spelled the way the wrapper's own yes/no reader accepts.
+REMOTE="traytest-remote:"
+LOCAL="$ACCESS_HOME/local"
+UNIT_NAME="ztraytest"
+LOG="$WORK/cache/sync.log"
+UI_LANG="en"
+WATCH="enabled"
+CHECK_ACCESS="enabled"
+EOF
+if run_driver settings-enabled XDG_CONFIG_HOME="$ACCESS_HOME"; then
+    check "an enabled spelling is shown as a ticked box" json_py '
+if not d["access"] or not d["watch"]:
+    print("access=%r watch=%r (values read back %r)"
+          % (d["access"], d["watch"], d["values"]))
+    raise SystemExit(1)
+'
+    check "and a Save leaves the spelling, and the file, where it found them" json_py '
+if not d["saved"] or d["failures"]:
+    print("saved=%r failures=%r" % (d["saved"], d["failures"]))
+    raise SystemExit(1)
+if d["config_after"] != d["config_before"]:
+    print("the file was rewritten: %r -> %r"
+          % (d["config_before"], d["config_after"]))
+    raise SystemExit(1)
+'
 fi
 
 title "The marker files behind the access check"
@@ -4048,7 +4534,7 @@ cli() {
         python3 "$TRAY" "$@"
 }
 run "--version answers with the version, with no display at all" \
-    0 "1.4.0" cli --version
+    0 "$WANT_VERSION" cli --version
 run "--help describes the flags, with no display at all" \
     0 "--settings" cli --help
 run "an unknown option is refused" 2 "unknown option" cli --nope
@@ -4116,13 +4602,78 @@ if "REMOTE" not in d["stderr"] or d["config_file"] not in d["stderr"]:
     raise SystemExit(1)
 '
     check "and points at setup.sh or onedrive-doctor" json_py '
-if "setup.sh" not in d["stderr"] and "onedrive-doctor" not in d["stderr"]:
-    print("nothing points at the fix: %r" % (d["stderr"],))
+if "setup.sh" not in d["stderr"]:
+    print("nothing points at setup.sh: %r" % (d["stderr"],))
+    raise SystemExit(1)
+'
+    check "the edit that fixes it, and the file to make it in, are spelled out" json_py '
+if "REMOTE=\"" not in d["stderr"]:
+    print("the edit to make is not spelled out: %r" % (d["stderr"],))
+    raise SystemExit(1)
+if d["config_file"] not in d["stderr"]:
+    print("the file to edit is not named: %r" % (d["stderr"],))
+    raise SystemExit(1)
+'
+    check "and the read-only doctor is not offered as the fix" json_py '
+if "onedrive-doctor" in d["stderr"]:
+    print("a read-only tool is offered as the fix for a missing key: %r"
+          % (d["stderr"],))
     raise SystemExit(1)
 '
     check "and no traceback reaches stderr" json_py '
 if "Traceback" in d["stderr"] or "KeyError" in d["stderr"]:
     print("stderr: %r" % (d["stderr"],))
+    raise SystemExit(1)
+'
+fi
+
+title "A config that is not valid UTF-8"
+# load_config() caught OSError only, so one bad byte raised UnicodeDecodeError out
+# of main() and the tray died with a traceback, in a process whose autostart entry
+# has Terminal=false. The shell half sources the same file happily, so the sync
+# kept running while the tray never appeared. The offending byte has to be named,
+# and a byte inside a value has to be refused rather than repaired, because LOCAL
+# is a path.
+if run_driver bad-bytes TRAY_BAD_BYTES_HOME="$WORK/badbytes"; then
+    check "a bad byte in a comment is a sentence, not a traceback" json_py '
+got = d["in_comment"]
+if got["exit_code"] != 1:
+    print("exit %r, stderr %r" % (got["exit_code"], got["stderr"]))
+    raise SystemExit(1)
+if "Traceback" in got["stderr"]:
+    print("stderr: %r" % (got["stderr"],))
+    raise SystemExit(1)
+if d["config_file"] not in got["stderr"]:
+    print("the file is not named: %r" % (got["stderr"],))
+    raise SystemExit(1)
+if "UTF-8" not in got["stderr"]:
+    print("the fault is not named as an encoding: %r" % (got["stderr"],))
+    raise SystemExit(1)
+if "0xe9" not in got["stderr"]:
+    print("the offending byte is not named: %r" % (got["stderr"],))
+    raise SystemExit(1)
+'
+    check "a bad byte in a value is refused the same way" json_py '
+got = d["in_value"]
+if got["exit_code"] != 1:
+    print("exit %r, stderr %r" % (got["exit_code"], got["stderr"]))
+    raise SystemExit(1)
+if "Traceback" in got["stderr"]:
+    print("stderr: %r" % (got["stderr"],))
+    raise SystemExit(1)
+if "0xe9" not in got["stderr"] or "UTF-8" not in got["stderr"]:
+    print("the fault is not named: %r" % (got["stderr"],))
+    raise SystemExit(1)
+if "REMOTE is not set" in got["stderr"]:
+    print("the unreadable file was read as the defaults: %r" % (got["stderr"],))
+    raise SystemExit(1)
+'
+    check "and a running tray keeps what it has instead of dying" json_py '
+if d["reload_crashed"]:
+    print("the reload died: %s" % (d["reload_crashed"],))
+    raise SystemExit(1)
+if not d["reload_kept_local"]:
+    print("the reload moved LOCAL to make sense of a file it could not read")
     raise SystemExit(1)
 '
 fi

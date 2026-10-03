@@ -115,8 +115,19 @@ ask() {  # ask <prompt> <default>  -> echoes the answer
     printf '%s\n' "${reply:-$default}"
 }
 
-command -v rclone >/dev/null 2>&1 ||
-    die "rclone is not installed. See https://rclone.org/downloads/"
+# config.example documents RCLONE as "the rclone binary to run, by name or by
+# path", and install.sh reads it before it probes for rclone. The wizard is the
+# first thing a user runs on a new machine, so it reads the same key: otherwise
+# ./setup.sh refuses a machine whose rclone is outside PATH while the wrapper it
+# installs would have worked. The key is read here because the config may already
+# exist from an earlier run; on a bare machine there is nothing to read and the
+# plain name is the only honest answer.
+RCLONE_BIN="$(sed -n 's/^[[:space:]]*RCLONE="\{0,1\}\([^"]*\)"\{0,1\}.*/\1/p' \
+    "$CONFIG_DIR/config" 2>/dev/null | tail -1)"
+RCLONE_BIN="${RCLONE_BIN:-rclone}"
+
+command -v "$RCLONE_BIN" >/dev/null 2>&1 ||
+    die "$RCLONE_BIN is not installed. See https://rclone.org/downloads/"
 
 say "rclone-onedrive-tray setup"
 
@@ -137,7 +148,7 @@ if [ -f "$CONFIG_FILE" ]; then
 fi
 
 # --------------------------------------------------------------- 1. the remote
-REMOTES="$(rclone listremotes 2>/dev/null)"
+REMOTES="$("$RCLONE_BIN" listremotes 2>/dev/null)"
 if [ -z "$REMOTES" ]; then
     echo
     warn "No rclone remotes are configured yet."
@@ -148,18 +159,18 @@ if [ -z "$REMOTES" ]; then
         # The sign-in is interactive: it opens a browser and waits. Starting it
         # from a non-interactive run would block forever with nothing written.
         die "no rclone remote, and this run cannot open a browser for you.
-    Create one first:      rclone config create onedrive onedrive
+    Create one first:      $RCLONE_BIN config create onedrive onedrive
     Or for a trial with no account at all:
-                          rclone config create trial alias remote /tmp/onedrive-trial
+                          $RCLONE_BIN config create trial alias remote /tmp/onedrive-trial
     Then re-run this script."
     fi
     name="$(ask 'Name for the new remote' 'onedrive')"
-    say "Running: rclone config create $name onedrive"
+    say "Running: $RCLONE_BIN config create $name onedrive"
     echo "    (rclone will open your browser; complete the sign-in there)"
-    if rclone config create "$name" onedrive; then
-        REMOTES="$(rclone listremotes 2>/dev/null)"
+    if "$RCLONE_BIN" config create "$name" onedrive; then
+        REMOTES="$("$RCLONE_BIN" listremotes 2>/dev/null)"
     else
-        die "could not create the remote; see docs/SIGNING-IN.md, or run 'rclone config' by hand and re-run this script"
+        die "could not create the remote; see docs/SIGNING-IN.md, or run '$RCLONE_BIN config' by hand and re-run this script"
     fi
 fi
 
@@ -177,14 +188,14 @@ remote_name="${REMOTE_IN%%:*}"
 remote_path="${REMOTE_IN#*:}"
 [ "$remote_path" = "$REMOTE_IN" ] && remote_path=""
 [ -n "$remote_name" ] || die "no remote given"
-rclone listremotes | grep -qx "${remote_name}:" ||
-    die "unknown remote: ${remote_name} (see 'rclone listremotes')"
+"$RCLONE_BIN" listremotes | grep -qx "${remote_name}:" ||
+    die "unknown remote: ${remote_name} (see '$RCLONE_BIN listremotes')"
 
 # --------------------------------------------------------------- 2. the folder
 if [ -z "$remote_path" ] && [ "$ASSUME_YES" -eq 0 ] && [ -t 0 ]; then
     echo
     say "Top level of ${remote_name}: (picking nothing syncs the whole drive)"
-    rclone lsd "${remote_name}:" 2>/dev/null | head -20 | awk '{ $1=""; $2=""; $3=""; $4=""; sub(/^ +/,""); print "  " $0 }'
+    "$RCLONE_BIN" lsd "${remote_name}:" 2>/dev/null | head -20 | awk '{ $1=""; $2=""; $3=""; $4=""; sub(/^ +/,""); print "  " $0 }'
     remote_path="$(ask 'Sub-folder to sync (blank = everything)' '')"
 fi
 
@@ -222,7 +233,7 @@ if [ -z "$SKIP_FOLDERS" ] && [ "$SKIP_FOLDERS_GIVEN" -eq 0 ] &&
         [ "$ASSUME_YES" -eq 0 ] && [ -t 0 ]; then
     echo
     say "Folders inside $REMOTE"
-    listing="$(rclone lsf --dirs-only --max-depth 1 "$REMOTE" 2>/dev/null | sed 's:/$::')"
+    listing="$("$RCLONE_BIN" lsf --dirs-only --max-depth 1 "$REMOTE" 2>/dev/null | sed 's:/$::')"
     if [ -n "$listing" ]; then
         printf '%s\n' "$listing" | nl -w2 -s') ' | sed 's/^/  /'
         echo "  Everything is synced unless you say otherwise here."
@@ -264,36 +275,79 @@ else
     esac
 fi
 
+# Keys the wizard does not ask about are carried over from a config that is already
+# there. It used to write the whole file from this template, so a re-run reset every
+# value it did not prompt for (a bandwidth cap, an access check, the log size, the
+# notification setting) and dropped the keys it did not know about at all, RCLONE
+# among them, which is the one a user sets to point at a build outside PATH. The
+# flags own REMOTE, LOCAL, UNIT_NAME, INTERVAL_MIN, WATCH and the two file paths;
+# everything else is the user's unless the file gives no value for it.
+#
+# The file is read into a variable first because the redirection on the heredoc
+# below truncates it before any command substitution inside the body runs, so a
+# carry() that read the path would find an empty file.
+#
+# The flag string below is the same one bin/onedrive-sync ships as its default, and
+# tests/docs.sh compares this constant with that one and with config.example. It is
+# a constant rather than an inline value because the template writes whatever the
+# config already had.
+DEFAULT_BISYNC_ARGS="--resilient --recover --max-lock 2m --conflict-resolve none --conflict-loser num --stats 2s"
+OLD_CONFIG="$(cat "$CONFIG_FILE" 2>/dev/null || true)"
+carry() {  # carry <KEY> <default> -> the value already in the config, or the default
+    local key="$1" default="$2" line
+    line="$(printf '%s\n' "$OLD_CONFIG" |
+        grep -E "^[[:space:]]*$key=" | tail -1 || true)"
+    case "$line" in
+        '')
+            printf '%s' "$default" ;;
+        *=*)
+            # The value, with the quotes removed when it has them. An empty quoted
+            # value is a value, so only a key that is not in the file at all falls
+            # back to the default.
+            line="${line#*=}"
+            case "$line" in
+                \"*) line="${line#\"}"; printf '%s' "${line%%\"*}" ;;
+                \'*) line="${line#\'}"; printf '%s' "${line%%\'*}" ;;
+                *)   printf '%s' "${line%%[[:space:]#]*}" ;;
+            esac ;;
+    esac
+}
+
 cat > "$CONFIG_FILE" <<EOF
 # Written by setup.sh on $(date '+%Y-%m-%d %H:%M')
 REMOTE="$(config_quote "$REMOTE")"
 LOCAL="$(config_quote "$LOCAL_IN")"
 UNIT_NAME="$(config_quote "$UNIT_NAME")"
 INTERVAL_MIN="$INTERVAL"
-MAX_DELETE="100"
+MAX_DELETE="$(config_quote "$(carry MAX_DELETE 100)")"
 # Bandwidth cap in rclone size syntax (1M, 500k, 1.5M). Empty means unlimited.
-BW_LIMIT=""
+BW_LIMIT="$(config_quote "$(carry BW_LIMIT "")")"
 # The access check aborts a run when the marker file is missing on one side,
 # which is what a network or mount problem looks like from the other side. Off
 # until you create the markers: onedrive-check-access
-CHECK_ACCESS="0"
-CHECK_FILENAME=""
-BISYNC_ARGS="--resilient --recover --max-lock 2m --conflict-resolve none --conflict-loser num --stats 2s"
+CHECK_ACCESS="$(config_quote "$(carry CHECK_ACCESS 0)")"
+CHECK_FILENAME="$(config_quote "$(carry CHECK_FILENAME "")")"
+BISYNC_ARGS="$(config_quote "$(carry BISYNC_ARGS "$DEFAULT_BISYNC_ARGS")")"
 FILTERS_FILE="$(config_quote "$FILTERS_FILE")"
 EXCLUDE_FOLDERS_FILE="$(config_quote "$EXCLUDE_FOLDERS_FILE")"
 
-LOG="$(config_quote "$CACHE_DIR/sync.log")"
-OPEN_APP_CMD=""
-OPEN_APP_NAME="the app"
-UI_LANG=""
+LOG="$(config_quote "$(carry LOG "$CACHE_DIR/sync.log")")"
+OPEN_APP_CMD="$(config_quote "$(carry OPEN_APP_CMD "")")"
+OPEN_APP_NAME="$(config_quote "$(carry OPEN_APP_NAME "the app")")"
+UI_LANG="$(config_quote "$(carry UI_LANG "")")"
 
 WATCH="$([ "$WATCH" = "yes" ] && echo 1 || echo 0)"
-WATCH_DEBOUNCE="8"
-WATCH_SETTLE="12"
-WATCH_EXCLUDE=""
+WATCH_DEBOUNCE="$(config_quote "$(carry WATCH_DEBOUNCE 8)")"
+WATCH_SETTLE="$(config_quote "$(carry WATCH_SETTLE 12)")"
+WATCH_EXCLUDE="$(config_quote "$(carry WATCH_EXCLUDE "")")"
 
-RETRIES="3"
-RETRY_DELAY="60"
+RETRIES="$(config_quote "$(carry RETRIES 3)")"
+RETRY_DELAY="$(config_quote "$(carry RETRY_DELAY 60)")"
+MAX_LOG_BYTES="$(config_quote "$(carry MAX_LOG_BYTES 5242880)")"
+SHOW_ICON="$(config_quote "$(carry SHOW_ICON 1)")"
+NOTIFY_ON_SUCCESS="$(config_quote "$(carry NOTIFY_ON_SUCCESS 1)")"
+# The rclone binary to run, by name or by path.
+RCLONE="$(config_quote "$(carry RCLONE "")")"
 EOF
 chmod 0644 "$CONFIG_FILE" "$FILTERS_FILE"
 

@@ -38,6 +38,10 @@ CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/rclone-onedrive-tray"
 DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/rclone-onedrive-tray"
 UNIT_DIR="$XDG_CONFIG/systemd/user"
 AUTOSTART="$XDG_CONFIG/autostart/rclone-onedrive-tray.desktop"
+# The NetworkManager hook is one machine-wide file. Its directory is overridable
+# the way install.sh's is, so a test can point both at a sandbox hook instead of
+# reaching for /etc.
+NM_DISPATCHER_DIR="${NM_DISPATCHER_DIR:-/etc/NetworkManager/dispatcher.d}"
 
 say()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*" >&2; }
@@ -106,7 +110,7 @@ done
 systemctl --user daemon-reload 2>/dev/null || \
     warn "run 'systemctl --user daemon-reload' after your next login"
 
-NM_TARGET="/etc/NetworkManager/dispatcher.d/90-rclone-onedrive-tray"
+NM_TARGET="$NM_DISPATCHER_DIR/90-rclone-onedrive-tray"
 # The hook is one file for the whole machine and it names a unit, so it is only
 # this install's to remove when the install is the normal one and the hook names
 # the unit being uninstalled. Without those checks, removing a test install from
@@ -114,8 +118,9 @@ NM_TARGET="/etc/NetworkManager/dispatcher.d/90-rclone-onedrive-tray"
 if [ -f "$NM_TARGET" ]; then
     # The real home from the password database, which does not move when a test
     # redirects HOME. A redirected HOME with the default unit name used to look
-    # exactly like the main install and reached for this hook.
-    real_home="$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6)"
+    # exactly like the main install and reached for this hook. The override is
+    # what lets a test step past this guard and reach the two below it.
+    real_home="${REAL_HOME_OVERRIDE:-$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6)}"
     if [ -n "$real_home" ] && [ "$HOME" != "$real_home" ]; then
         say "Leaving $NM_TARGET alone: HOME is redirected to $HOME"
     elif [ "$PREFIX_GIVEN" -eq 1 ] && [ "$PREFIX" != "$HOME/.local" ]; then

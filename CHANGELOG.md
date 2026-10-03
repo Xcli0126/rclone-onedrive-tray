@@ -141,6 +141,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   was not a terminal: `ask()` answers the (Y/n) prompt's default in that case, and
   the default is yes. `--yes` was already handled, and a run from a script, a pipe
   or cron is the same situation with nobody there to answer.
+- `tests/filters.sh`'s check that the filters file holds no whitespace-only line
+  could not fail: `grep -qvE '^[[:space:]]*$'` exits 0 as soon as any line is not
+  blank, which is true of every file with a rule in it. It asks for a line made
+  only of blanks now, and a second case proves the expression would notice one.
+- Five of the six name groups `docs/TROUBLESHOOTING.md` promises OneDrive rewrites
+  (a leading tilde, a leading or trailing space, a trailing period, DEL, a control
+  character, bytes that are not valid UTF-8) had no case anywhere, so the checker's
+  arm for each could be deleted with every suite still green. Each group has a name
+  in the fixture now, and two of them have mutation rows.
+- `bin/onedrive-doctor` carried a comment describing the failure-hint order the
+  previous round removed, fifteen lines above the code and the comment that say the
+  opposite.
+- `docs/FEATURE-PARITY.md` listed bandwidth presets as work still to do while its
+  own must-have table records them as present, and said they were written into
+  `BISYNC_ARGS`, which is not how they are built.
+- `install.sh` wrote an autostart entry that a desktop cannot parse for an install
+  prefix containing `$`, a backtick or a quote: its `Exec=` escaping was one pass
+  short of the key-file rule the tray's own writer implements, so the entry was
+  refused outright and the tray never started at login while the "Start tray at
+  login" checkbox still read as on. Both writers now run the same acceptance list
+  through GLib.
+- The machine-wide NetworkManager hook: the HOME-redirect guard printed "so it is
+  not installed" and then installed anyway, so a run with a redirected HOME could
+  write into `/etc`, and no suite ran `install.sh --with-nm-dispatcher` at all, so
+  neither the installer's write path nor the uninstaller's unit-name guard was
+  exercised. Both paths have cases now, driven through a dispatcher directory the
+  suite redirects.
+- `install.sh` gated the whole install on `command -v rclone` and took its version
+  warning from the PATH binary, so a user who followed `config.example`'s advice to
+  point `RCLONE` at a build outside PATH could not install. It reads that key the
+  way it already reads `UNIT_NAME`.
+- `setup.sh` probed and ran the bare `rclone` from PATH, the same blind spot one
+  screen up, so the wizard refused a machine whose rclone is outside PATH while
+  the wrapper it installs would have worked.
+- `setup.sh` rewrote the config from its template on every run, so a re-run reset
+  every value it had not prompted for (a bandwidth cap, an access check, the log
+  size, the icon and notification settings) and deleted the keys its template did
+  not know, `RCLONE` among them. Keys the flags do not own are carried over now,
+  an explicitly empty value is kept as empty, and the template gained the four keys
+  it was missing.
+- `install.sh`'s `ExecStart=` did not escape `$`, which systemd reads as the start
+  of a variable. Per the documented rule it is written `$$`, with a case that
+  asserts it rather than a measurement, because proving the expansion needs a unit
+  to run.
+- `install.sh` accepted only `"1"` for `WATCH` while `onedrive-doctor` accepted
+  five spellings, so a config the doctor called on was reported as off by the
+  installer, which left the watcher unit disabled.
+- The tray ignored the documented `RCLONE` key in all four of its rclone calls, so
+  the quota row, the folder menu and Re-authorise could run a different binary from
+  the one that syncs. The key is resolved once, followed by a reload, and every
+  call is quoted the way the remote already was.
+- A config file that is not valid UTF-8 killed the tray with a traceback while the
+  shell half sourced the same file happily, so sync kept running and the icon never
+  appeared, with the traceback going nowhere (the autostart entry is
+  `Terminal=false`). It is reported as a config fault naming the file and the byte,
+  and a reload keeps the values it already had.
+- "Sync now" announced a start that had not happened when `systemctl --user start`
+  failed: the return code and systemd's message were thrown away. It reports the
+  refusal now and, on that path, runs the wrapper directly, because systemd is only
+  the scheduler and the wrapper takes the same lock and the same delete cap.
+- "Folders to sync" could sit on a disabled "Loading…" row for up to half an hour
+  when the remote had never been listed, because a failed listing stored the same
+  nothing as "not fetched yet". The row says the listing failed and offers a retry
+  when there is no listing at all, and the mirror case is unchanged: a remote whose
+  answers never land keeps none of the previous remote's folders.
+- The yes/no keys are read as `1`, `true`, `yes`, `on` or `enabled` by every
+  reader now: the tray's `truthy()` gains `enabled`, which the wrapper and the
+  doctor already took, so a config one of them called on is no longer off in the
+  settings window with a Save writing `0` over it. The window keeps the spelling
+  the file already had unless the box is actually changed.
+- The "Start tray at login" checkbox had a case that could not fail: its fixture
+  never created the autostart file, so "reads the file" and "always unchecked" were
+  the same answer, and the unguarded reader would have deleted the entry on the
+  next Save. The entry exists in the fixture now, and the case reads it.
+- The tray's refusal for a config with no REMOTE named `onedrive-doctor`, which is
+  read-only by construction and cannot set one. It names `setup.sh` and the line to
+  add, with the config path.
 
 ### Changed
 
@@ -148,6 +225,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is what it does: scheduled runs stay quiet, because a five-minute timer
   announcing every success would train people to ignore the notifications that
   matter. A failure always notifies. The wording was the only thing wrong.
+- `tests/docs.sh` compares three more rules that live in two files each: the
+  listing slug the doctor uses to find the wrapper's baseline, the
+  positive-integer key list the doctor judges, and the set of keys the doctor
+  claims to know against `config.example`. The README config sample is matched at
+  any indentation now, and a README that shows a config with no `BISYNC_ARGS` line
+  fails instead of skipping, which is how that gate could be defeated by a space.
+- `install.sh` prints its "Installed" summary from the same list the install loop
+  iterates, instead of a second hand-kept list of the scripts it ships.
 - `tests/docs.sh` gained gates for the README menu diagram against the labels the
   tray itself builds, the README `BISYNC_ARGS` sample against the wrapper's
   default, the script list in `docs/UPDATING.md` against what `install.sh`
