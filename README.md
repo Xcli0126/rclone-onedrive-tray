@@ -236,7 +236,7 @@ REMOTE="onedrive:"            # rclone remote, optionally with a sub-path: "oned
 LOCAL="$HOME/OneDrive"        # local directory to keep in sync
 INTERVAL_MIN="5"              # minutes between automatic syncs
 MAX_DELETE="100"              # abort if a run would delete more than this
-BISYNC_ARGS="--resilient --recover --max-lock 2m --conflict-resolve none --conflict-loser num"
+BISYNC_ARGS="--resilient --recover --max-lock 2m --conflict-resolve none --conflict-loser num --stats 2s"
 FILTERS_FILE="$HOME/.config/rclone-onedrive-tray/filters.txt"
 OPEN_APP_CMD=""               # optional: an app the tray can launch, e.g. "obsidian"
 UI_LANG=""                    # tray language: en / zh (empty = follow $LANG)
@@ -297,6 +297,7 @@ Pause automatic sync ▸   30 minutes
 ☑ Start tray at login
 ────────────────────────────────
 Check file names
+Diagnostics…
 Re-authorise OneDrive…
 Rebuild sync baseline (resync)…
 ────────────────────────────────

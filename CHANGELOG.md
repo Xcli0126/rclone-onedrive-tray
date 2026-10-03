@@ -91,6 +91,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as a survivor: the same row read caught at 18 failures and SURVIVED at 20. The
   count is read as a number now, and `tests/lib/mutate.sh --self-test` checks the
   classifier against six closing lines, including the two it used to misread.
+- `onedrive-doctor` and `onedrive-sync` read rclone's one-line refusal of an
+  expired sign-in ("... couldn't fetch token: invalid_grant: maybe token expired?
+  ...") as a network problem, because that line matches both pattern tables and the
+  network one was asked about first. The doctor then said the sign-in was not what
+  failed and exited 0 while nothing could sync, and the wrapper spent its retries
+  on a failure no retry can clear. The markers that can only come from Microsoft's
+  own answer are asked about first now, in both files.
+- Deleting or breaking the config of a running tray was read as "the config is
+  empty": the defaults were applied over the running values, so the delete guard's
+  root moved from the configured `LOCAL` to `~/OneDrive` and the folder menu
+  offered to delete a directory there. A config that cannot be read no longer
+  counts as a change, and a reload refuses a config with no REMOTE.
+- A reload that moved `REMOTE` left the folder list and the quota of the remote
+  before it in place for up to thirty minutes, and unticking a row in that stale
+  list wrote the old remote's folder name into the exclusion file that now governs
+  the new one.
+- A value that begins with `#` (`KEY=#value`) was read as an empty value, and one
+  written as `export KEY=value` was stored under the key `export KEY`, so the tray
+  refused to start on a config the wrapper and the doctor read correctly.
+- `BISYNC_ARGS` holding a quoted pattern, which is how a shell would group a
+  pattern containing a space, made rclone refuse the whole command line on every
+  run and left its usage text in the journal. A token that begins or ends with a
+  quote is refused at the start of the run with the key named, and
+  `config/config.example` says where such a pattern belongs.
+- The wrapper's own `-v` and `-vv` were refused as unknown options while the same
+  spelling inside `BISYNC_ARGS` was treated as verbose, which was two answers to
+  one question.
+- The doctor's tray probe matched any command line containing the name, including
+  the `tail -f .../rclone-onedrive-tray/sync.log` the project's own documentation
+  tells a user to run, so it reported a tray that was not there. It matches the
+  interpreter and the script now.
+- The doctor called a config healthy when `RETRIES`, `RETRY_DELAY` or
+  `MAX_LOG_BYTES` held a value `onedrive-sync` refuses to run with, and a machine
+  that had never synced hid the `MAX_LOG_BYTES` case entirely, because that check
+  sat behind "does the log exist".
+- Six things the documentation said that the code did not: both READMEs' menu
+  diagrams omitted the tray's `Diagnostics…` row, both `BISYNC_ARGS` samples were
+  missing `--stats 2s`, the flag that makes the live progress they promise work,
+  `docs/UPDATING.md`'s "did the update take effect?" loop left out
+  `onedrive-doctor`, `docs/SIGNING-IN.md` promised every account its own config and
+  log where those paths are fixed names, `docs/DEPENDENCIES.md`'s manual check
+  rejected a machine whose tray works, and the Chinese README did not say that a
+  missing GTK stack still installs the sync half.
+- The two mutation rows for the tray's failure-hint pattern applied a mangled
+  regex, because sed eats one level of backslashes in a replacement, so they
+  tested something other than what their comment described.
+- `setup.sh` started the full, uninterruptible first sync on its own when stdin
+  was not a terminal: `ask()` answers the (Y/n) prompt's default in that case, and
+  the default is yes. `--yes` was already handled, and a run from a script, a pipe
+  or cron is the same situation with nobody there to answer.
 
 ### Changed
 
@@ -98,6 +148,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is what it does: scheduled runs stay quiet, because a five-minute timer
   announcing every success would train people to ignore the notifications that
   matter. A failure always notifies. The wording was the only thing wrong.
+- `tests/docs.sh` gained gates for the README menu diagram against the labels the
+  tray itself builds, the README `BISYNC_ARGS` sample against the wrapper's
+  default, the script list in `docs/UPDATING.md` against what `install.sh`
+  installs, and the two ledger files against saying the same thing twice.
 
 ## [1.4.0] - 2026-10-01
 

@@ -1519,24 +1519,37 @@ def scenario_config_comments():
     in the settings dialog while the wrapper and systemd used the real number, and
     a comment after LOG or LOCAL pointed a menu item at a path with prose in it.
     A # that is not preceded by whitespace is inside the word bash is reading and
-    stays, which is why `foo --tag#1` and a bare `a#b` have to survive.
+    stays, which is why `foo --tag#1` and a bare `a#b` have to survive - including
+    a # that directly follows the =, because the value was already stripped of its
+    whitespace before the rule was applied, and `KEY=#x` and `KEY=   #x` then look
+    the same to it. bash keeps the first and empties the second.
+
+    One deliberate divergence, and the shell side says so where it is asserted:
+    bash removes the backslash from an unquoted `\\#`, and this reader keeps it.
+    That is the tray's writer escaping `\\`, `"` and `$` with no reader to undo it,
+    the same family as "Four parsers for one file format" in KNOWN-ISSUES.
     """
     # A table, so the shell side names what it is checking rather than indexing
     # into a list whose order nothing else depends on.
     values = {
         # Removed: a comment at the end of the line, after the closing quote or
-        # after a bare word, with one or more spaces in front of the #.
+        # after a bare word, with one or more spaces in front of the #. The last
+        # one is the space-only value bash leaves empty.
         "INTERVAL_MIN": '"15" # every fifteen minutes',
         "SHOW_ICON": '1 # keep the icon',
         "BW_LIMIT": "5M\t# megabytes",
+        "SPACED_EMPTY": "   # y",
         # Kept: a # inside the quotes, a # inside the word, a # in the middle of
-        # a quoted value, and an escaped hash that is not a comment either.
+        # a quoted value, and a # that directly follows the =.
         "MIXED": 'value#1  # comment',
         "QUOTED": '"a # b"',
         "TAGGED": 'foo --tag#1',
         "UNQUOTED": "a#b",
         "SINGLE": "'b # c'",
-        "ESCAPED": "x \\# y # gone",
+        "BARE": "#x",
+        # Kept with its backslash, which bash would have eaten: see the docstring
+        # and the check that names it.
+        "ESCAPED": "x\\#y",
     }
     config = os.path.join(WORK, "comments-config")
     with open(config, "w", encoding="utf-8") as fh:
@@ -1561,6 +1574,48 @@ def scenario_config_comments():
         "unit_name": cfg.get("UNIT_NAME"),
         "local": cfg.get("LOCAL"),
         "local_want": os.path.join(WORK, "local"),
+    }
+
+
+def scenario_config_export():
+    """`export KEY=value` names the same key as `KEY=value`.
+
+    bash sources this file with `.`, which is how onedrive-sync and
+    onedrive-doctor read it, so a hand-written `export REMOTE="onedrive:Notes"` is
+    a value both of them see. Splitting the line on its first `=` alone filed it
+    under the key `export REMOTE` and left REMOTE unset, so the tray refused to
+    start with "REMOTE is not set ...; run setup.sh or onedrive-doctor to set it
+    up" - naming two programs that read the very file the tray had just misread.
+    The tray's own KEY_RE, which reads the file it writes, already allows the
+    prefix.
+    """
+    config = os.path.join(WORK, "export-config")
+    exported = os.path.join(WORK, "exported-local")
+    with open(config, "w", encoding="utf-8") as fh:
+        fh.write('export REMOTE="export-remote:Notes"\n')
+        fh.write('  export   LOCAL="%s"\n' % exported)
+        # A name that merely starts with the word is its own key, and one that
+        # has the word inside it stays as it is: only a leading `export` followed
+        # by whitespace is the shell's keyword.
+        fh.write('exportexport=kept\n')
+        fh.write('EXPORTED=1\n')
+
+    # load_config() reads the module global, so pointing that at the file above is
+    # how this scenario reads a file the rest of the suite does not share. It is
+    # put back before anything else runs.
+    real_config = MODULE.CONFIG_FILE
+    try:
+        MODULE.CONFIG_FILE = config
+        cfg = MODULE.load_config()
+    finally:
+        MODULE.CONFIG_FILE = real_config
+    return {
+        "remote": cfg.get("REMOTE"),
+        "local": cfg.get("LOCAL"),
+        "local_want": exported,
+        "prefix_is_a_key": "export REMOTE" in cfg,
+        "not_a_prefix": cfg.get("exportexport"),
+        "other": cfg.get("EXPORTED"),
     }
 
 
@@ -1589,6 +1644,16 @@ def scenario_config_reload_fresh():
         "open_name_new": "the new app",
         "remote_old": "old-remote:",
         "remote_new": "fresh-remote:",
+        # What the old remote answered and what the new one will. The two listings
+        # share the folders the exclusion checks below use and differ by one name
+        # each way, so a listing left over from the old remote is a visible row
+        # rather than a missing one.
+        "listing_old": ["src", "git", "old-remote-only"],
+        "listing_new": ["Docs", "git", "src"],
+        "quota_old": [111, 222],
+        "quota_new": [7, 8],
+        "folders_file": os.path.join(WORK, "calls", "folders"),
+        "quota_file": os.path.join(WORK, "calls", "quota-json"),
     }
     # The tray polls a config file whose path is a module global, so swapping that
     # global is how the file's new contents reach the reload without a second tray
@@ -1666,9 +1731,13 @@ def scenario_config_reload_fresh():
     # This scenario is the one that writes a config file of its own, and writing
     # "ordinary" into the exclusion list is part of driving the delete guard. Both
     # files are put back afterwards, because the writes would otherwise leak into
-    # the scenarios that run after this one.
+    # the scenarios that run after this one. The two stub answers below are put
+    # back for the same reason: the listing and the quota are the remote's answer,
+    # and this scenario is about which remote they belong to.
     original_config = read_text(real_config)
     original_excludes = read_text(paths["exclude_old"])
+    original_folders = read_text(paths["folders_file"])
+    original_quota = read_text(paths["quota_file"])
 
     try:
         # The tray starts on the file it will keep polling, with the old values in
@@ -1698,11 +1767,23 @@ def scenario_config_reload_fresh():
         # reload rather than about what the suite's config happens to say.
         tray.remote = paths["remote_old"]
 
-        # The remote listing the folder submenu is built from. One folder is on the
-        # new exclusion list and one is not, so a stale exclusion list is a tick in
-        # the wrong place rather than a missing row.
-        tray.folders = ["src", "git"]
-        tray.folders_seen = ["src", "git"]
+        # The listing and the quota the old remote answered. The listing is seeded
+        # rather than left to the stub because both names below are on the new
+        # exclusion list or not on it, which is what makes a stale exclusion list
+        # a tick in the wrong place instead of a missing row. It carries a name
+        # only the old remote has, so leaving it in place after the remote moves is
+        # visible; the new remote's listing, written to the stub just before the
+        # reload, carries a name only it has.
+        wait_for(lambda: not tray.folders_busy, 8.0)
+        tray.folders = list(paths["listing_old"])
+        tray.folders_seen = list(paths["listing_old"])
+        tray.quota = tuple(paths["quota_old"])
+        with open(paths["folders_file"], "w", encoding="utf-8") as fh:
+            fh.write("".join("%s/\n" % name for name in paths["listing_new"]))
+        with open(paths["quota_file"], "w", encoding="utf-8") as fh:
+            fh.write('{"total": %d, "used": %d}\n'
+                     % (paths["quota_new"][1], paths["quota_new"][0]))
+        clear_calls()
 
         # No UI_LANG change here on purpose: apply_settings only rebuilds the menu
         # for a language change, so the label below moves only if the code that
@@ -1711,6 +1792,28 @@ def scenario_config_reload_fresh():
         data["reloaded"] = wait_for(
             lambda: (tray.open_name == paths["open_name_new"]
                      and tray.local == paths["local_new"]), 8.0)
+
+        # The folders and the quota were the old remote's answer. A reload that
+        # moved REMOTE has to drop them and ask the new one, or the submenu lists
+        # the old account's folders until the half-hour refresh and unticking one
+        # writes that name into the exclusion file that now governs the new
+        # remote, while the quota row shows the old account's usage.
+        data["listing_old"] = list(paths["listing_old"])
+        data["relisted"] = wait_for(
+            lambda: (tray.folders is not None
+                     and "Docs" in tray.folders
+                     and "old-remote-only" not in tray.folders), 8.0)
+        data["quota_seen"] = wait_for(
+            lambda: tray.quota == tuple(paths["quota_new"]), 8.0)
+        pump(0.5)
+        data["folders_after"] = (list(tray.folders)
+                                 if tray.folders is not None else None)
+        data["quota_after"] = list(tray.quota) if tray.quota else None
+        data["quota_new"] = list(paths["quota_new"])
+        data["quota_asked"] = any("about %s" % paths["remote_new"]
+                                  in line for line in call_lines())
+        data["quota_label"] = tray.item_quota.get_label() or ""
+
         labels = visible_labels(tray.menu)
         data["old_label"] = "Open %s" % paths["open_name_old"]
         data["new_label"] = "Open %s" % paths["open_name_new"]
@@ -1772,6 +1875,40 @@ def scenario_config_reload_fresh():
         data["sibling_kept"] = os.path.isdir(
             os.path.join(paths["local_new"], "sibling-old"))
 
+        # A remote whose answers never come back still must not keep the previous
+        # remote's. This is the shape that makes clearing them, rather than
+        # waiting for the refresh to overwrite them, the thing that matters: a
+        # listing that fails leaves self.folders alone and a quota that fails
+        # leaves self.quota alone, so an answer that never arrives would otherwise
+        # be an answer from the wrong account.
+        third_failure = os.path.join(os.environ["TRAY_CALLS"], "rclone-lsf-fail")
+        with open(third_failure, "w", encoding="utf-8"):
+            pass
+        try:
+            os.remove(paths["quota_file"])
+        except OSError:
+            pass
+        held = read_text(config)
+        with open(config, "w", encoding="utf-8") as fh:
+            fh.write('REMOTE="third-remote:"\n')
+            for line in held.splitlines():
+                if not line.startswith("REMOTE="):
+                    fh.write(line + "\n")
+        data["third_reloaded"] = wait_for(
+            lambda: tray.remote == "third-remote:", 8.0)
+        wait_for(lambda: not tray.folders_busy and not tray.quota_busy, 8.0)
+        pump(0.5)
+        data["folders_third"] = (list(tray.folders)
+                                 if tray.folders is not None else None)
+        data["quota_third"] = list(tray.quota) if tray.quota else None
+        data["quota_third_visible"] = bool(tray.item_quota.get_visible())
+        data["quota_third_label"] = tray.item_quota.get_label() or ""
+        data["labels_third"] = visible_labels(tray.menu)
+        try:
+            os.remove(third_failure)
+        except OSError:
+            pass
+
         # A language change on top of the same file still reaches the menu, which
         # is the mechanism the rebuild above reuses.
         fresh(lang="zh")
@@ -1788,6 +1925,149 @@ def scenario_config_reload_fresh():
             fh.write(original_config)
         with open(paths["exclude_old"], "w", encoding="utf-8") as fh:
             fh.write(original_excludes)
+        with open(paths["folders_file"], "w", encoding="utf-8") as fh:
+            fh.write(original_folders)
+        with open(paths["quota_file"], "w", encoding="utf-8") as fh:
+            fh.write(original_quota)
+    return data
+
+
+def unreadable_fixture():
+    """A readable config, and the trees the delete guard could be aimed at.
+
+    Returns (config path, configured root, exclusion file, log path). The tree
+    under the default LOCAL matters: ~/OneDrive is where an unreadable config used
+    to move the guard's root, so there has to be something there for the guard to
+    return instead of the configured root.
+    """
+    base = os.path.join(WORK, "unreadable")
+    config = os.path.join(WORK, "unreadable-config")
+    local = os.path.join(base, "local")
+    exclude = os.path.join(base, "exclude-folders.txt")
+    log = os.path.join(base, "sync.log")
+    for path in (os.path.join(local, "Archive"),
+                 os.path.join(WORK, "OneDrive", "Archive")):
+        os.makedirs(path, exist_ok=True)
+        with open(os.path.join(path, "keep.txt"), "w", encoding="utf-8") as fh:
+            fh.write("keep\n")
+    with open(config, "w", encoding="utf-8") as fh:
+        fh.write('REMOTE="unreadable-remote:"\n')
+        fh.write('LOCAL="%s"\n' % local)
+        fh.write('UNIT_NAME="zunreadable"\n')
+        fh.write('LOG="%s"\n' % log)
+        fh.write('EXCLUDE_FOLDERS_FILE="%s"\n' % exclude)
+        fh.write('UI_LANG="en"\n')
+    return config, local, exclude, log
+
+
+def scenario_config_unreadable():
+    """A config that cannot be read is not a config that says "use the defaults".
+
+    load_config() answers the defaults when the file cannot be read, and the poll
+    reloads whenever the file's signature moves, including the move to "cannot be
+    read". Deleting the config of a running tray therefore copied those defaults
+    onto the six startup snapshots: LOCAL became ~/OneDrive, and LOCAL is the root
+    the folder menu's delete guard checks, so the menu offered to delete a
+    directory under ~/OneDrive while the confirmation promised the folder stays in
+    OneDrive. The reload refuses such a file here, which is the same rule main()
+    applies to a config with no REMOTE before it builds a tray.
+    """
+    config, local, exclude, log = unreadable_fixture()
+    real_config = MODULE.CONFIG_FILE
+    try:
+        MODULE.CONFIG_FILE = config
+        tray = MODULE.Tray(MODULE.load_config())
+        before = {
+            "local": tray.local,
+            "remote": tray.remote,
+            "log": tray.log,
+            "exclude_file": tray.exclude_file,
+            "delete": tray._local_delete_path("Archive"),
+            "cfg_remote": str(tray.cfg.get("REMOTE") or ""),
+            "cfg_local": str(tray.cfg.get("LOCAL") or ""),
+        }
+        os.remove(config)
+        tray._reload_config()
+        data = {
+            "before": before,
+            "local": tray.local,
+            "remote": tray.remote,
+            "log": tray.log,
+            "exclude_file": tray.exclude_file,
+            "delete": tray._local_delete_path("Archive"),
+            "cfg_remote": str(tray.cfg.get("REMOTE") or ""),
+            "cfg_local": str(tray.cfg.get("LOCAL") or ""),
+            "local_want": local,
+            "log_want": log,
+            "exclude_want": exclude,
+            "default_root": os.path.join(os.path.expanduser("~/OneDrive"), "Archive"),
+        }
+    finally:
+        MODULE.CONFIG_FILE = real_config
+    return data
+
+
+def scenario_config_unreadable_poll():
+    """A tick over a config that cannot be read is not news either.
+
+    The other half of the same defect, and the reason both gates exist: poll()
+    compares the file's signature against the last one it saw, and None - "the
+    signature could not be read" - is unequal to every real signature, so every
+    tick after the file went away treated the absence as a change and asked for a
+    reload. Counting the reloads says which gate did the work; the values after it
+    say the file coming back with news is still noticed.
+    """
+    config, local, exclude, log = unreadable_fixture()
+    real_config = MODULE.CONFIG_FILE
+    real_reload = MODULE.Tray._reload_config
+    reloads = []
+
+    def counted(self, *args, **kwargs):
+        reloads.append(self._config_signature())
+        return real_reload(self, *args, **kwargs)
+
+    MODULE.Tray._reload_config = counted
+    try:
+        MODULE.CONFIG_FILE = config
+        tray = MODULE.Tray(MODULE.load_config())
+        GLib.timeout_add(200, tray.poll)
+        pump(0.5)
+        del reloads[:]              # the ticks before the file went away
+        before = {
+            "local": tray.local,
+            "remote": tray.remote,
+            "log": tray.log,
+            "exclude_file": tray.exclude_file,
+            "delete": tray._local_delete_path("Archive"),
+        }
+        os.remove(config)
+        data = {"before": before, "local_want": local, "log_want": log,
+                "exclude_want": exclude}
+        pump(1.2)                   # several ticks with the file gone
+        data["reloads"] = len(reloads)
+        data["signature_now"] = tray._config_signature()
+        data["local"] = tray.local
+        data["remote"] = tray.remote
+        data["log"] = tray.log
+        data["exclude_file"] = tray.exclude_file
+        data["delete"] = tray._local_delete_path("Archive")
+        data["cfg_remote"] = str(tray.cfg.get("REMOTE") or "")
+        # The spell has to end. A file that comes back with a different config is
+        # a change like any other, so the poll has to pick it up again.
+        with open(config, "w", encoding="utf-8") as fh:
+            fh.write('REMOTE="restored-remote:"\n')
+            fh.write('LOCAL="%s"\n' % local)
+            fh.write('UNIT_NAME="zunreadable"\n')
+            fh.write('LOG="%s"\n' % log)
+            fh.write('EXCLUDE_FOLDERS_FILE="%s"\n' % exclude)
+            fh.write('UI_LANG="en"\n')
+            fh.write("PADDING=1\n")
+        data["resumed"] = wait_for(
+            lambda: tray.local == local and tray.remote == "restored-remote:", 8.0)
+        data["reloads_after"] = len(reloads)
+    finally:
+        MODULE.CONFIG_FILE = real_config
+        MODULE.Tray._reload_config = real_reload
     return data
 
 
@@ -2167,7 +2447,10 @@ SCENARIOS = {
     "notify-manual": scenario_notify_manual,
     "config-reload": scenario_config_reload,
     "config-comments": scenario_config_comments,
+    "config-export": scenario_config_export,
     "config-reload-fresh": scenario_config_reload_fresh,
+    "config-unreadable": scenario_config_unreadable,
+    "config-unreadable-poll": scenario_config_unreadable_poll,
     "log-result": scenario_log_result,
     "log-cache-moved": scenario_log_cache_moved,
     "pause-survives-poll": scenario_pause_survives_poll,
@@ -2633,12 +2916,38 @@ for key, want in cases.items():
         raise SystemExit(1)
 '
     check "a # in the middle of a quoted value survives" json_py '
-cases = {"QUOTED": "a # b", "SINGLE": "b # c", "ESCAPED": "x \\# y"}
+cases = {"QUOTED": "a # b", "SINGLE": "b # c"}
 for key, want in cases.items():
     got = d["values"].get(key)
     if got != want:
         print("%s=%r, wanted %r" % (key, got, want))
         raise SystemExit(1)
+'
+    # The space is the whole distinction, and it is gone by the time the value
+    # has been stripped: stripping first made a # that directly followed the =
+    # look exactly like one a space had introduced, so KEY=#x read as an empty
+    # value while bash keeps "#x". Measured with `set -a; . config` on this
+    # machine: BARE=[#x], SPACED_EMPTY=[].
+    check "a # that directly follows the = is the value" json_py '
+if d["values"].get("BARE") != "#x":
+    print("BARE=%r, bash reads #x" % (d["values"].get("BARE"),))
+    raise SystemExit(1)
+if d["values"].get("SPACED_EMPTY") != "":
+    print("SPACED_EMPTY=%r, bash reads an empty value"
+          % (d["values"].get("SPACED_EMPTY"),))
+    raise SystemExit(1)
+'
+    # bash removes the backslash from an unquoted \# and this reader keeps it.
+    # The divergence is deliberate: the tray's own writer escapes \, " and $
+    # with no reader to undo it (KNOWN-ISSUES, "Four parsers for one file
+    # format"), so unescaping one character here would be a third answer rather
+    # than a fix. The value below is what this reader documents, not what bash
+    # would produce for the same line.
+    check "an escaped # keeps its backslash, which is this reader's answer" json_py '
+if d["values"].get("ESCAPED") != "x\\#y":
+    print("ESCAPED=%r, this reader keeps the backslash (bash reads x#y)"
+          % (d["values"].get("ESCAPED"),))
+    raise SystemExit(1)
 '
     check "a quoted value before the comment is unchanged" json_py '
 if d["unit_name"] != "a#b":
@@ -2646,6 +2955,35 @@ if d["unit_name"] != "a#b":
     raise SystemExit(1)
 if d["local"] != d["local_want"]:
     print("LOCAL=%r wanted %r" % (d["local"], d["local_want"]))
+    raise SystemExit(1)
+'
+fi
+
+title "An exported key in the config"
+# onedrive-sync and onedrive-doctor source the file with `.`, so a hand-written
+# `export REMOTE="onedrive:Notes"` is a value both of them see. The tray split the
+# line on its first = alone, filed it under the key "export REMOTE" and left
+# REMOTE unset, so it refused to start with a sentence naming those two programs
+# as the fix. KEY_RE, the tray's own reader for the file it writes, already
+# allowed the prefix.
+if run_driver config-export; then
+    check "export REMOTE=... sets REMOTE and not a key called export REMOTE" json_py '
+if d["remote"] != "export-remote:Notes":
+    print("REMOTE=%r, prefix kept as a key: %r"
+          % (d["remote"], d["prefix_is_a_key"]))
+    raise SystemExit(1)
+if d["prefix_is_a_key"]:
+    print("the key came back as export REMOTE, with the prefix in it")
+    raise SystemExit(1)
+'
+    check "the whitespace around the prefix does not become part of the key" json_py '
+if d["local"] != d["local_want"]:
+    print("LOCAL=%r wanted %r" % (d["local"], d["local_want"]))
+    raise SystemExit(1)
+'
+    check "a name that only starts with export is a key of its own" json_py '
+if d["not_a_prefix"] != "kept" or d["other"] != "1":
+    print("exportexport=%r EXPORTED=%r" % (d["not_a_prefix"], d["other"]))
     raise SystemExit(1)
 '
 fi
@@ -2716,6 +3054,128 @@ if d["exclude_file"] != d["exclude_new"]:
     check "a language change after the reload still reaches the menu" json_py '
 if not d["switched"]:
     print("the menu never changed language: %r" % (d["folder_checks"],))
+    raise SystemExit(1)
+'
+    # The listing and the quota were answered by the remote the reload left
+    # behind. Keeping them listed the old account's folders in the submenu, so
+    # unticking one wrote that name into the exclusion file that now governs the
+    # new remote, and the quota row showed the old account's usage. Both are
+    # dropped and asked again, rather than waiting for the half-hour refresh.
+    check "a moved REMOTE drops the old folder list and asks the new one" json_py '
+if d["folders_after"] == d["listing_old"]:
+    print("the old remote listing is still in place: %r" % (d["folders_after"],))
+    raise SystemExit(1)
+if not d["relisted"] or d["folders_after"] != ["Docs", "git", "src"]:
+    print("the new remote listing never landed: relisted=%r folders=%r"
+          % (d["relisted"], d["folders_after"]))
+    raise SystemExit(1)
+if "old-remote-only" in d["folder_checks"]:
+    print("a folder only the old remote has is still in the submenu: %r"
+          % (d["folder_checks"],))
+    raise SystemExit(1)
+if "Docs" not in d["folder_checks"]:
+    print("a folder only the new remote has never reached the submenu: %r"
+          % (d["folder_checks"],))
+    raise SystemExit(1)
+'
+    check "a moved REMOTE drops the old quota and asks again" json_py '
+if not d["quota_seen"] or d["quota_after"] != d["quota_new"]:
+    print("quota=%r, wanted %r" % (d["quota_after"], d["quota_new"]))
+    raise SystemExit(1)
+if not d["quota_asked"]:
+    print("rclone about was never asked about the new remote")
+    raise SystemExit(1)
+if d["quota_label"] and "111 B" in d["quota_label"]:
+    print("the row still shows the old account: %r" % (d["quota_label"],))
+    raise SystemExit(1)
+'
+    # The failing answers are the reason the two lines above clear the values
+    # instead of letting the refresh replace them: an answer that never arrives
+    # would otherwise leave the previous remote's folders and quota on screen.
+    check "a remote whose answers never land keeps none of the last one's" json_py '
+if not d["third_reloaded"]:
+    print("the third remote never reached the tray")
+    raise SystemExit(1)
+if d["folders_third"] is not None:
+    print("the previous remote listing is still held: %r" % (d["folders_third"],))
+    raise SystemExit(1)
+if "Docs" in d["labels_third"] or "Loading…" not in d["labels_third"]:
+    print("the folder submenu is not back to Loading…: %r" % (d["labels_third"],))
+    raise SystemExit(1)
+if d["quota_third_visible"] or d["quota_third"] is not None:
+    print("the old quota is still held: visible=%r quota=%r label=%r"
+          % (d["quota_third_visible"], d["quota_third"], d["quota_third_label"]))
+    raise SystemExit(1)
+'
+fi
+
+title "A config that cannot be read"
+# load_config() answers the defaults when the file cannot be read, and the poll
+# reloaded whenever the signature moved, including the move to "cannot be read".
+# Deleting the config of a running tray therefore copied those defaults onto the
+# six startup snapshots, and LOCAL is the root the folder menu's delete guard
+# checks: the menu offered to delete a directory under ~/OneDrive while the
+# confirmation promised the folder stays in OneDrive. Two gates, because one
+# caller is one mistake away.
+if run_driver config-unreadable; then
+    check "a reload refuses a config it cannot trust" json_py '
+if d["local"] != d["local_want"]:
+    print("LOCAL moved to %r, wanted %r (the defaults aim the guard at %r)"
+          % (d["local"], d["local_want"], d["default_root"]))
+    raise SystemExit(1)
+if d["remote"] != "unreadable-remote:":
+    print("REMOTE became %r" % (d["remote"],))
+    raise SystemExit(1)
+if d["log"] != d["log_want"] or d["exclude_file"] != d["exclude_want"]:
+    print("log=%r wanted %r; exclude_file=%r wanted %r"
+          % (d["log"], d["log_want"], d["exclude_file"], d["exclude_want"]))
+    raise SystemExit(1)
+if d["cfg_remote"] != "unreadable-remote:" or d["cfg_local"] != d["local_want"]:
+    print("self.cfg took the defaults: REMOTE=%r LOCAL=%r"
+          % (d["cfg_remote"], d["cfg_local"]))
+    raise SystemExit(1)
+'
+    check "the delete guard keeps the configured root" json_py '
+if d["delete"] is None:
+    print("the guard stopped offering a folder inside the configured root")
+    raise SystemExit(1)
+if d["delete"] != d["before"]["delete"]:
+    print("the guard now targets %r, it targeted %r (the default root is %r)"
+          % (d["delete"], d["before"]["delete"], d["default_root"]))
+    raise SystemExit(1)
+'
+fi
+
+title "A poll over a config that cannot be read"
+# The other half of the same defect: poll() compares the file's signature with
+# the last one it saw, and None - "the signature could not be read" - is unequal
+# to every real signature, so every tick after the file went away treated the
+# absence as news. Counting the reloads says which gate did the work, and the
+# restored file says the spell still ends when there really is news.
+if run_driver config-unreadable-poll; then
+    check "the poll really is looking at an unreadable file" \
+        json_expr "d['signature_now'] is None"
+    check "a tick over an unreadable config does not ask for a reload" \
+        json_expr "d['reloads'] == 0"
+    check "and the tray keeps every value it was using" json_py '
+if d["local"] != d["local_want"]:
+    print("LOCAL moved to %r, wanted %r" % (d["local"], d["local_want"]))
+    raise SystemExit(1)
+if d["remote"] != "unreadable-remote:" or d["cfg_remote"] != "unreadable-remote:":
+    print("REMOTE=%r cfg REMOTE=%r" % (d["remote"], d["cfg_remote"]))
+    raise SystemExit(1)
+if d["log"] != d["log_want"] or d["exclude_file"] != d["exclude_want"]:
+    print("log=%r exclude_file=%r" % (d["log"], d["exclude_file"]))
+    raise SystemExit(1)
+if d["delete"] is None or d["delete"] != d["before"]["delete"]:
+    print("the delete guard targets %r, it targeted %r"
+          % (d["delete"], d["before"]["delete"]))
+    raise SystemExit(1)
+'
+    check "the spell ends when the file comes back with news" json_py '
+if not d["resumed"] or d["reloads_after"] < 1:
+    print("resumed=%r reloads=%r local=%r remote=%r"
+          % (d["resumed"], d["reloads_after"], d["local"], d["remote"]))
     raise SystemExit(1)
 '
 fi

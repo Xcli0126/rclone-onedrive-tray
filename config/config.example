@@ -82,6 +82,11 @@ CHECK_FILENAME=""
 #                       a live percentage while a sync is running
 # Do not put --force in here. It bypasses rclone's own delete cap, which would leave
 # MAX_DELETE as the only guard left, and the log warns when it sees it.
+# The value is split on whitespace, not by a shell, so quotes are characters rclone
+# receives rather than grouping: --exclude "/My Docs/**" is three words, and one of
+# them is a stray argument that makes rclone refuse the whole command line. A token
+# that begins or ends with a quote is refused at the start of a run, with this key
+# named. A pattern that needs a space belongs in FILTERS_FILE or exclude-folders.txt.
 BISYNC_ARGS="--resilient --recover --max-lock 2m --conflict-resolve none --conflict-loser num --stats 2s"
 
 # Bandwidth cap for the whole run, in rclone size syntax: 1M, 500k, 1.5M. Empty

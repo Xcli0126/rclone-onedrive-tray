@@ -335,6 +335,12 @@ else
     if [ "$ASSUME_YES" -eq 1 ]; then
         # Never start a long, uninterruptible first sync off the back of --yes.
         echo "    With --yes this is left to you:  onedrive-sync --resync"
+    elif [ ! -t 0 ]; then
+        # The same reasoning, for the other way nobody is there to answer: ask()
+        # hands back the prompt's default when stdin is not a terminal, and the
+        # default here is yes. A wizard run from a script, a pipe or cron started
+        # the full baseline sync on its own.
+        echo "    With no terminal to answer the prompt this is left to you:  onedrive-sync --resync"
     else
         # The prompt advertises (Y/n), so both spellings of yes have to mean yes:
         # this compared the answer with "y" alone, and the capital it shows the user

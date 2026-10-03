@@ -198,18 +198,30 @@ def bw_value(combo_id) -> str:
 
 # ---------------------------------------------------------------- configuration
 def strip_inline_comment(value: str) -> str:
-    """Cut an unquoted `#` and everything after it, the way bash reads the file.
+    """Cut an unquoted `#` and everything after it, the way bash cuts a comment.
 
     `onedrive-sync` sources the config with `.`, which drops a comment at the end
     of a line, so a hand-edited INTERVAL_MIN="15"   # every fifteen minutes was
     15 to bash and `15"   # every fifteen minutes` to this parser: the dialog
     showed one value and the wrapper and systemd used another.
 
-    What bash calls a comment is a `#` at the start of a word, so a `#` with a
-    non-space character in front of it, a `#` inside single or double quotes, and
-    a backslash-escaped `#` are all part of the value and stay. Quotes are
-    tracked here and removed later by load_config(), so the text between them is
-    never treated as a comment.
+    What bash calls a comment is a `#` at the start of a word, so whitespace has
+    to come before it: a `#` with a non-space character in front of it, a `#`
+    inside single or double quotes, and a backslash-escaped `#` are all part of
+    the value and stay. Quotes are tracked here and removed later by
+    load_config(), so the text between them is never treated as a comment.
+
+    The caller passes the text as it stands after the `=`, before stripping it,
+    because a `#` that directly follows the `=` is not at the start of a word and
+    bash keeps it: `KEY=#x` is `#x` there. Only the unstripped text still says
+    whether a space came first, so load_config() strips afterwards.
+
+    This is not bash's escape handling. bash also removes the backslash from an
+    unquoted `\\#`, and this keeps it, so `KEY=x\\#y` reads as `x\\#y` here and
+    `x#y` there. That is a decision rather than an oversight: the tray's own
+    writer escapes `\\`, `"` and `$` with no reader to undo it
+    (docs/KNOWN-ISSUES.md, "Four parsers for one file format"), and unescaping one
+    character would be a third answer to a question that needs one.
     """
     quote = ""
     escaped = False
@@ -223,13 +235,24 @@ def strip_inline_comment(value: str) -> str:
                 quote = ""
         elif char in "\"'":
             quote = char
-        elif char == "#" and (index == 0 or value[index - 1].isspace()):
+        elif char == "#" and index > 0 and value[index - 1].isspace():
             return value[:index].rstrip()
     return value
 
 
 def load_config() -> dict:
-    """Parse the shell-style KEY="value" config (no shell execution)."""
+    """Parse the shell-style KEY="value" config (no shell execution).
+
+    `export KEY=value` names the key `KEY`. bash needs the word when it sources
+    the file, onedrive-sync and onedrive-doctor source the file, and the tray's
+    own KEY_RE - which reads the file this tray writes - has always allowed the
+    prefix, so a hand-written export is a setting to all of them.
+
+    A value ends at an unquoted `#` that whitespace precedes, decided on the raw
+    text after the `=`, so `KEY=#x` keeps its `#` while `KEY=   # x` is empty,
+    both as bash has them. Neither this reader nor the installers undo the
+    escaping the writer applies; see strip_inline_comment.
+    """
     cfg: dict[str, str] = {}
     try:
         with open(CONFIG_FILE, encoding="utf-8") as fh:
@@ -238,10 +261,22 @@ def load_config() -> dict:
                 if not line or line.startswith("#") or "=" not in line:
                     continue
                 key, _, val = line.partition("=")
-                val = strip_inline_comment(val.strip())
+                # Before .strip(): a `#` that directly follows the `=` is the
+                # start of the value and not of a comment, and only the text as it
+                # stands still says whether a space came first.
+                val = strip_inline_comment(val).strip()
                 if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
                     val = val[1:-1]
-                cfg[key.strip()] = os.path.expandvars(val)
+                key = key.strip()
+                # `export REMOTE=...`, with any whitespace around the word, is the
+                # key REMOTE. Splitting on the first `=` alone filed it under
+                # "export REMOTE" and left REMOTE unset, so the tray refused to
+                # start on a config the two programs it names as the fix read
+                # correctly.
+                if (key.startswith("export")
+                        and key[len("export"):len("export") + 1].isspace()):
+                    key = key[len("export"):].strip()
+                cfg[key] = os.path.expandvars(val)
     except OSError:
         pass
 
@@ -1734,6 +1769,13 @@ class Tray:
         Returns True when one of them actually moved, because then the menu has to
         be rebuilt: the labels and the handlers were built from the old paths.
 
+        A remote that moved takes its answers with it. self.folders and self.quota
+        were fetched from the remote being left behind, so keeping them left the
+        old account's folders in the submenu - unticking one wrote that name into
+        the exclusion file that now governs the new remote - and showed the old
+        account's usage in the quota row, until the 1800-second refresh replaced
+        them.
+
         UNIT_NAME is deliberately not one of them. self.service, self.timer and
         self.watch were resolved from it when the tray started and the poll keeps
         asking about those; letting the file move it would have the settings
@@ -1748,6 +1790,7 @@ class Tray:
             "open_name": fresh["OPEN_APP_NAME"],
         }
         moved = False
+        remote_moved = False
         for name, value in wanted.items():
             if getattr(self, name) != value:
                 moved = True
@@ -1761,7 +1804,22 @@ class Tray:
                     self.log_signature = None
                     self.log_tail = ""
                     self.log_result = ("unknown", "", "", "")
+                elif name == "remote":
+                    # The listing and the quota are answers about the remote that
+                    # was just left behind, so they go with it. The caller's
+                    # _build_menu() paints the cleared state before an answer
+                    # lands: the folder row says Loading… and the quota row is
+                    # hidden rather than showing the old account.
+                    self.folders = None
+                    self.folders_seen = None
+                    self.quota = None
+                    remote_moved = True
                 setattr(self, name, value)
+        if remote_moved:
+            # The functions that already run on the 1800-second timers, called now
+            # instead of waited on.
+            self.refresh_folders()
+            self.refresh_quota()
         return moved
 
     def _reload_config(self):
@@ -1776,6 +1834,11 @@ class Tray:
         The two settings that mean anything to a running process are applied;
         the rest go into self.cfg for the code that reads them when it needs
         them, because that code is running too.
+
+        A file that cannot be trusted is not applied at all: see the REMOTE check
+        below. The tray keeps what it was using rather than moving onto the
+        defaults an unreadable file comes back as, and a save that puts REMOTE
+        back is applied normally on the tick that notices it.
         """
         # Every key, not only the two the window applies: NOTIFY_ON_SUCCESS is
         # read when a run ends, so a standalone --settings save has to land in
@@ -1787,6 +1850,17 @@ class Tray:
         # those; letting the file move it would have the dialog write a drop-in
         # for a unit nothing polls.
         fresh = load_config()
+        if not fresh.get("REMOTE"):
+            # The rule main() applies to a config before it builds a tray:
+            # load_config() leaves REMOTE alone because nothing sensible can be
+            # defaulted for it, and everything the tray does needs one. A deleted
+            # or unreadable file arrives here as the defaults, and applying them
+            # moved LOCAL to ~/OneDrive, the root the delete guard checks, so the
+            # folder menu would offer to delete a directory under a root the
+            # confirmation dialog never mentioned. Refusing keeps what is already
+            # in use; the file coming back with REMOTE set is a change like any
+            # other.
+            return
         fresh["UNIT_NAME"] = self.cfg.get("UNIT_NAME", fresh.get("UNIT_NAME", ""))
         self.apply_settings(fresh)
         # After apply_settings, so a menu the language change already rebuilt is
@@ -2144,10 +2218,17 @@ class Tray:
 
         The config file is stat'ed here as well, and reloaded when it moved: it is
         the only channel an external writer (--show-icon, --hide-icon, a
-        standalone --settings window) has into this process.
+        standalone --settings window) has into this process. A file that cannot be
+        read has not moved; see the guard below.
         """
         signature = self._config_signature()
-        if signature != self.config_seen:
+        # None is "the file could not be read", which is not news about the
+        # config. Comparing it against the last signature made the absence look
+        # like a change on every tick, and the defaults load_config() answers in
+        # that case moved LOCAL to ~/OneDrive: the root the folder menu's delete
+        # guard checks, so the menu offered to delete a directory under a root the
+        # confirmation dialog never mentioned.
+        if signature is not None and signature != self.config_seen:
             self.config_seen = signature
             self._reload_config()
         self._query_state()

@@ -13,7 +13,7 @@
 # without one and a skip is not a pass. That one case is environmental by
 # design; every other case must pass everywhere.
 dependency-matrix.sh 43
-install-flow.sh 240
+install-flow.sh 259
 filters.sh 37
-docs.sh 60
-tray.sh 161
+docs.sh 91
+tray.sh 175

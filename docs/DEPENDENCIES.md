@@ -55,7 +55,10 @@ onedrive-sync            # exits with a message if rclone or flock is absent
 
 # manual equivalent
 rclone version | head -1
-python3 -c 'import gi; gi.require_version("Gtk","3.0"); gi.require_version("AyatanaAppIndicator3","0.1")'
+python3 -c 'import gi; gi.require_version("Gtk","3.0"); from gi.repository import Gtk'
+# either AppIndicator typelib is accepted, the same pair install.sh probes
+python3 -c 'import gi; gi.require_version("AyatanaAppIndicator3","0.1"); from gi.repository import AyatanaAppIndicator3' 2>/dev/null || \
+    python3 -c 'import gi; gi.require_version("AppIndicator3","0.1"); from gi.repository import AppIndicator3'
 python3 -c 'import cairo'
 command -v inotifywait flock xdg-open
 systemctl --user is-system-running

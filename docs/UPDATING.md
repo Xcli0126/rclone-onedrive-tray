@@ -31,7 +31,7 @@ Two checks, both cheap.
 
 ```bash
 # the installed scripts against the checkout
-for s in onedrive-sync onedrive-tray onedrive-watch onedrive-check onedrive-check-access; do
+for s in onedrive-sync onedrive-tray onedrive-watch onedrive-check onedrive-check-access onedrive-doctor; do
     cmp -s "$HOME/.local/bin/$s" "bin/$s" && echo "$s same" || echo "$s DIFFERS"
 done
 

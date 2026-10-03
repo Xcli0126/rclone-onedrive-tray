@@ -88,6 +88,48 @@ for f in bin/onedrive-sync bin/onedrive-tray bin/onedrive-watch bin/onedrive-che
     check "$f exists" test -e "$f"
 done
 
+# ------------------------------------------------- the menu rows the tray builds
+# The READMEs draw the tray's menu as a fenced block. A "Diagnostics…" row was
+# added to the tray and to neither diagram, because nothing tied the two
+# together. This reads the rows _build_action_items creates and requires each
+# label, and the Chinese text it is given, to appear in the matching diagram. It
+# covers the action rows at the bottom of the menu, which are the ones written
+# there. The status, quota and pause rows above them carry runtime values, so
+# they are out of scope.
+diagram_block() {  # diagram_block <file> <anchor>
+    awk -v anchor="$2" '
+        /^```/ {
+            if (open) { if (hit) { printf "%s", buf; exit } open = 0; buf = ""; hit = 0 }
+            else { open = 1; buf = ""; hit = 0 }
+            next
+        }
+        open { buf = buf $0 "\n"; if (index($0, anchor) > 0) hit = 1 }
+    ' "$1"
+}
+block_has() { grep -qF -- "$2" <<<"$1"; }
+title "the menu rows in the READMEs"
+action_labels="$(awk '/^    def _build_action_items/{f=1; next} f && /^    def /{exit} f' \
+    bin/onedrive-tray |
+    grep -oE 'self\.t\("[^"]*"\)' | sed 's/^self\.t("//; s/")$//' | sort -u)"
+if [ -z "$action_labels" ]; then
+    bad "could not read the action rows out of bin/onedrive-tray"
+else
+    en_menu="$(diagram_block README.md 'Start tray at login')"
+    zh_menu="$(diagram_block README.zh-CN.md '开机自动启动托盘')"
+    [ -n "$en_menu" ] || bad "README.md has no fenced menu block"
+    [ -n "$zh_menu" ] || bad "README.zh-CN.md has no fenced menu block"
+    while IFS= read -r label; do
+        [ -n "$label" ] || continue
+        check "README.md shows the \"$label\" row" block_has "$en_menu" "$label"
+        zh="$(grep -F "\"$label\": " bin/onedrive-tray | head -1 | cut -d'"' -f4)"
+        if [ -z "$zh" ]; then
+            bad "bin/onedrive-tray has no Chinese text for the \"$label\" row"
+        else
+            check "README.zh-CN.md shows the \"$zh\" row" block_has "$zh_menu" "$zh"
+        fi
+    done <<<"$action_labels"
+fi
+
 # ---------------------------------------------------------------- the suite count
 # "Two scripts" survived three new test files, because nothing checked it and the
 # commands underneath were right. The count is cheap to verify.
@@ -210,6 +252,22 @@ else
         test "$example_args" = "$wrapper_args"
     check "setup.sh writes the wrapper's default too" \
         test "$wizard_args" = "$wrapper_args"
+    # The READMEs carried a fourth copy of that string, one flag short, and
+    # nothing read them. Any BISYNC_ARGS= sample a README shows has to be the
+    # wrapper's default, or the live progress line the README promises stops
+    # working for a config copied out of it.
+    for f in README.md README.zh-CN.md; do
+        [ -f "$f" ] || continue
+        found=0
+        while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            found=$((found + 1))
+            sample="$(sed -n 's/^BISYNC_ARGS="\(.*\)"$/\1/p' <<<"$line")"
+            check "$f quotes the wrapper's default BISYNC_ARGS" \
+                test "$sample" = "$wrapper_args"
+        done < <(grep -E '^BISYNC_ARGS="' "$f")
+        [ "$found" -gt 0 ] || skip "$f carries no BISYNC_ARGS sample"
+    done
 fi
 
 # ------------------------------------------- the failure patterns two files share
@@ -249,12 +307,38 @@ for path in bin/*; do
         grep -qE "rm[[:space:]]+-[rf]+.*\"[^\"]*BIN_DIR/$name\"" uninstall.sh
 done
 
+# ------------------------------------------------- the installed scripts the docs list
+# The update page compares the installed scripts against the checkout, and its
+# loop stopped at five of the six install.sh ships, so a stale onedrive-doctor
+# printed "same" with the rest. Both directions are checked: every script
+# install.sh installs appears in that loop, and every name in the loop is one
+# install.sh installs. It covers that one loop, not every prose list of scripts.
+title "the installed script list in the docs"
+installed_bins="$(grep -oE 'bin/onedrive-[a-z-]+"' install.sh | sed 's|^bin/||; s|"$||' | sort -u)"
+listed_bins="$(sed -n 's/^for s in \(.*\); do$/\1/p' docs/UPDATING.md | tr ' ' '\n' | sort -u)"
+if [ -z "$installed_bins" ] || [ -z "$listed_bins" ]; then
+    bad "could not read the script list out of install.sh or docs/UPDATING.md"
+else
+    list_has() { grep -qxF -- "$2" <<<"$1"; }
+    while IFS= read -r name; do
+        [ -n "$name" ] || continue
+        check "docs/UPDATING.md compares $name" list_has "$listed_bins" "$name"
+    done <<<"$installed_bins"
+    while IFS= read -r name; do
+        [ -n "$name" ] || continue
+        check "docs/UPDATING.md's $name is one install.sh installs" \
+            list_has "$installed_bins" "$name"
+    done <<<"$listed_bins"
+fi
+
 # ------------------------------------------------- one entry per thing
 # The two ledgers are meant to hold each thing once. docs/KNOWN-ISSUES.md had two
 # "Smaller, and real" sections with three bullets in both, and two of those
 # bullets described things that had since been fixed, which is the drift this
 # catches: nothing here can tell whether an entry is still true, but it can tell
-# whether the file says the same thing twice. CHANGELOG.md had two `### Added`
+# whether the file says the same thing twice. A duplicated `##` section and a
+# duplicate bullet outside the "## Open" range were both missed, so the whole
+# file is compared now. CHANGELOG.md had two `### Added`
 # and two `### Fixed` under one release, where the format allows one of each, so
 # its headings are compared inside a release rather than across the file.
 title "one entry per thing"
@@ -266,13 +350,16 @@ no_repeats() {  # no_repeats <label> <the repeated lines, if any>
         printf '%s\n' "$2" | sed 's/^/        /'
     fi
 }
-no_repeats "docs/KNOWN-ISSUES.md repeats no section heading" \
+no_repeats "docs/KNOWN-ISSUES.md repeats no top-level heading" \
+    "$(grep '^## ' docs/KNOWN-ISSUES.md | sort | uniq -d)"
+no_repeats "docs/KNOWN-ISSUES.md repeats no sub-heading" \
     "$(grep '^### ' docs/KNOWN-ISSUES.md | sort | uniq -d)"
-# Only the opening line of each bullet is compared, so a bullet repeated with a
-# changed second line still gets through. That is the shape the duplicate took.
-no_repeats "docs/KNOWN-ISSUES.md repeats no open bullet" \
-    "$(sed -n '/^## Open/,/^## Accepted/p' docs/KNOWN-ISSUES.md |
-        grep '^- ' | sort | uniq -d)"
+# Every bullet in the file is compared, not only the ones under "## Open", so a
+# duplicate in another section is caught too. Only the opening line of each
+# bullet is compared, so a bullet repeated with a changed second line still
+# gets through. That is the shape the duplicate took.
+no_repeats "docs/KNOWN-ISSUES.md repeats no bullet" \
+    "$(grep '^- ' docs/KNOWN-ISSUES.md | sort | uniq -d)"
 no_repeats "CHANGELOG.md repeats no heading inside one release" \
     "$(awk '/^## \[/{section = $0; next} /^### /{print section " | " $0}' CHANGELOG.md |
         sort | uniq -d)"

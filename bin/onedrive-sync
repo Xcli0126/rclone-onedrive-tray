@@ -15,7 +15,7 @@
 #   onedrive-sync              incremental sync (3 attempts, 60s apart)
 #   onedrive-sync --resync     rebuild the sync baseline
 #   onedrive-sync --dry-run    show what a run would do, change nothing
-#   onedrive-sync --verbose    pass --verbose through to rclone
+#   onedrive-sync --verbose    pass --verbose through to rclone (-v works too)
 #   onedrive-sync --force      ignore the delete cap for this run
 #
 # Configuration: ~/.config/rclone-onedrive-tray/config  (see config.example)
@@ -293,24 +293,47 @@ case " $BISYNC_ARGS " in
         log_line "WARNING: --force is set in BISYNC_ARGS, so the delete cap cannot stop this run" ;;
 esac
 read -r -a BISYNC_OPTS <<<"$BISYNC_ARGS"
+
+# BISYNC_ARGS is split on whitespace, not by a shell, so a quote in it is a
+# character rclone receives rather than grouping: --exclude "/My Docs/**" arrives
+# as three words, and the stray positional makes rclone bisync print its usage and
+# exit 2, so every run fails until somebody reads the journal. A pattern that needs
+# a space cannot be written in this key at all, so a token that begins or ends with
+# a quote is refused here with the key named and the place to put it instead. A
+# quote inside a word, such as a path like /home/o'brien, is one word and works, so
+# it is left alone.
+for opt in "${BISYNC_OPTS[@]-}"; do
+    case "$opt" in
+        \"*|*\"|\'*|*\')
+            die "BISYNC_ARGS holds a token that begins or ends with a quote ('$opt'). The value is split on whitespace, not by a shell, so a pattern containing a space cannot be written here; put it in FILTERS_FILE or exclude-folders.txt" ;;
+    esac
+done
+
 ARGS=(bisync "$REMOTE" "$LOCAL")
 ARGS+=("${BISYNC_OPTS[@]}")
+
+# verbose_flag <one argv word> -- true when rclone would read it as verbose.
+#
 # rclone refuses -v together with --log-level ("Can't set -v and --log-level"),
 # so asking for verbose used to fail every attempt of the run. Verbose implies
-# debug, which is what the flag is for. The check is on the flag rather than on
-# one spelling of it: rclone parses -v, -vv and a cluster such as -Pv the same
-# way, and BISYNC_ARGS is where a short one arrives from. -v is the only short
-# flag rclone gives the letter v to, so a cluster holding one is verbose.
+# debug, which is what the flag is for. The check is on the flag rather than on one
+# spelling of it: rclone parses -v, -vv and a cluster such as -Pv the same way, and
+# -v is the only short flag it gives the letter v to (rclone help flags), so a
+# short cluster holding one is verbose. The validator below asks the same question
+# of the wrapper's own arguments, so -v works there too and not only in
+# BISYNC_ARGS.
+verbose_flag() {
+    case "$1" in
+        --verbose|--verbose=*) return 0 ;;
+        --*)                   return 1 ;;
+        -*v*)                  return 0 ;;
+        *)                     return 1 ;;
+    esac
+}
+
 verbose_wanted=0
 for opt in "${BISYNC_OPTS[@]-}" "${@:-}"; do
-    case "$opt" in
-        --verbose|--verbose=*)
-            verbose_wanted=1 ;;
-        --*)
-            : ;;                    # another long flag, so not this one
-        -*v*)
-            verbose_wanted=1 ;;
-    esac
+    verbose_flag "$opt" && verbose_wanted=1
 done
 if [ "$verbose_wanted" -eq 1 ]; then
     ARGS+=(--log-file "$LOG")
@@ -399,12 +422,20 @@ for arg in "$@"; do
         --resync)
             resync_wanted=1
             ARGS+=("$arg") ;;
-        --dry-run|--verbose)
+        --dry-run)
             ARGS+=("$arg") ;;
         *)
-            printf '%s: unknown option: %s\n' "$APP" "$arg" >&2
-            printf 'usage: %s [--resync] [--force] [--dry-run] [--verbose]\n' "$APP" >&2
-            exit 2 ;;
+            # verbose_flag, so the short spellings of verbose are accepted here
+            # too: -v and -vv are what an rclone user types, and refusing them
+            # while the loop above treats them as verbose was two answers to one
+            # question.
+            if verbose_flag "$arg"; then
+                ARGS+=("$arg")
+            else
+                printf '%s: unknown option: %s\n' "$APP" "$arg" >&2
+                printf 'usage: %s [--resync] [--force] [--dry-run] [--verbose|-v]\n' "$APP" >&2
+                exit 2
+            fi ;;
     esac
 done
 
@@ -485,6 +516,18 @@ hint_for() {
     elif grep -qiE "$RE_ACCESS" <<<"$t"; then
         tag=access
         msg="the access check did not find ${CHECK_FILENAME:-RCLONE_TEST} on both sides, so nothing was changed. Restore the file (onedrive-check-access) or fix the side that cannot be read. Do not run --resync for this"
+    # Before the network patterns, and the remote name is derived here so the
+    # message can name the exact command; the tray offers the same thing as a menu
+    # item, which is what most people should use. The order matters because
+    # rclone 1.75.1 describes a refused sign-in in one line, "couldn't fetch
+    # token: invalid_grant: maybe token expired? - try refreshing with rclone
+    # config reconnect", which matches both tables: a marker that can only come
+    # from Microsoft's answer settles it, while the network patterns also
+    # describe a request that never arrived. Getting this wrong retries a
+    # sign-in that no retry can fix.
+    elif grep -qiE "$RE_AUTH" <<<"$t"; then
+        tag=auth
+        msg="the sign-in was refused or has expired; use the tray's 'Re-authorise OneDrive' item, or run: rclone config reconnect ${REMOTE%%:*}:"
     elif grep -qiE "$RE_NETWORK" <<<"$t"; then
         tag=network
         msg="network problem reaching the remote, so nothing was changed; the next run will retry"
@@ -494,12 +537,6 @@ hint_for() {
     elif grep -qiE "$RE_RESYNC" <<<"$t"; then
         tag=resync
         msg="sync baseline is invalid; run: onedrive-sync --resync"
-    # The remote name is derived here so the message can name the exact command;
-    # the tray offers the same thing as a menu item, which is what most people
-    # should use.
-    elif grep -qiE "$RE_AUTH" <<<"$t"; then
-        tag=auth
-        msg="the sign-in was refused or has expired; use the tray's 'Re-authorise OneDrive' item, or run: rclone config reconnect ${REMOTE%%:*}:"
     else
         tag=other
         msg="see log: $LOG"

@@ -187,17 +187,33 @@ else
     config_missing=""
     [ -n "$REMOTE" ] || config_missing="REMOTE"
     [ -n "$LOCAL" ] || config_missing="${config_missing:+$config_missing and }LOCAL"
+    unknown=""; file_keys=""
+    while IFS= read -r key; do
+        file_keys="$file_keys $key"
+        case "$KNOWN" in
+            *" $key "*) ;;
+            *) unknown="${unknown:+$unknown, }$key" ;;
+        esac
+    done < <(sed -n 's/^[[:space:]]*\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' \
+                 "$CONFIG_FILE" | sort -u)
+    # The three keys onedrive-sync runs require_positive_int on. A value it
+    # refuses stops every scheduled run before rclone starts, and its message goes
+    # to the systemd journal, which is the last place a user looks. Only keys the
+    # file actually sets are judged: an absent one gets the wrapper's own default.
+    bad_number=""
+    for key in RETRIES RETRY_DELAY MAX_LOG_BYTES; do
+        case " $file_keys " in *" $key "*) ;; *) continue ;; esac
+        value="$(printf '%s' "${!key-}" | tr -d '[:space:]')"
+        case "$value" in
+            ''|*[!0-9]*) bad_number="${bad_number:+$bad_number, }$key" ;;
+            *) [ "$value" -gt 0 ] || bad_number="${bad_number:+$bad_number, }$key" ;;
+        esac
+    done
     if [ -n "$config_missing" ]; then
         report fail config "$CONFIG_FILE does not set $config_missing; add the key and run onedrive-sync --resync"
+    elif [ -n "$bad_number" ]; then
+        report fail config "$CONFIG_FILE sets $bad_number to something onedrive-sync refuses to run with (a whole number above zero is required); fix it or remove the key, because nothing syncs until it is"
     else
-        unknown=""
-        while IFS= read -r key; do
-            case "$KNOWN" in
-                *" $key "*) ;;
-                *) unknown="${unknown:+$unknown, }$key" ;;
-            esac
-        done < <(sed -n 's/^[[:space:]]*\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' \
-                     "$CONFIG_FILE" | sort -u)
         report ok config "$CONFIG_FILE sets REMOTE and LOCAL${unknown:+ (note: key(s) nothing here reads: $unknown)}"
     fi
 fi
@@ -318,10 +334,16 @@ classify_hint() {  # classify_hint <text> -> a tag, or none
     if grep -qiE "$RE_LOCK" <<<"$t"; then printf 'lock'
     elif grep -qiE "$RE_MAXDELETE" <<<"$t"; then printf 'maxdelete'
     elif grep -qiE "$RE_ACCESS" <<<"$t"; then printf 'access'
+    # Before the network patterns: the line rclone 1.75.1 writes for a refused
+    # sign-in is a single one, "failed to get root: ... couldn't fetch token:
+    # invalid_grant: maybe token expired? - try refreshing with rclone config
+    # reconnect", and it matches both tables. A marker that can only come from
+    # Microsoft's own answer settles which it is; the network patterns are the
+    # ones that also describe a request that never arrived.
+    elif grep -qiE "$RE_AUTH" <<<"$t"; then printf 'auth'
     elif grep -qiE "$RE_NETWORK" <<<"$t"; then printf 'network'
     elif grep -qiE "$RE_OLD" <<<"$t"; then printf 'oldrclone'
     elif grep -qiE "$RE_RESYNC" <<<"$t"; then printf 'resync'
-    elif grep -qiE "$RE_AUTH" <<<"$t"; then printf 'auth'
     else printf 'none'; fi
 }
 
@@ -454,7 +476,12 @@ case "${WATCH,,}" in
         ;;
 esac
 
-tray_pid="$(timeout 5 pgrep -f 'onedrive-tray' 2>/dev/null | head -1 || true)"
+# The interpreter and the script, not the bare name: pgrep -f matches the whole
+# command line, so 'onedrive-tray' also matched the log tail this project's own
+# documentation tells a user to run (tail -f .../rclone-onedrive-tray/sync.log) and
+# the fuser recipe in TROUBLESHOOTING.md. The tray is a python3 script, and
+# docs/UPDATING.md already spells the pattern this way.
+tray_pid="$(timeout 5 pgrep -f 'python3 .*/onedrive-tray' 2>/dev/null | head -1 || true)"
 icons_dir="$DATA_DIR/icons"
 if [ -n "$tray_pid" ] && [ -d "$icons_dir" ]; then
     report ok tray "running (pid $tray_pid), icons in $icons_dir"

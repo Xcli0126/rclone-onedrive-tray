@@ -64,7 +64,7 @@ Linux 上没有官方 OneDrive 客户端。`rclone bisync` 能承担同步，但
 |---|---|---|
 | 带 systemd（用户会话）的 Linux | 定时器、监听器、定时暂停 | 不会有任何定时同步 |
 | [rclone](https://rclone.org/downloads/) 1.65 或更新 | 所有同步 | 完全无法同步。低于 1.65 时，一次中断就需要人工 `--resync` |
-| `python3-gi`、`python3-cairo`、`gir1.2-gtk-3.0` | 托盘程序及其图标 | 托盘直接退出，并打印需要安装的包名 |
+| `python3-gi`、`python3-cairo`、`gir1.2-gtk-3.0` | 托盘程序及其图标 | 托盘直接退出，并打印需要安装的包名。`install.sh` 会给出警告，但仍然把同步那一半装好（只是不写自启动项），所以服务器也能用定时器同步 |
 | `gir1.2-ayatanaappindicator3-0.1` | 托盘图标 | 同上。只装运行库 `libayatana-appindicator3-1` 不够 |
 | `gir1.2-notify-0.7` | 桌面通知 | 托盘照常运行并提示一句，只是没有通知 |
 | `util-linux`（提供 `flock`） | 串行化同步运行 | 包装器拒绝启动，而不是冒险破坏 bisync 状态 |
@@ -189,7 +189,7 @@ REMOTE="onedrive:"            # rclone 远程，可带子路径："onedrive:Note
 LOCAL="$HOME/OneDrive"        # 本地同步目录
 INTERVAL_MIN="5"              # 自动同步间隔（分钟）
 MAX_DELETE="100"              # 一轮删除超过这个数量就中止
-BISYNC_ARGS="--resilient --recover --max-lock 2m --conflict-resolve none --conflict-loser num"
+BISYNC_ARGS="--resilient --recover --max-lock 2m --conflict-resolve none --conflict-loser num --stats 2s"
 FILTERS_FILE="$HOME/.config/rclone-onedrive-tray/filters.txt"
 OPEN_APP_CMD=""               # 可选：托盘菜单里能启动的应用，例如 "obsidian"
 UI_LANG=""                    # 界面语言：en / zh，留空则跟随 $LANG
@@ -247,6 +247,7 @@ OneDrive 1.4.0
 ☑ 开机自动启动托盘
 ────────────────────────────────
 检查文件名
+诊断…
 重新登录 OneDrive…
 重建同步基线（resync）…
 ────────────────────────────────

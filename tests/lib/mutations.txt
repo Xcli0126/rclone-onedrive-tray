@@ -62,8 +62,45 @@ docs-duplicate-heading	docs/KNOWN-ISSUES.md	s|^### Two sync pairs cannot coexist
 doctor-standing-old-hint	bin/onedrive-doctor	s|\[ "$standing_at" -gt "$last_ok" \]|true|	install-flow
 # a second Added inside one release, which the format allows only one of
 docs-duplicate-changelog	CHANGELOG.md	s|^### Changed|### Added\n\n### Changed|	docs
-# a trailing comment read as part of the value, which is what bash does not do
-tray-comment-hash-rule	bin/onedrive-tray	s|char == "#" and (index == 0 or value\[index - 1\].isspace())|char == "@" and (index == 0 or value[index - 1].isspace())|	tray
+# rclone's one-line refusal matches both tables, so the marker that can only come
+# from Microsoft has to be asked about first. These stand for that order: with the
+# auth markers out of the way the mixed line is read as a network failure, which
+# is what the old order did.
+doctor-auth-before-network	bin/onedrive-doctor	s|elif grep -qiE "\$RE_AUTH" <<<"\$t"; then printf 'auth'|elif false; then printf 'auth'|	install-flow
+sync-auth-before-network	bin/onedrive-sync	s|elif grep -qiE "\$RE_AUTH" <<<"\$t"; then|elif false; then|	install-flow
+# BISYNC_ARGS is not read by a shell, so a quoted pattern reaches rclone as three
+# words; the refusal names the key instead of leaving rclone's usage in the journal
+sync-bisync-args-quote	bin/onedrive-sync	s|            die "BISYNC_ARGS holds a token|            : "BISYNC_ARGS holds a token|	install-flow
+# and -v on the wrapper's own command line, which the detector called verbose while
+# the validator refused it as an unknown option
+sync-short-verbose-cli	bin/onedrive-sync	s|            if verbose_flag "$arg"; then|            if false; then|	install-flow
+# the three keys the wrapper runs require_positive_int on, whose bad values used to
+# pass the doctor as a healthy config
+doctor-config-numbers	bin/onedrive-doctor	s|    for key in RETRIES RETRY_DELAY MAX_LOG_BYTES; do|    for key in ; do|	install-flow
+# the tray probe, which matched the log tail the project's own docs tell you to run
+doctor-tray-pattern	bin/onedrive-doctor	s|pgrep -f 'python3 .\*/onedrive-tray'|pgrep -f 'onedrive-tray'|	install-flow
+# a wizard with no terminal to answer, which used to start the full baseline sync
+# on the (Y/n) prompt's default
+setup-notty-first-sync	setup.sh	s|    elif \[ ! -t 0 \]; then|    elif false; then|	install-flow
+# a trailing comment read as part of the value, which is what bash does not do.
+# The left side changed with the KEY=#x fix: the old expression is gone from the
+# source, so it matched nothing and the row was reported skipped.
+tray-comment-hash-rule	bin/onedrive-tray	s|char == "#" and index > 0 and value\[index - 1\].isspace()|char == "#"|	tray
+# the same rule applied after the value was stripped, which loses the difference
+# between KEY=#x and KEY=   #x
+tray-comment-hash-after-equals	bin/onedrive-tray	s|val = strip_inline_comment(val).strip()|val = strip_inline_comment(val.strip())|	tray
+# an export prefix filed as part of the key, so REMOTE stays unset
+tray-config-export-prefix	bin/onedrive-tray	s|^                if (key.startswith("export")$|                if (False and key.startswith("export")|	tray
+# a config that cannot be read treated as a change, which moves the delete guard's
+# root to ~/OneDrive
+tray-poll-unreadable-not-news	bin/onedrive-tray	s|if signature is not None and signature != self.config_seen:|if signature != self.config_seen:|	tray
+# and a reload applying the defaults an unreadable file comes back as
+tray-reload-refuses-no-remote	bin/onedrive-tray	s|^        if not fresh.get("REMOTE"):$|        if False:|	tray
+# the old remote's answers kept through a reload that moved REMOTE
+tray-reload-remote-forget-folders	bin/onedrive-tray	s|^                    self\.folders = None$|                    pass|	tray
+tray-reload-remote-forget-quota	bin/onedrive-tray	s|^                    self\.quota = None$|                    pass|	tray
+tray-reload-remote-ask-folders	bin/onedrive-tray	s|^            self\.refresh_folders()$|            pass|	tray
+tray-reload-remote-ask-quota	bin/onedrive-tray	s|^            self\.refresh_quota()$|            pass|	tray
 # a reload that reads the file and leaves the six startup snapshots on the old one
 tray-reload-resolves-paths	bin/onedrive-tray	/def _config_changed/,/^        return moved$/ s/^                moved = True$/                pass/	tray
 # and a reload that moves them without rebuilding the menu built from them
@@ -72,7 +109,8 @@ tray-reload-drop-rebuild	bin/onedrive-tray	s|^        if self\._config_changed(f
 # cache that was built for the file before it
 tray-reload-log-cache	bin/onedrive-tray	/if name == "log":/,/self\.log_result = ("unknown", "", "", "")/ s/^                    self\.log_signature = None$/                    pass/	tray
 # the [tag] the wrapper writes, which the tray localises from: a pattern that
-# cannot match it, and one that matches only its first letter. The search side
-# takes the whole line by its prefix, so no backslash has to survive the table.
-tray-hint-regex-length	bin/onedrive-tray	s|^HINT_RE = re.compile(r".*)$|HINT_RE = re.compile(r"\[(\\d+)\]\s*(.*)")|	tray
-tray-hint-regex-group	bin/onedrive-tray	s|^HINT_RE = re.compile(r".*)$|HINT_RE = re.compile(r"\[(\\w)\]\s*(.*)$")|	tray
+# cannot match it, and one that matches only its first letter. The backslashes in
+# the replacement are doubled, because sed eats one level: without that the applied
+# pattern is a character class and the row tests something the comment does not say.
+tray-hint-regex-length	bin/onedrive-tray	s|^HINT_RE = re.compile(r".*)$|HINT_RE = re.compile(r"\\[(\\d+)\\]\\s*(.*)$")|	tray
+tray-hint-regex-group	bin/onedrive-tray	s|^HINT_RE = re.compile(r".*)$|HINT_RE = re.compile(r"\\[(\\w)\\]\\s*(.*)$")|	tray

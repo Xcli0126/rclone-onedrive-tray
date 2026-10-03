@@ -79,14 +79,13 @@ test is allowed to touch before anyone starts.
   99999 and watching every suite stay green. The branch is kept for filesystems
   that allow longer names, and it is not tested because there is nothing to test
   it with.
-- One line holding both a network marker and a sign-in marker is classified as
-  the network one, because `classify_hint` asks about the network patterns first,
-  in the wrapper and in the doctor. The two have not been seen together: a
-  request that never reached the token endpoint logs `couldn't fetch token` with
-  no `invalid_grant` beside it, and all eleven of those lines on this machine are
-  one TLS interception. The order was left alone rather than changed for a line
-  nobody has produced, and the doctor no longer depends on it: across lines, a
-  sign-in refusal is reported until a run syncs past it.
+- A folder listing or quota refresh that is already in flight when `REMOTE` moves
+  can still store the answer for the remote before it. The re-ask a moved remote
+  triggers is skipped while the worker is busy, and the worker does not check which
+  remote it asked, so the stale answer lands and the menu shows the old account's
+  folders until the answer after it arrives. It needs a generation counter or an
+  answer tagged with the remote it belongs to, which is a larger change than the
+  reload path.
 
 ### The tray's state is read out of English prose in a shared log
 
@@ -142,3 +141,10 @@ have to derive it from three file names.
   writes `1` or `0`, and `onedrive-tray --settings` still opens the window without
   an icon to click, so an unrecognised value is treated as off and the user can
   get back in from a terminal.
+- `BISYNC_ARGS` is split on whitespace, not read by a shell, so a pattern with a
+  space in it cannot be written there: `--exclude "/My Docs/**"` arrives as three
+  words and one of them is a stray argument rclone refuses. A token that begins or
+  ends with a quote is refused at the start of a run with this key named, and
+  `config.example` says where such a pattern belongs instead. A shell-like split
+  (shlex) is the alternative and is not implemented, because the value is a list of
+  rclone flags rather than a shell command.

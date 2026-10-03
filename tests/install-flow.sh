@@ -273,6 +273,30 @@ else
     printf '%s\n' "$NOSYNC_OUT" | tail -4 | sed 's/^/        /'
 fi
 
+# The other half: the wrapper IS installed and stdin is still not a terminal.
+# ask() answers the (Y/n) prompt's default for that case too, so the wizard started
+# a full, uninterruptible baseline sync with nobody there to answer. The case above
+# could not see it, because --no-install left the wrapper absent.
+NOTTY_HOME="$WORK/notty-home"
+rm -rf "$NOTTY_HOME"; mkdir -p "$NOTTY_HOME/.local/bin"
+cat > "$NOTTY_HOME/.local/bin/onedrive-sync" <<'STUB'
+#!/bin/bash
+printf '%s\n' "$*" >> "$HOME/sync-calls"
+STUB
+chmod +x "$NOTTY_HOME/.local/bin/onedrive-sync"
+NOTTY_OUT="$(env HOME="$NOTTY_HOME" XDG_CONFIG_HOME="$NOTTY_HOME/.config" \
+    XDG_CACHE_HOME="$NOTTY_HOME/.cache" \
+    bash "$SRC_DIR/setup.sh" --remote "$REMOTE" --local "$NOTTY_HOME/OneDrive" \
+        --filters none --unit-name zz-notty-probe --no-install </dev/null 2>&1)"
+NOTTY_RC=$?
+if [ "$NOTTY_RC" -eq 0 ] && grep -qF 'left to you' <<<"$NOTTY_OUT" &&
+        [ ! -e "$NOTTY_HOME/sync-calls" ]; then
+    ok "a wizard run with no terminal leaves the first sync to the user"
+else
+    bad "the first sync started with no terminal to answer (rc=$NOTTY_RC)"
+    printf '%s\n' "$NOTTY_OUT" | tail -4 | sed 's/^/        /'
+fi
+
 # ---------------------------------------------------------------- the install
 title "install.sh via setup.sh"
 for s in onedrive-sync onedrive-tray onedrive-watch onedrive-check onedrive-check-access \
@@ -892,6 +916,41 @@ argv_row "-v in BISYNC_ARGS also replaces --log-level" \
 argv_row "a short cluster holding a v counts as verbose too" \
     "bisync $CAP_REMOTE $CAP/local -Pv --log-file $CAP/sync.log --max-delete 50" \
     'BISYNC_ARGS="-Pv"'
+# The wrapper's own arguments asked the same question as the loop above and used
+# to answer it differently: -v was refused as an unknown option while BISYNC_ARGS
+# holding the same thing was treated as verbose.
+argv_row "-v on the command line is accepted and forwarded" \
+    "bisync $CAP_REMOTE $CAP/local $DEF_ARGS --log-file $CAP/sync.log --max-delete 50 -v" \
+    "" -v
+argv_row "-vv on the command line is accepted too" \
+    "bisync $CAP_REMOTE $CAP/local $DEF_ARGS --log-file $CAP/sync.log --max-delete 50 -vv" \
+    "" -vv
+run "an option that is not one of the documented ones is still refused" 2 "unknown option: -Z" \
+    cap_env "$HOME/.local/bin/onedrive-sync" -Z
+
+# BISYNC_ARGS is split on whitespace, so a quoted pattern is three words and one of
+# them is a positional rclone refuses. That failure used to arrive as rclone's own
+# usage text in the journal, every run, with the config key never named.
+cap_config 'BISYNC_ARGS="--resilient --exclude \"/My Docs/**\""'
+run "a quoted token in BISYNC_ARGS is refused with the key named" 1 \
+    "BISYNC_ARGS holds a token that begins or ends with a quote" \
+    cap_env "$HOME/.local/bin/onedrive-sync"
+check "and the message says where a pattern with a space belongs" \
+    grep -q "FILTERS_FILE" <<<"$(cap_env "$HOME/.local/bin/onedrive-sync" 2>&1)"
+# An apostrophe inside a word is one word and works, so it must not be refused.
+cap_config 'BISYNC_ARGS="--resilient --exclude=/home/o'\''brien/**"'
+run "a quote inside a word is left alone" 0 "" \
+    cap_env "$HOME/.local/bin/onedrive-sync"
+# The numeric keys the wrapper refuses: without a case here, the only proof was
+# the doctor's message about it.
+cap_config 'RETRIES="0"'
+run "RETRIES=0 stops the run and names the key" 1 "RETRIES='0' is not a positive integer" \
+    cap_env "$HOME/.local/bin/onedrive-sync"
+cap_config 'MAX_LOG_BYTES="5MB"'
+run "MAX_LOG_BYTES with a unit suffix stops the run and names the key" 1 \
+    "MAX_LOG_BYTES='5MB' is not a positive integer" \
+    cap_env "$HOME/.local/bin/onedrive-sync"
+cap_config
 argv_row "--force is forwarded and the delete cap stays on the line" \
     "$(argv_line "$CAP/local" '--max-delete 50 --force')" "" --force
 argv_row "--resync reaches rclone exactly once" \
@@ -1152,12 +1211,20 @@ run "it says what it would do without touching anything" 0 "would write" \
 title "network failures and expired sign-ins"
 CAP_EOF='2026/01/01 00:00:00 CRITICAL: failed to get root: Get "https://graph.microsoft.com/v1.0/drives/X/root": couldn'"'"'t fetch token: Post "https://login.microsoftonline.com/common/oauth2/v2.0/token": EOF'
 CAP_AUTH='2026/01/01 00:00:00 CRITICAL: Failed to refresh token: oauth2: cannot fetch token: 400 Bad Request: {"error":"invalid_grant","error_description":"AADSTS70043: The refresh token has expired"}'
+# What rclone 1.75.1 actually writes when the refresh token is refused: one line
+# that matches the network patterns ("couldn't fetch token") and the auth ones
+# ("invalid_grant") at the same time, captured here from a real run. Which table
+# is asked first decides whether the user is told to wait for a retry or to sign
+# in again.
+CAP_AUTH_MIXED="2026/10/04 03:54:31 CRITICAL: Failed to create file system for \"onedrive:Vault\": failed to get root: Get \"https://graph.microsoft.com/v1.0/drives/b!/root\": couldn't fetch token: invalid_grant: maybe token expired? - try refreshing with \"rclone config reconnect onedrive:\""
 run "a token fetch that never reached Microsoft is a network problem" 1 "[network]" \
     cap_env CAP_STDERR="$CAP_EOF" CAP_RC=1 "$HOME/.local/bin/onedrive-sync"
 run "a refused token is an expired sign-in, and says what to click" 1 "[auth]" \
     cap_env CAP_STDERR="$CAP_AUTH" CAP_RC=1 "$HOME/.local/bin/onedrive-sync"
 run "and the message names the tray item and the command" 1 "config reconnect" \
     cap_env CAP_STDERR="$CAP_AUTH" CAP_RC=1 "$HOME/.local/bin/onedrive-sync"
+run "rclone's own one-line refusal carries both phrases and is still an auth failure" 1 "[auth]" \
+    cap_env CAP_STDERR="$CAP_AUTH_MIXED" CAP_RC=1 "$HOME/.local/bin/onedrive-sync"
 
 # ---------------------------------------------------------------- what is retried
 # The retry loop spent the remaining attempts on every failure class, including
@@ -1193,6 +1260,12 @@ if [ "$RETRY_RC" -eq 1 ] && [ "$RETRY_COUNT" -eq 1 ]; then
     ok "a refused sign-in is not retried"
 else
     bad "a refused sign-in: exit $RETRY_RC after $RETRY_COUNT attempt(s)"
+fi
+retry_case "$CAP_AUTH_MIXED"
+if [ "$RETRY_RC" -eq 1 ] && [ "$RETRY_COUNT" -eq 1 ]; then
+    ok "and neither is the one-line refusal rclone writes, which also says network"
+else
+    bad "a one-line refusal: exit $RETRY_RC after $RETRY_COUNT attempt(s)"
 fi
 check "and the log says why the remaining attempts were dropped" \
     grep -qF "not retrying" "$CAP/sync.log"
@@ -1310,8 +1383,25 @@ chmod +x "$DOC_STUBS/rclone" "$DOC_STUBS/systemctl"
 # The tray check asks pgrep for onedrive-tray, and no fixture ever had one, so
 # its "running (pid ...)" line was never printed. This stub answers only when a
 # case sets DOC_TRAY_PID, which leaves every other fixture's tray verdict alone.
+#
+# It matches the way pgrep does, with an unanchored ERE over the command line,
+# because the pattern is what decides whether a log tail whose path holds the
+# name is read as a tray. DOC_TRAY_CMDS is a newline-separated list of command
+# lines the case wants to exist; each match is answered with a pid counting up
+# from 8001, so a case can tell which of them the doctor settled on.
 cat > "$DOC_STUBS/pgrep" <<'STUB'
 #!/bin/bash
+pattern=""
+for arg in "$@"; do pattern="$arg"; done
+if [ -n "${DOC_TRAY_CMDS:-}" ]; then
+    pid=8000
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        pid=$((pid + 1))
+        if [[ "$line" =~ $pattern ]]; then printf '%s\n' "$pid"; fi
+    done <<<"$DOC_TRAY_CMDS"
+    exit 0
+fi
 [ -n "${DOC_TRAY_PID:-}" ] && printf '%s\n' "$DOC_TRAY_PID"
 exit 0
 STUB
@@ -1360,6 +1450,7 @@ doc_run() {
         DOC_WATCH_ACTIVE="${DOC_WATCH_ACTIVE:-inactive}" \
         DOC_LSD_RC="${DOC_LSD_RC:-0}" DOC_LSD_ERR="${DOC_LSD_ERR:-}" \
         DOC_TRAY_PID="${DOC_TRAY_PID:-}" \
+        DOC_TRAY_CMDS="${DOC_TRAY_CMDS:-}" \
         "$DOCTOR_BIN" "$@"
 }
 
@@ -1395,6 +1486,56 @@ run "a running tray: the ok line names the pid and the icon directory" 0 \
     "running (pid 8123), icons in $DOC_FX/data/rclone-onedrive-tray/icons" \
     doc_run "$DOC_FX" --offline
 DOC_TRAY_PID=""
+
+# The tray check reads the whole command line, so the pattern decides whether the
+# log tail this project's own documentation tells a user to run is mistaken for a
+# tray. Both command lines are offered to the stub at once: only the second is a
+# tray, and the pid it answers for is what says which one was found.
+title "the tray probe finds a tray, not its name in any command line"
+doc_fixture tray-or-tail
+DOC_TRAY_CMDS='tail -f /home/u/.cache/rclone-onedrive-tray/sync.log
+python3 /home/u/.local/bin/onedrive-tray'
+run "the log tail is skipped and the tray behind it is the one reported" 0 \
+    "running (pid 8002), icons in $DOC_FX/data/rclone-onedrive-tray/icons" \
+    doc_run "$DOC_FX" --offline
+DOC_TRAY_CMDS='tail -f /home/u/.cache/rclone-onedrive-tray/sync.log'
+run "and a tail on its own is not a tray" 0 "no tray process" \
+    doc_run "$DOC_FX" --offline
+DOC_TRAY_CMDS=""
+
+# The three keys onedrive-sync runs require_positive_int on. A value it refuses
+# stops every scheduled run before rclone starts.
+doc_fixture bad-retries 'RETRIES="0"'
+DOCTOR_OUT="$(doc_run "$DOC_FX" --quiet --offline 2>&1)"; DOCTOR_RC=$?
+if [ "$DOCTOR_RC" -eq 1 ] && grep -q "fail config" <<<"$DOCTOR_OUT" &&
+        grep -q "RETRIES" <<<"$DOCTOR_OUT"; then
+    ok "a RETRIES onedrive-sync refuses is a failed check, not a healthy config"
+else
+    bad "RETRIES=0: exit $DOCTOR_RC, $(grep -m1 config <<<"$DOCTOR_OUT")"
+fi
+
+# The log file is removed here on purpose: the check used to sit behind
+# "does the log exist", so a key it refuses was invisible on a machine that had
+# never synced, which is exactly when a fresh install gets it wrong.
+doc_fixture bad-max-log 'MAX_LOG_BYTES="5MB"'
+rm -f "$DOC_FX/cache/sync.log"
+DOCTOR_OUT="$(doc_run "$DOC_FX" --quiet --offline 2>&1)"; DOCTOR_RC=$?
+if [ "$DOCTOR_RC" -eq 1 ] && grep -q "MAX_LOG_BYTES" <<<"$DOCTOR_OUT"; then
+    ok "a MAX_LOG_BYTES the wrapper refuses fails even with no log to look at"
+else
+    bad "MAX_LOG_BYTES=5MB without a log: exit $DOCTOR_RC, $(grep -m1 config <<<"$DOCTOR_OUT")"
+fi
+
+# And the other side: a config that does not mention the three keys at all is
+# healthy, because the wrapper's own defaults apply. The healthy fixture at the
+# top of this section is that case, so this one only pins the message.
+doc_fixture bad-retry-delay 'RETRY_DELAY="60s"'
+DOCTOR_OUT="$(doc_run "$DOC_FX" --quiet --offline 2>&1)"; DOCTOR_RC=$?
+if [ "$DOCTOR_RC" -eq 1 ] && grep -q "RETRY_DELAY" <<<"$DOCTOR_OUT"; then
+    ok "RETRY_DELAY with a unit suffix is refused too, and named"
+else
+    bad "RETRY_DELAY=60s: exit $DOCTOR_RC, $(grep -m1 config <<<"$DOCTOR_OUT")"
+fi
 
 doc_fixture no-config
 rm -f "$DOC_FX/cfg/rclone-onedrive-tray/config"
@@ -1432,6 +1573,21 @@ if [ "$DOCTOR_RC" -eq 0 ] && grep -q "network problem" <<<"$DOCTOR_OUT" &&
     ok "a token fetch that never reached Microsoft is a network problem, not an expiry"
 else
     bad "token EOF: exit $DOCTOR_RC, $(head -1 <<<"$DOCTOR_OUT")"
+fi
+
+# The shape rclone 1.75.1 really writes, one line carrying a network phrase and an
+# auth marker. The tables are asked in an order, so the order is what decides
+# whether the user is told the sign-in is not the problem.
+doc_fixture mixed-signin
+cat >> "$DOC_FX/cache/sync.log" <<'EOF'
+2026/10/04 03:54:31 CRITICAL: Failed to create file system for "docfake:Vault": failed to get root: Get "https://graph.microsoft.com/v1.0/drives/b!/root": couldn't fetch token: invalid_grant: maybe token expired? - try refreshing with "rclone config reconnect docfake:"
+EOF
+DOCTOR_OUT="$(doc_run "$DOC_FX" --quiet --offline 2>&1)"; DOCTOR_RC=$?
+if [ "$DOCTOR_RC" -eq 1 ] && grep -q "expired sign-in" <<<"$DOCTOR_OUT" &&
+        ! grep -q "a network problem" <<<"$DOCTOR_OUT"; then
+    ok "rclone's one-line refusal is an expired sign-in, not a network problem"
+else
+    bad "one-line refusal: exit $DOCTOR_RC, $(head -1 <<<"$DOCTOR_OUT")"
 fi
 
 # A network blip lands on top of the refusal that is the actual reason nothing
@@ -1591,12 +1747,19 @@ else
 fi
 
 # The wrapper refuses to run with a MAX_LOG_BYTES that is not a positive integer,
-# so the doctor has to say that rather than that the rotation is skipped.
+# so the doctor has to say that rather than that the rotation is skipped. It used
+# to say it on the logfile line and exit 0, which reads as "nothing failed" while
+# nothing could sync; the config check fails on the same value now.
 doc_fixture bad-max-log-bytes 'MAX_LOG_BYTES="5MB"'
 DOC_LSD_RC=0; DOC_LSD_ERR=""
-run "a MAX_LOG_BYTES the wrapper refuses is named as such" 0 \
+run "a MAX_LOG_BYTES the wrapper refuses is a failure, named as such" 1 \
     "onedrive-sync refuses to run" \
     doc_run "$DOC_FX" --quiet
+DOCTOR_OUT="$(doc_run "$DOC_FX" --quiet 2>&1)"
+check "and the logfile line still says what to put there instead" \
+    grep -q "give it a byte count" <<<"$DOCTOR_OUT"
+check "and the config line names the key, not only the value" \
+    grep -q "^fail config.*MAX_LOG_BYTES" <<<"$DOCTOR_OUT"
 
 # A remote name that is not set and an rclone that is not on PATH both stay
 # failures: neither is something the next run changes.

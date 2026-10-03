@@ -183,5 +183,11 @@ the tray's "Re-authorise OneDrive" item, which runs rclone's own
 removing the tray leaves your account connected.
 
 Multiple accounts are multiple remotes, for example `onedrive-work:` and
-`onedrive-personal:`. Each one becomes its own config in this project, with its
-own local folder, its own units and its own log.
+`onedrive-personal:`. Only the remote is per-account. The config path, the cache
+directory and the tray's single-instance lock are fixed names, so two pairs on one
+machine share a config file, one `sync.lck`, one pause stamp and one tray lock,
+and only one tray can run in a session. A second pair needs its own
+`XDG_CONFIG_HOME`, `XDG_CACHE_HOME` and `XDG_RUNTIME_DIR`, plus
+`setup.sh --unit-name`. The README's "Trying it alongside an existing install"
+section walks through all four, and [KNOWN-ISSUES.md](KNOWN-ISSUES.md) records
+where the three collisions are.
