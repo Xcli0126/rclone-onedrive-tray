@@ -75,6 +75,7 @@ for a in "\$@"; do
     case "\$a" in
         is-active) exit 3 ;;
         start)     printf '%s\\n' "\$*" >> "$SYSTEMCTL_CALLS"; exit 0 ;;
+        disable)   printf '%s\\n' "\$*" >> "$SYSTEMCTL_CALLS"; exit 0 ;;
     esac
 done
 exit 0
@@ -1578,6 +1579,9 @@ printf '[Unit]\nDescription=old install\n[Service]\nExecStart=%s/onedrive-sync\n
     "$HOME/.local/bin" > "$UNIT_DIR/$STALE.service"
 printf '[Unit]\nDescription=old install\n[Timer]\nOnUnitInactiveSec=5min\n' \
     > "$UNIT_DIR/$STALE.timer"
+# The stub above records `start` calls for the watcher case; from here on what it
+# records is the systemctl this run asks for, so start it empty.
+: > "$SYSTEMCTL_CALLS"
 UNINSTALL_OUT="$(bash "$SRC_DIR/uninstall.sh" --prefix "$HOME/.local" 2>&1)"
 UNINSTALL_RC=$?
 if [ "$UNINSTALL_RC" -eq 0 ]; then
@@ -1594,6 +1598,11 @@ check_absent "removes the units" \
     "$UNIT_DIR/$UNIT.service" "$UNIT_DIR/$UNIT.timer" "$UNIT_DIR/$UNIT-watch.service"
 check_absent "removes a unit pair left by an earlier name" \
     "$UNIT_DIR/$STALE.service" "$UNIT_DIR/$STALE.timer"
+# The watcher half is a long-lived process: taking its unit file away while it
+# is still enabled leaves systemd restarting a script this run has just deleted,
+# so the uninstaller has to turn both halves of the pair off.
+check "turns off the stale pair's watcher as well as its timer" \
+    grep -qF -- "disable --now $STALE-watch.service" "$SYSTEMCTL_CALLS"
 check "and says which one it was" \
     grep -qF "left by another name: $STALE" <<<"$UNINSTALL_OUT"
 check_absent "removes the timer interval drop-in with the units" \

@@ -524,6 +524,11 @@ STRINGS = {
         "auth": "授权可能已过期，需要重新授权 rclone 远程",
         "access": "访问检查在两侧没找到标记文件，本次没有改动任何东西；用 onedrive-check-access 建回标记，或先修好读不到的那一侧。不要为此跑 --resync",
         "Check file names": "检查文件名",
+        "Diagnostics…": "诊断…",
+        "Diagnostics": "诊断",
+        "Running the diagnostics…": "正在运行诊断…",
+        "What onedrive-doctor found:": "onedrive-doctor 的报告：",
+        "onedrive-doctor is not installed": "没有安装 onedrive-doctor",
         "Checking file names…": "正在检查文件名…",
         "onedrive-check is not installed": "没有找到 onedrive-check 脚本",
         "Nothing needs fixing.": "没有需要处理的名字。",
@@ -1421,14 +1426,16 @@ class Tray:
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _show_check(self, report, clean):
+    def _show_check(self, report, clean, title=None, blurb=None):
         self.check_busy = False
-        dialog = Gtk.Dialog(self.t("Check file names"))
+        dialog = Gtk.Dialog(title or self.t("Check file names"))
         dialog.add_button(self.t("Close"), Gtk.ResponseType.CLOSE)
         box = dialog.get_content_area()
         box.set_spacing(6)
-        label = Gtk.Label(label=self.t("Nothing needs fixing.") if clean else
-                          self.t("These will fail or be renamed:"))
+        if blurb is None:
+            blurb = (self.t("Nothing needs fixing.") if clean else
+                     self.t("These will fail or be renamed:"))
+        label = Gtk.Label(label=blurb)
         label.set_xalign(0)
         box.pack_start(label, False, False, 0)
 
@@ -1446,6 +1453,32 @@ class Tray:
         dialog.run()
         dialog.destroy()
         return False
+
+    def _diagnose(self, *_):
+        """Run onedrive-doctor and show its report.
+
+        The README tells a user to run this first when something looks wrong, and
+        the point of the tray is not needing a terminal. The script is read-only
+        and takes a moment, so it runs off the main loop the way the name check
+        does.
+        """
+        if self.check_busy:
+            return
+        cmd = sibling_script("onedrive-doctor")
+        if not cmd:
+            self.notify(APP_NAME, self.t("onedrive-doctor is not installed"))
+            return
+
+        self.check_busy = True
+        self.notify(APP_NAME, self.t("Running the diagnostics…"))
+
+        def worker():
+            ok, report = run_script(cmd)
+            GLib.idle_add(self._show_check, report, ok,
+                          self.t("Diagnostics"),
+                          self.t("What onedrive-doctor found:"))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _refresh_now(self):
         """Run one state refresh from an idle callback, exactly once."""
@@ -1552,6 +1585,7 @@ class Tray:
 
         self.menu.append(Gtk.SeparatorMenuItem())
         self._add(self.t("Check file names"), self._check_names)
+        self._add(self.t("Diagnostics…"), self._diagnose)
         self._add(self.t("Re-authorise OneDrive…"), self.on_reauth)
         self._add(self.t("Rebuild sync baseline (resync)…"), self.on_resync)
 

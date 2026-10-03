@@ -89,7 +89,10 @@ cat > "$WORK/stubs/rclone" <<STUB
 printf 'rclone %s\n' "\$*" >> "$WORK/calls/calls"
 case "\$1" in
     about) [ -f "$WORK/calls/quota-json" ] && cat "$WORK/calls/quota-json" ;;
-    lsf)   [ -f "$WORK/calls/folders" ] && cat "$WORK/calls/folders" ;;
+    # A listing that fails is what remote_folders() reports as None, so one
+    # marker file is all a scenario needs to ask for one.
+    lsf)   [ -f "$WORK/calls/rclone-lsf-fail" ] && exit 1
+           [ -f "$WORK/calls/folders" ] && cat "$WORK/calls/folders" ;;
 esac
 exit 0
 STUB
@@ -511,6 +514,49 @@ def scenario_folders():
     return data
 
 
+def scenario_folders_failed():
+    """A folder listing that failed keeps the previous one.
+
+    remote_folders() answers None when rclone cannot list the remote. Storing
+    that replaced the last listing with nothing, so the submenu collapsed to one
+    greyed "Loading…" row: a folder the user had unticked could not be ticked
+    again until the half-hour refresh, and the menu said nothing was there.
+    """
+    tray = MODULE.Tray(CFG)
+    # The listing the tray asks for at startup has to land before one is seeded,
+    # or its answer would arrive after this one and replace it.
+    wait_for(lambda: not tray.folders_busy, 8.0)
+    tray.folders = ["Docs", "Music"]
+    tray.folders_seen = ["Docs", "Music"]
+    tray._build_folder_menu()
+    pump(0.3)
+    data = {"labels_before": visible_labels(tray.menu)}
+    # The stub refuses every listing from here on.
+    failure = os.path.join(os.environ["TRAY_CALLS"], "rclone-lsf-fail")
+    with open(failure, "w", encoding="utf-8"):
+        pass
+    try:
+        clear_calls()
+        tray.refresh_folders()
+        data["asked"] = wait_for(
+            lambda: any("lsf" in line for line in call_lines()), 8.0)
+        data["settled"] = wait_for(lambda: not tray.folders_busy, 8.0)
+        pump(0.5)
+        data["folders_after"] = (list(tray.folders)
+                                 if tray.folders is not None else None)
+        # What the poll does when the listing changed is rebuild the submenu; the
+        # same call renders whatever self.folders now holds.
+        tray._build_folder_menu()
+        pump(0.3)
+        data["labels_after"] = visible_labels(tray.menu)
+    finally:
+        try:
+            os.remove(failure)
+        except OSError:
+            pass
+    return data
+
+
 def scenario_folder_delete():
     """A local delete is only ever offered for one ordinary component.
 
@@ -863,6 +909,47 @@ def scenario_settings_save():
         "autostart": read_text(MODULE.AUTOSTART),
         "calls": call_lines(),
     }
+    dialog.destroy()
+    return data
+
+
+def scenario_settings_bandwidth():
+    """A bandwidth value the list does not offer survives a Save.
+
+    BW_LIMIT is a free string in the config file, and rclone takes sizes the
+    window's list does not hold. 1.5M is one of them: the combo had no entry for
+    it, so get_active_id() returned None and any Save wrote BW_LIMIT="" over a
+    limit that was working.
+
+    values() is asked twice: once as the window really stands, and once with the
+    selection cleared, which is the None get_active_id() the fallback in values()
+    exists for. Appending the value is what keeps the first answer right, and the
+    two together are what this asserts.
+    """
+    tray = MODULE.Tray(CFG)
+    pump(0.3)
+    dialog = MODULE.SettingsDialog(tray)
+    dialog.show_all()
+    pump(0.3)
+    # Read what is on screen before touching it: combo_texts() selects every row
+    # in turn and puts the selection back.
+    shown = dialog.combo_bw.get_active_text() or ""
+    data = {
+        "shown": shown,
+        "choices": combo_texts(dialog.combo_bw),
+        "values": dialog.values(),
+        "original": dialog.original["BW_LIMIT"],
+    }
+    dialog.combo_bw.set_active(-1)
+    data["values_no_selection"] = dialog.values()
+    # Put the window back the way it was before saving it.
+    dialog.combo_bw.set_active_id(MODULE.bw_id(data["original"]))
+    dialog.on_save()
+    saved = wait_for(lambda: dialog.done or dialog.failures, 20.0)
+    pump(0.5)
+    data["saved"] = bool(saved and dialog.done)
+    data["failures"] = dialog.failures
+    data["config_after"] = read_text(MODULE.CONFIG_FILE)
     dialog.destroy()
     return data
 
@@ -1341,6 +1428,17 @@ def scenario_pause_recovery():
             "notices": list(shown),
             "auto_seen": getattr(tray, "auto_seen", None),
         }
+        if case == "fail":
+            # The recovery re-enabled the units through _set_units, and the poll
+            # that follows has to ask systemctl again rather than reuse the
+            # "disabled" it cached while the pair was paused. The cached answer
+            # describes the units as they were before, and the menu then says
+            # automatic sync is off for up to half a minute.
+            data["settled"] = wait_for(
+                lambda: getattr(tray, "auto_seen", None) in ("on", "off"), 12.0)
+            pump(0.3)
+            data["auto_seen_after"] = getattr(tray, "auto_seen", None)
+            data["pause_label_after"] = tray.item_pause.get_label() or ""
     finally:
         MODULE.Notify = real_notify
     return data
@@ -1397,6 +1495,18 @@ def scenario_config_reload():
     MODULE.update_config_file(MODULE.CONFIG_FILE, {"NOTIFY_ON_SUCCESS": "0"})
     data["notify_followed"] = wait_for(
         lambda: str(tray.cfg.get("NOTIFY_ON_SUCCESS")) == "0", 8.0)
+
+    # UNIT_NAME is not one of the live settings. self.service, self.timer and
+    # self.watch were resolved from it when the tray started and every poll keeps
+    # asking about those, so a reload that moved the name would leave the settings
+    # window writing a drop-in for a unit nothing polls. The calls below are what
+    # the poll asks for; the config is what the settings window would read.
+    clear_calls()
+    MODULE.update_config_file(MODULE.CONFIG_FILE, {"UNIT_NAME": "zmoved"})
+    pump(4.5)                      # one poll, which is where the reload happens
+    data["unit_after"] = str(tray.cfg.get("UNIT_NAME") or "")
+    data["unit"] = str(tray.unit)
+    data["unit_calls"] = call_lines()
     return data
 
 
@@ -1447,6 +1557,21 @@ def scenario_manual_missed():
         tray.was_syncing = True
         tray._announce_finish(False, "ok", "14:05", "")
         data["notices_after"] = list(shown)
+
+        # The other side of the same coin: while the start is still in flight
+        # nothing may be counted, because systemd has been asked and the run has
+        # simply not appeared yet. Expiring the request here would forget a run
+        # that is slow to come up, and its success would then be announced as
+        # somebody else's.
+        tray.was_syncing = False
+        tray.busy = True
+        tray.manual_requested = True
+        tray.manual_seen_syncing = False
+        tray.manual_ticks = 0
+        for _ in range(3):
+            tray._announce_finish(False, "ok", "14:10", "")
+        data["kept_while_busy"] = bool(tray.manual_requested)
+        tray.busy = False
     finally:
         MODULE.Notify = real_notify
     return data
@@ -1587,13 +1712,51 @@ def scenario_no_remote():
             "stderr": proc.stderr, "config_file": path}
 
 
+def scenario_diagnostics():
+    """Diagnostics… runs onedrive-doctor and shows what it printed.
+
+    The README tells a user to run this first when something looks wrong, and the
+    point of the tray is not needing a terminal. The wiring is what this checks:
+    that the tray asks for the doctor, hands its output to the dialog, and uses the
+    diagnostics wording rather than the name check's.
+    """
+    tray = build()
+    asked = []
+    shown = []
+    real_sibling = MODULE.sibling_script
+    real_run = MODULE.run_script
+    real_show = MODULE.Tray._show_check
+    MODULE.sibling_script = lambda name: (asked.append(name) or "/stub/onedrive-doctor")
+    MODULE.run_script = lambda cmd, timeout=900: (
+        True, "ok   rclone    1.75 at /usr/local/bin/rclone\n"
+              "warn log       the newest failure hint is a network problem\n")
+
+    def capture(self, report, clean, title=None, blurb=None):
+        shown.append({"report": report, "clean": clean, "title": title,
+                      "blurb": blurb})
+        return False
+
+    MODULE.Tray._show_check = capture
+    try:
+        tray._diagnose()
+        data = {"ran": wait_for(lambda: bool(shown), 8.0), "asked": asked,
+                "shown": shown}
+    finally:
+        MODULE.sibling_script = real_sibling
+        MODULE.run_script = real_run
+        MODULE.Tray._show_check = real_show
+    return data
+
+
 SCENARIOS = {
     "menus": scenario_menus,
+    "diagnostics": scenario_diagnostics,
     "quota": scenario_quota,
     "sync": scenario_sync,
     "pause-durations": scenario_pause_durations,
     "timer-state": scenario_timer_state,
     "folders": scenario_folders,
+    "folders-failed": scenario_folders_failed,
     "excluded-name": scenario_excluded_name,
     "folder-delete": scenario_folder_delete,
     "pause-recovery": scenario_pause_recovery,
@@ -1602,6 +1765,7 @@ SCENARIOS = {
     "lock-second": scenario_lock_second,
     "reauth": scenario_reauth,
     "settings-view": scenario_settings_view,
+    "settings-bandwidth": scenario_settings_bandwidth,
     "settings-markers": scenario_settings_markers,
     "settings-save": scenario_settings_save,
     "settings-fail": scenario_settings_fail,
@@ -1922,6 +2086,19 @@ if "paused" in d["pause_label"].lower():
     print("the menu still claims a pause: %r" % (d["pause_label"],))
     raise SystemExit(1)
 '
+    # The units were just turned back on by the tray itself, and the enabled
+    # answer is cached to save a fork per tick. The poll that follows has to ask
+    # again: reusing the "disabled" from before the recovery says automatic sync
+    # is off, which is the opposite of what the recovery just did.
+    check "the poll after the recovery believes the units are on again" json_py '
+if not d["settled"]:
+    print("the poll never answered: auto_seen=%r" % (d["auto_seen_after"],))
+    raise SystemExit(1)
+if d["auto_seen_after"] != "on":
+    print("the tray reports %r with the label %r, though the units were enabled"
+          % (d["auto_seen_after"], d["pause_label_after"]))
+    raise SystemExit(1)
+'
 fi
 rm -f "$WORK/calls/systemd-run-fail" "$WORK/calls/timer-disabled" \
       "$WORK/calls/pause-timer-active" \
@@ -1998,6 +2175,20 @@ if not d["notify_followed"]:
     print("NOTIFY_ON_SUCCESS did not reach the running tray")
     raise SystemExit(1)
 '
+    check "a reload never moves the unit the poll asks about" json_py '
+if d["unit_after"] != d["unit"]:
+    print("the config now says UNIT_NAME=%r while the tray polls %r"
+          % (d["unit_after"], d["unit"]))
+    raise SystemExit(1)
+if d["unit"] != "ztraytest":
+    print("the tray is polling %r, not the configured unit" % (d["unit"],))
+    raise SystemExit(1)
+if not any("is-active ztraytest.service ztraytest.timer" in x
+           for x in d["unit_calls"]):
+    print("no poll asked about ztraytest after the reload: %r"
+          % (d["unit_calls"],))
+    raise SystemExit(1)
+'
     check "a key that is not live leaves the running tray alone" json_py '
 if not d["unrelated_kept_item"]:
     print("the menu was rebuilt for a key nothing live uses")
@@ -2053,6 +2244,31 @@ if run_driver folders; then
     check "the menu and the file still agree after a failed write" \
         json_expr "d['excluded_after_failure'] == ['Music'] and d['check_states']['Docs'] and not d['check_states']['Music']"
 fi
+
+title "A folder listing that failed"
+# remote_folders() answers None when rclone cannot list the remote, and storing
+# that replaced the last listing with nothing: the submenu collapsed to one
+# greyed "Loading…" row until the half-hour refresh, and a folder the user had
+# unticked could not be ticked again.
+if run_driver folders-failed; then
+    check "a listing that failed leaves the folders the menu already had" json_py '
+if not d["asked"] or not d["settled"]:
+    print("the failing listing was never asked for: %r" % (d,))
+    raise SystemExit(1)
+if d["folders_after"] != ["Docs", "Music"]:
+    print("the last listing became %r" % (d["folders_after"],))
+    raise SystemExit(1)
+if "Loading…" in d["labels_after"]:
+    print("the submenu went back to Loading…: %r" % (d["labels_after"],))
+    raise SystemExit(1)
+missing = [name for name in ("Docs", "Music") if name not in d["labels_after"]]
+if missing:
+    print("these folders left the menu: %r (it was %r)"
+          % (missing, d["labels_before"]))
+    raise SystemExit(1)
+'
+fi
+rm -f "$WORK/calls/rclone-lsf-fail"
 
 title "A folder name the list cannot hold"
 # Both readers of exclude-folders.txt treat a line starting with # as a comment,
@@ -2475,6 +2691,47 @@ if not any("\u4e00" <= c <= "\u9fff" for c in d["status_label"]):
 '
 fi
 
+title "A bandwidth value the list does not offer"
+# BW_LIMIT is a free string in the config file: rclone takes sizes the window's
+# list does not hold, and 1.5M is one of them. The combo had no entry for it, so
+# get_active_id() returned None and the next Save wrote BW_LIMIT="" over a limit
+# that was working. Its own home keeps the rewrite away from the other cases.
+BW_HOME="$WORK/bw-home"
+mkdir -p "$BW_HOME/rclone-onedrive-tray"
+cat > "$BW_HOME/rclone-onedrive-tray/config" <<EOF
+REMOTE="traytest-remote:"
+LOCAL="$BW_HOME/local"
+UNIT_NAME="ztraytest"
+LOG="$WORK/cache/sync.log"
+UI_LANG="en"
+INTERVAL_MIN="5"
+WATCH="1"
+BW_LIMIT="1.5M"
+EOF
+if run_driver settings-bandwidth XDG_CONFIG_HOME="$BW_HOME"; then
+    check "a hand-set bandwidth is on the list and survives a Save" json_py '
+if d["original"] != "1.5M":
+    print("the dialog did not read the config: %r" % (d["original"],))
+    raise SystemExit(1)
+if d["shown"] != "1.5M" or "1.5M" not in d["choices"]:
+    print("the combo shows %r, out of %r" % (d["shown"], d["choices"]))
+    raise SystemExit(1)
+if d["values"]["BW_LIMIT"] != "1.5M":
+    print("the widgets read back %r" % (d["values"]["BW_LIMIT"],))
+    raise SystemExit(1)
+if d["values_no_selection"]["BW_LIMIT"] != "1.5M":
+    print("with no entry selected the widgets read back %r"
+          % (d["values_no_selection"]["BW_LIMIT"],))
+    raise SystemExit(1)
+if not d["saved"] or d["failures"]:
+    print("saved=%r failures=%r" % (d["saved"], d["failures"]))
+    raise SystemExit(1)
+if "BW_LIMIT=\"1.5M\"" not in d["config_after"]:
+    print("the config now holds: %r" % (d["config_after"],))
+    raise SystemExit(1)
+'
+fi
+
 title "Writing the config in place"
 # The file is sourced by onedrive-sync with `.`, so a value the dialog writes
 # has to survive a round trip through the shell unchanged.
@@ -2865,9 +3122,37 @@ if not d["forgotten"]:
     print("the manual request outlived a run that was never observed")
     raise SystemExit(1)
 '
+    # The same two ticks, but with the start still in flight: systemd has been
+    # asked and the run has not appeared yet, so there is nothing yet to expire.
+    check "a request whose start is still in flight is not expired" \
+        json_expr "d['kept_while_busy']"
     check "and the scheduled success after it stays quiet" json_py '
 if d["notices_after"]:
     print("notifications: %r" % (d["notices_after"],))
+    raise SystemExit(1)
+'
+fi
+
+title "Diagnostics… runs the doctor"
+if run_driver diagnostics; then
+    check "the tray asks for onedrive-doctor" json_py '
+if d["asked"] != ["onedrive-doctor"]:
+    print("asked for %r" % (d["asked"],))
+    raise SystemExit(1)
+'
+    check "and shows what it printed, under its own heading" json_py '
+if not d["ran"] or not d["shown"]:
+    print("nothing reached the dialog")
+    raise SystemExit(1)
+got = d["shown"][0]
+if "rclone" not in got["report"]:
+    print("report: %r" % (got["report"],))
+    raise SystemExit(1)
+if "diagnostic" not in (got["title"] or "").lower():
+    print("title: %r" % (got["title"],))
+    raise SystemExit(1)
+if got["blurb"] == "Nothing needs fixing.":
+    print("the doctor report was announced with the name check wording")
     raise SystemExit(1)
 '
 fi
