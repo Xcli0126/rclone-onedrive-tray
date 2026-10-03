@@ -170,6 +170,49 @@ run "a second --yes run overwrites it instead of aborting" 0 "Wrote" \
 check "and the second run's value is the one on disk" \
     grep -qxF 'INTERVAL_MIN="11"' "$RERUN_CFG"
 
+# ---------------------------------------------------------------- what a re-run keeps
+# ask() returns the prompt's default without reading anything under --yes or
+# when stdin is not a terminal. The exclude list was truncated on every run and
+# the example filters were copied straight over the file, so the documented
+# scripted re-run replaced hand-written rules and emptied the folder list; the
+# caches those rules kept out then started syncing.
+title "what a scripted re-run of the wizard keeps"
+KEEP_HOME="$WORK/keep-home"
+KEEP_CFG_DIR="$KEEP_HOME/.config/rclone-onedrive-tray"
+KEEP_FILTERS="$KEEP_CFG_DIR/filters.txt"
+KEEP_EXCLUDES="$KEEP_CFG_DIR/exclude-folders.txt"
+rm -rf "$KEEP_HOME"; mkdir -p "$KEEP_HOME"
+env HOME="$KEEP_HOME" XDG_CONFIG_HOME="$KEEP_HOME/.config" \
+    XDG_CACHE_HOME="$KEEP_HOME/.cache" \
+    bash "$SRC_DIR/setup.sh" --remote "$REMOTE" --local "$KEEP_HOME/OneDrive" \
+        --filters obsidian --skip-folders "Archive" --interval 9 \
+        --unit-name zz-keep-probe --yes --no-install >/dev/null 2>&1
+printf -- '- /my-own-rule/**\n' >> "$KEEP_FILTERS"
+printf 'Handwritten\n' >> "$KEEP_EXCLUDES"
+run "a scripted re-run says which files it kept" 0 "kept the existing filters.txt" \
+    env HOME="$KEEP_HOME" XDG_CONFIG_HOME="$KEEP_HOME/.config" \
+        XDG_CACHE_HOME="$KEEP_HOME/.cache" \
+    bash "$SRC_DIR/setup.sh" --remote "$REMOTE" --local "$KEEP_HOME/OneDrive" \
+        --interval 9 --unit-name zz-keep-probe --yes --no-install
+check "and the hand-written filter rule survives that run" \
+    grep -qxF -- '- /my-own-rule/**' "$KEEP_FILTERS"
+check "and the hand-written exclude entry survives it" \
+    grep -qxF 'Handwritten' "$KEEP_EXCLUDES"
+
+# The flags, and only the flags, replace the two files. An explicitly empty
+# --skip-folders means "clear the list", which used to die inside bash.
+run "an explicit --skip-folders with no value clears the list" 0 "Wrote" \
+    env HOME="$KEEP_HOME" XDG_CONFIG_HOME="$KEEP_HOME/.config" \
+        XDG_CACHE_HOME="$KEEP_HOME/.cache" \
+    bash "$SRC_DIR/setup.sh" --remote "$REMOTE" --local "$KEEP_HOME/OneDrive" \
+        --filters none --skip-folders "" --interval 9 \
+        --unit-name zz-keep-probe --yes --no-install
+if grep -qxF '# no exclusions' "$KEEP_FILTERS" && [ ! -s "$KEEP_EXCLUDES" ]; then
+    ok "and --filters none replaced the filters while the empty list was cleared"
+else
+    bad "the flags did not replace the files: filters='$(head -1 "$KEEP_FILTERS")' excludes=$(wc -c < "$KEEP_EXCLUDES") bytes"
+fi
+
 # The first-sync prompt is written "(Y/n)" and was tested with = "y", so the
 # capital the prompt advertises meant "no". script(1) gives the wizard a real
 # terminal, which is the only way ask() reads anything at all. The sync it would
@@ -204,6 +247,25 @@ rm -f "$PTY_HOME/sync-calls"
 pty_setup 'Y\nn\n'
 check "an n at the same prompt leaves the first sync to the user" \
     test ! -s "$PTY_HOME/sync-calls"
+
+# With no terminal and no --yes, ask() hands back the (Y/n) prompt's default, so
+# the run started the first sync on its own. Under --no-install the wrapper was
+# never installed: the shell printed its "No such file" error and the script
+# went on to print "Done" over it.
+NOSYNC_HOME="$WORK/nosync-home"
+rm -rf "$NOSYNC_HOME"; mkdir -p "$NOSYNC_HOME"
+NOSYNC_OUT="$(env HOME="$NOSYNC_HOME" XDG_CONFIG_HOME="$NOSYNC_HOME/.config" \
+    XDG_CACHE_HOME="$NOSYNC_HOME/.cache" \
+    bash "$SRC_DIR/setup.sh" --remote "$REMOTE" --local "$NOSYNC_HOME/OneDrive" \
+        --filters none --unit-name zz-nosync-probe --no-install </dev/null 2>&1)"
+NOSYNC_RC=$?
+if [ "$NOSYNC_RC" -eq 0 ] && grep -qF 'skipping the first sync' <<<"$NOSYNC_OUT" &&
+        ! grep -qF 'No such file' <<<"$NOSYNC_OUT"; then
+    ok "a wizard run with no installed wrapper skips the first sync"
+else
+    bad "the first sync ran against a wrapper that is not installed (rc=$NOSYNC_RC)"
+    printf '%s\n' "$NOSYNC_OUT" | tail -4 | sed 's/^/        /'
+fi
 
 # ---------------------------------------------------------------- the install
 title "install.sh via setup.sh"
@@ -240,6 +302,117 @@ if command -v systemd-analyze >/dev/null 2>&1; then
 else
     skip "systemd-analyze is not installed; unit syntax unchecked"
 fi
+
+# ---------------------------------------------------------------- the autostart entry
+# The entry is the tray's "Start tray at login" setting: unticking the box
+# removes the file and the tray reads its presence. install.sh rewrote it on
+# every run, so `git pull && ./install.sh` turned the setting back on with no
+# message. It is written for a first install and refreshed when it is already
+# there; on a re-run whose entry was removed, it stays removed.
+title "the autostart entry on a re-run"
+AUTOSTART_FILE="$XDG_CONFIG_HOME/autostart/rclone-onedrive-tray.desktop"
+rm -f "$AUTOSTART_FILE"
+run "a re-run leaves a removed autostart entry removed" 0 "left absent" \
+    bash "$SRC_DIR/install.sh" --prefix "$HOME/.local" --no-start
+check_absent "and the entry is still absent afterwards" "$AUTOSTART_FILE"
+
+# ---------------------------------------------------------------- the interval drop-in
+# The timer unit is written from INTERVAL_MIN here, but the tray's settings
+# dialog writes OnUnitInactiveSec into a drop-in beside it and a drop-in wins.
+# An old one silently overrode a config edit, so the config owns the interval.
+title "the timer interval drop-in"
+DROPIN_HOME="$WORK/dropin-home"
+DROPIN_CFG_DIR="$DROPIN_HOME/.config/rclone-onedrive-tray"
+DROPIN_UNIT_DIR="$DROPIN_HOME/.config/systemd/user"
+DROPIN_FILE="$DROPIN_UNIT_DIR/zz-dropin-probe.timer.d/interval.conf"
+rm -rf "$DROPIN_HOME"
+mkdir -p "$DROPIN_CFG_DIR" "$DROPIN_UNIT_DIR/zz-dropin-probe.timer.d"
+cat > "$DROPIN_CFG_DIR/config" <<EOF
+REMOTE="$REMOTE"
+LOCAL="$DROPIN_HOME/OneDrive"
+UNIT_NAME="zz-dropin-probe"
+INTERVAL_MIN="5"
+WATCH="0"
+EOF
+printf '# Set by the tray settings dialog.\n[Timer]\nOnUnitInactiveSec=42min\n' \
+    > "$DROPIN_FILE"
+run "a drop-in that disagrees with INTERVAL_MIN says what it did" 0 \
+    "it now says 5min" \
+    env HOME="$DROPIN_HOME" XDG_CONFIG_HOME="$DROPIN_HOME/.config" \
+        XDG_CACHE_HOME="$DROPIN_HOME/.cache" XDG_DATA_HOME="$DROPIN_HOME/.data" \
+    bash "$SRC_DIR/install.sh" --prefix "$DROPIN_HOME/.local" --no-start
+check "and the drop-in now holds the config's value" \
+    grep -qxF 'OnUnitInactiveSec=5min' "$DROPIN_FILE"
+
+# ---------------------------------------------------------------- the watcher unit
+# install.sh wrote <unit>-watch.service only when WATCH=1, and nothing ever
+# disabled one. WATCH=0 therefore left an old watcher running, and WATCH=1 after
+# a WATCH=0 install had no unit file for the settings switch to enable. The unit
+# is written on every run now and the enable step decides what to do with it.
+title "the watcher unit and WATCH"
+WATCH_HOME="$WORK/watch-home"
+WATCH_CFG_DIR="$WATCH_HOME/.config/rclone-onedrive-tray"
+WATCH_UNIT_DIR="$WATCH_HOME/.config/systemd/user"
+WATCH_STUB_DIR="$WATCH_HOME/.local/bin/stubs"
+WATCH_CALLS="$WORK/watch-systemctl-calls"
+WATCH_PROBE="zz-watch-probe"
+rm -rf "$WATCH_HOME"
+mkdir -p "$WATCH_CFG_DIR" "$WATCH_STUB_DIR"
+cat > "$WATCH_CFG_DIR/config" <<EOF
+REMOTE="$REMOTE"
+LOCAL="$WATCH_HOME/OneDrive"
+UNIT_NAME="$WATCH_PROBE"
+INTERVAL_MIN="5"
+WATCH="0"
+EOF
+# The stub answers the FragmentPath probe with the unit this run writes, so the
+# enable branch is the one exercised, and it records every call it was handed.
+cat > "$WATCH_STUB_DIR/systemctl" <<EOF
+#!/bin/bash
+printf '%s\n' "\$*" >> "$WATCH_CALLS"
+case "\$*" in
+    *"show -p FragmentPath"*) printf '%s\n' "$WATCH_UNIT_DIR/$WATCH_PROBE.timer" ;;
+esac
+exit 0
+EOF
+chmod +x "$WATCH_STUB_DIR/systemctl"
+: > "$WATCH_CALLS"
+run "a WATCH=0 install writes the watcher unit and says it disabled it" 0 \
+    "watcher disabled" \
+    env HOME="$WATCH_HOME" XDG_CONFIG_HOME="$WATCH_HOME/.config" \
+        XDG_CACHE_HOME="$WATCH_HOME/.cache" XDG_DATA_HOME="$WATCH_HOME/.data" \
+        PATH="$WATCH_STUB_DIR:$PATH" \
+    bash "$SRC_DIR/install.sh" --prefix "$WATCH_HOME/.local" --no-start
+check "and the unit file the settings switch needs is there" \
+    test -f "$WATCH_UNIT_DIR/$WATCH_PROBE-watch.service"
+check "and systemd was asked to disable that watcher" \
+    grep -qF -- "disable --now $WATCH_PROBE-watch.service" "$WATCH_CALLS"
+
+# An update rewrites the watcher unit, but `enable --now` does nothing to a unit
+# that is already active, and the watcher is a loop: without a restart it keeps
+# running the old code until reboot.
+printf '#!/bin/bash\nexit 0\n' > "$WATCH_STUB_DIR/inotifywait"
+chmod +x "$WATCH_STUB_DIR/inotifywait"
+sed -i 's/^WATCH=.*/WATCH="1"/' "$WATCH_CFG_DIR/config"
+: > "$WATCH_CALLS"
+env HOME="$WATCH_HOME" XDG_CONFIG_HOME="$WATCH_HOME/.config" \
+    XDG_CACHE_HOME="$WATCH_HOME/.cache" XDG_DATA_HOME="$WATCH_HOME/.data" \
+    PATH="$WATCH_STUB_DIR:$PATH" \
+    bash "$SRC_DIR/install.sh" --prefix "$WATCH_HOME/.local" --no-start \
+    >"$WORK/watch-install-out.txt" 2>&1
+check "an install that rewrites the watcher unit restarts a running one" \
+    grep -qF -- "try-restart $WATCH_PROBE-watch.service" "$WATCH_CALLS"
+
+# A UNIT_NAME changed between installs leaves the old timer enabled forever, and
+# nothing said so. The timer is the entry point systemd starts.
+title "a sibling timer left by an earlier unit name"
+printf '[Timer]\nOnUnitInactiveSec=9min\n' > "$WATCH_UNIT_DIR/zz-old-name.timer"
+run "an install warns about a sibling timer that is not the configured name" 0 \
+    "systemctl --user disable --now zz-old-name.timer" \
+    env HOME="$WATCH_HOME" XDG_CONFIG_HOME="$WATCH_HOME/.config" \
+        XDG_CACHE_HOME="$WATCH_HOME/.cache" XDG_DATA_HOME="$WATCH_HOME/.data" \
+        PATH="$WATCH_STUB_DIR:$PATH" \
+    bash "$SRC_DIR/install.sh" --prefix "$WATCH_HOME/.local" --no-start
 
 # ---------------------------------------------------------------- a prefix with a space
 # Exec= in a desktop entry is not a shell word list: the parser splits it on
@@ -283,6 +456,12 @@ PCT_DESKTOP="$PCT_HOME/.config/autostart/rclone-onedrive-tray.desktop"
 PCT_EXPECT="${PCT_HOME//%/%%}/.local/bin/onedrive-tray"
 check "a percent in the path is escaped as a literal field code" \
     grep -qxF "Exec=\"$PCT_EXPECT\"" "$PCT_DESKTOP"
+# The same run writes the service unit, where a lone % starts a specifier (%h,
+# %U, %i), and nothing read it: deleting the escape in systemd_exec_arg left
+# every suite green.
+PCT_UNIT="$PCT_HOME/.config/systemd/user/onedrive-sync.service"
+check "the unit escapes the percent in ExecStart the same way" \
+    grep -qxF "ExecStart=\"${PCT_HOME//%/%%}/.local/bin/onedrive-sync\"" "$PCT_UNIT"
 
 # ---------------------------------------------------------------- the wrapper
 title "onedrive-sync against a stub remote"
@@ -1088,6 +1267,10 @@ cat > "$DOC_STUBS/systemctl" <<'STUB'
 #!/bin/bash
 case "$*" in
     *"show -p FragmentPath"*) echo "/run/user/1000/systemd/user/docsync.timer" ;;
+    # The watcher has its own state, so the WATCH=0 case can be exercised: the
+    # generic patterns below answer for the timer alone.
+    *"is-enabled "*watch.service*) echo "${DOC_WATCH_ENABLED:-disabled}" ;;
+    *"is-active "*watch.service*)  echo "${DOC_WATCH_ACTIVE:-inactive}" ;;
     *"is-enabled "*) echo "${DOC_TIMER_ENABLED:-enabled}" ;;
     *"is-active "*)  echo "${DOC_TIMER_ACTIVE:-active}" ;;
     *"show -p NextElapseUSecMonotonic"*) echo "12min 3s" ;;
@@ -1145,6 +1328,8 @@ doc_run() {
     env HOME="$d/home" XDG_CONFIG_HOME="$d/cfg" XDG_CACHE_HOME="$d/cache" \
         XDG_DATA_HOME="$d/data" TMPDIR="$d/tmp" PATH="$path" \
         DOC_TIMER_ENABLED="$DOC_TIMER_ENABLED" DOC_TIMER_ACTIVE="$DOC_TIMER_ACTIVE" \
+        DOC_WATCH_ENABLED="${DOC_WATCH_ENABLED:-disabled}" \
+        DOC_WATCH_ACTIVE="${DOC_WATCH_ACTIVE:-inactive}" \
         DOC_LSD_RC="${DOC_LSD_RC:-0}" DOC_LSD_ERR="${DOC_LSD_ERR:-}" \
         DOC_TRAY_PID="${DOC_TRAY_PID:-}" \
         "$DOCTOR_BIN" "$@"
@@ -1226,6 +1411,16 @@ DOC_TIMER_ENABLED="disabled"
 run "a disabled timer is a warning, and the run still exits 0" 0 "is disabled" \
     doc_run "$DOC_FX" --quiet --offline
 DOC_TIMER_ENABLED="enabled"
+
+# WATCH=0 used to be reported ok without asking systemd, so a watcher unit left
+# running by an earlier WATCH=1 install kept starting syncs while the tool built
+# to find that called it healthy.
+doc_fixture watch-off-but-running 'WATCH="0"'
+DOC_WATCH_ENABLED="enabled"; DOC_WATCH_ACTIVE="active"
+run "a watcher left running while WATCH is off is a warning naming the command" 0 \
+    "systemctl --user disable --now docsync-watch.service" \
+    doc_run "$DOC_FX" --quiet --offline
+DOC_WATCH_ENABLED=""; DOC_WATCH_ACTIVE=""
 
 doc_fixture quiet
 DOCTOR_FULL="$(doc_run "$DOC_FX" --offline 2>&1)"
@@ -1401,5 +1596,21 @@ check_absent "--purge removes the configuration directory" "$CFG_DIR"
 # The cache holds the log, the lock and the pause stamp: state that describes the
 # install being removed rather than the user's data.
 check_absent "--purge removes the cache directory" "$XDG_CACHE_HOME/rclone-onedrive-tray"
+
+# The help promised "the configuration and filters" while the run also took the
+# cache and the icon directory, and the final message has to list what it took.
+# A plain run against a directory that is already gone said "configuration kept"
+# about nothing.
+run "the --purge help lists everything it removes" 0 "icon directory" \
+    bash "$SRC_DIR/uninstall.sh" --help
+if grep -qF 'removed' <<<"$PURGE_OUT" && grep -qF 'icon directory' <<<"$PURGE_OUT" &&
+        grep -qF 'pause stamp' <<<"$PURGE_OUT"; then
+    ok "and a --purge run says what it removed, cache and icons included"
+else
+    bad "the --purge run does not list what it removed"
+    printf '%s\n' "$PURGE_OUT" | tail -4 | sed 's/^/        /'
+fi
+run "an uninstall with nothing left to keep says so" 0 "nothing to remove" \
+    bash "$SRC_DIR/uninstall.sh" --prefix "$HOME/.local"
 
 summary

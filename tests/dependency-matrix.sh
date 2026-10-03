@@ -482,5 +482,26 @@ run "no remote and no terminal: refuses instead of hanging" 1 "no rclone remote"
     env -i PATH="$WORK/noremote:$REDUCED" HOME="$HOME" XDG_CONFIG_HOME="$WORK/s2" \
         XDG_CACHE_HOME="$WORK/s2c" bash "$SRC_DIR/setup.sh" --yes --no-install
 
+# Values that reach a unit file or the timer template. A space or a slash in
+# --unit-name produced a unit systemd refuses to load and install.sh then blamed
+# the user manager; --interval abc was swallowed into a five minute timer in
+# silence, and 0 was written into the template so the timer never fired. The
+# check runs before anything is written, so the value is named and the run ends
+# there.
+for bad_unit in "bad name" "bad/name"; do
+    run "--unit-name '$bad_unit' is refused, naming the value" 1 \
+        "invalid --unit-name value: '$bad_unit'" \
+        env -i PATH="$PATH" HOME="$WORK/s3h" XDG_CONFIG_HOME="$WORK/s3" \
+            XDG_CACHE_HOME="$WORK/s3c" \
+        bash "$SRC_DIR/setup.sh" --unit-name "$bad_unit" --yes --no-install
+done
+for bad_interval in abc 0; do
+    run "--interval $bad_interval is refused, naming the value" 1 \
+        "invalid --interval value: '$bad_interval'" \
+        env -i PATH="$PATH" HOME="$WORK/s3h" XDG_CONFIG_HOME="$WORK/s3" \
+            XDG_CACHE_HOME="$WORK/s3c" \
+        bash "$SRC_DIR/setup.sh" --interval "$bad_interval" --yes --no-install
+done
+
 # ---------------------------------------------------------------- summary
 summary

@@ -21,8 +21,9 @@ kill "$(pgrep -f 'python3 .*/onedrive-tray')" ; onedrive-tray &
 ```
 
 `install.sh` keeps an existing `config` and `filters.txt` and tells you so. It
-does rewrite the systemd units from the current templates and the autostart
-entry, and it does not interrupt a sync that is already running.
+rewrites the systemd units from the current templates, and it leaves the autostart
+entry alone if you removed it, so unticking "Start tray at login" survives an
+update. It does not interrupt a sync that is already running.
 
 ## Did the update take effect?
 

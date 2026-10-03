@@ -1346,6 +1346,188 @@ def scenario_pause_recovery():
     return data
 
 
+def scenario_config_reload():
+    """A running tray follows the two live settings in the config file.
+
+    --show-icon, --hide-icon and a --settings window all live in a process that
+    exits, so the file is the only way any of them can reach a tray that is
+    already running. Only the settings that are meant to be live may follow it:
+    this checks that the icon and the language move, and that a key belonging to
+    the next sync leaves the running tray exactly where it was.
+    """
+    tray = build()
+    pump(0.5)
+    data = {
+        "visible_before": bool(tray.icon_visible),
+        "status_before": int(tray.ind.get_status()),
+        "labels_before": visible_labels(tray.menu),
+        "active": int(MODULE.AppIndicator.IndicatorStatus.ACTIVE),
+        "passive": int(MODULE.AppIndicator.IndicatorStatus.PASSIVE),
+    }
+
+    # The icon goes away and the language changes, both written from outside the
+    # process: this is what --hide-icon and a standalone --settings window do.
+    MODULE.update_config_file(MODULE.CONFIG_FILE,
+                              {"SHOW_ICON": "0", "UI_LANG": "zh"})
+    data["hid"] = wait_for(lambda: not tray.icon_visible, 8.0)
+    data["switched"] = wait_for(
+        lambda: any("\u4e00" <= c <= "\u9fff"
+                    for c in "".join(visible_labels(tray.menu))), 8.0)
+    data["visible_after"] = bool(tray.icon_visible)
+    data["status_after"] = int(tray.ind.get_status())
+    data["labels_after"] = visible_labels(tray.menu)
+
+    # A key that belongs to the next sync, not to the running tray. The widget is
+    # remembered by identity: _build_menu() always makes new items, so the same
+    # object is proof that the menu was not rebuilt for a key nothing live uses.
+    item = tray.item_status
+    status_text = tray.item_status.get_label() or ""
+    MODULE.update_config_file(MODULE.CONFIG_FILE, {"INTERVAL_MIN": "15"})
+    pump(1.0)
+    data["unrelated_kept_item"] = tray.item_status is item
+    data["unrelated_labels"] = visible_labels(tray.menu)
+    data["unrelated_visible"] = bool(tray.icon_visible)
+    data["unrelated_status_text"] = tray.item_status.get_label() or ""
+    data["status_text_before"] = status_text
+    data["config_text"] = read_text(MODULE.CONFIG_FILE)
+    return data
+
+
+def scenario_poll_cost():
+    """What one idle tick pays for.
+
+    The tick used to fork systemctl twice and re-read 64 KB of log every three
+    seconds whether or not either had changed. Both are counted here by wrapping
+    the calls the tray makes, so the assertions are about what the tray asked for
+    rather than about a wall clock. The log is this scenario's own file, so what
+    is measured is an idle tray rather than one sharing the suite's log.
+    """
+    counts = {"apply": 0, "tail": 0, "parse": 0}
+    real_tail = MODULE.tail_text
+    real_parse = MODULE.read_last_result
+    real_apply = MODULE.Tray._apply_state
+
+    def tail(path, *args, **kwargs):
+        counts["tail"] += 1
+        return real_tail(path, *args, **kwargs)
+
+    def parse(text):
+        counts["parse"] += 1
+        return real_parse(text)
+
+    def apply_state(self, syncing, timer_state):
+        counts["apply"] += 1
+        return real_apply(self, syncing, timer_state)
+
+    cfg = dict(CFG)
+    cfg["LOG"] = os.path.join(os.path.dirname(cfg["LOG"]), "poll-cost.log")
+    with open(cfg["LOG"], "w", encoding="utf-8") as fh:
+        fh.write("%s INFO  : Bisync successful\n"
+                 % time.strftime("%Y/%m/%d %H:%M:%S"))
+
+    MODULE.tail_text = tail
+    MODULE.read_last_result = parse
+    MODULE.Tray._apply_state = apply_state
+    try:
+        clear_calls()
+        tray = MODULE.Tray(cfg)
+        GLib.timeout_add(200, tray.poll)
+        pump(0.5)                    # the first read of the log lands here
+        base = dict(counts)
+        pump(4.0)                    # the log does not change
+        idle = {key: counts[key] - base[key] for key in counts}
+        calls = call_lines()
+        # Now the log grows, so the next tick has to notice.
+        seen = counts["tail"]
+        with open(cfg["LOG"], "a", encoding="utf-8") as fh:
+            fh.write("%s INFO  : Transferred:   \t1 B / 1 B, 100%%, 1 B/s, "
+                     "ETA 0s\n" % time.strftime("%Y/%m/%d %H:%M:%S"))
+        reread = wait_for(lambda: counts["tail"] > seen, 8.0)
+    finally:
+        MODULE.tail_text = real_tail
+        MODULE.read_last_result = real_parse
+        MODULE.Tray._apply_state = real_apply
+    return {
+        "applies": idle["apply"],
+        "log_reads": idle["tail"],
+        "log_parses": idle["parse"],
+        "reread_on_change": reread,
+        "active_asks": sum(1 for line in calls
+                           if "is-active ztraytest.service ztraytest.timer" in line),
+        "enabled_asks": sum(1 for line in calls
+                            if "is-enabled ztraytest.timer" in line),
+        "calls": calls,
+    }
+
+
+def scenario_notify_manual():
+    """A failed manual run must not make the next scheduled success announce itself.
+
+    manual_requested is what tells a success the user asked for from one the
+    timer ran. It used to be cleared only on the success path, so a manual run
+    that failed stayed marked as manual for the life of the process and the next
+    scheduled success was announced as if the user had started it.
+    """
+    shown = []
+    cfg = dict(CFG)
+    cfg["NOTIFY_ON_SUCCESS"] = "1"
+    log = os.path.join(os.path.dirname(cfg["LOG"]), "manual-notify.log")
+    cfg["LOG"] = log
+    real = MODULE.Notify
+    MODULE.Notify = install_fake_notify(shown)
+    try:
+        tray = MODULE.Tray(cfg)
+        pump(0.3)
+
+        def run(text, manual):
+            del shown[:]
+            with open(log, "w", encoding="utf-8") as fh:
+                fh.write(text)
+            tray.state = None
+            tray.was_syncing = True
+            if manual:
+                tray.manual_requested = True
+            tray._apply_state(False, "enabled")
+            pump(0.3)
+            return list(shown)
+
+        failed = run("2026/01/02 03:05:05 ERROR : [network] remote unreachable\n",
+                     True)
+        # The next run is the timer's. Nothing marks it manual here, because the
+        # tray has to have cleared the flag when the failed run ended.
+        scheduled = run("2026/01/02 03:06:06 INFO  : Bisync successful\n", False)
+        manual = run("2026/01/02 03:07:07 INFO  : Bisync successful\n", True)
+    finally:
+        MODULE.Notify = real
+    return {"failed_bodies": failed, "scheduled_bodies": scheduled,
+            "manual_bodies": manual}
+
+
+def scenario_no_remote():
+    """A config with no REMOTE gets one sentence, not a traceback.
+
+    A hand-edited config can have REMOTE commented out, and a tray started from
+    the autostart entry has no terminal to show a traceback in. This runs the real
+    main() against a config that has REMOTE commented out and reports what it
+    said and how it exited.
+    """
+    import subprocess
+
+    home = os.environ["TRAY_NO_REMOTE_HOME"]
+    os.makedirs(os.path.join(home, "rclone-onedrive-tray"), exist_ok=True)
+    path = os.path.join(home, "rclone-onedrive-tray", "config")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("# REMOTE is commented out.\n"
+                 '#REMOTE="traytest-remote:"\n'
+                 'LOCAL="%s"\n' % os.path.join(WORK, "local"))
+    env = dict(os.environ)
+    env["XDG_CONFIG_HOME"] = home
+    proc = subprocess.run([sys.executable, sys.argv[2]], capture_output=True,
+                          text=True, timeout=120, env=env)
+    return {"exit_code": proc.returncode, "stdout": proc.stdout,
+            "stderr": proc.stderr, "config_file": path}
+
+
 SCENARIOS = {
     "menus": scenario_menus,
     "quota": scenario_quota,
@@ -1366,6 +1548,10 @@ SCENARIOS = {
     "settings-fail": scenario_settings_fail,
     "about": scenario_about,
     "notify": scenario_notify,
+    "notify-manual": scenario_notify_manual,
+    "config-reload": scenario_config_reload,
+    "poll-cost": scenario_poll_cost,
+    "no-remote": scenario_no_remote,
     "icons": scenario_icons,
     "cli-settings": scenario_cli_settings,
 }
@@ -1707,6 +1893,90 @@ if run_driver timer-state TRAY_EXPECT_AUTO=unknown; then
         json_expr "d['auto_seen'] == 'unknown'"
 fi
 rm -f "$WORK/calls/notimer"
+
+title "A running tray follows the config file"
+# --show-icon, --hide-icon and a --settings window all run in a process that
+# exits, and the running tray owns no file watcher: the config file is the only
+# way any of them can reach it. The reload is deliberately narrow, so a key that
+# belongs to the next sync has to leave the running tray exactly where it was.
+# The scenario writes to a private config home so the rewrites cannot leak into
+# the other scenarios, which share $WORK/config.
+RELOAD_HOME="$WORK/reload-home"
+mkdir -p "$RELOAD_HOME/rclone-onedrive-tray"
+cp "$WORK/config/rclone-onedrive-tray/config" \
+   "$RELOAD_HOME/rclone-onedrive-tray/config"
+if run_driver config-reload XDG_CONFIG_HOME="$RELOAD_HOME"; then
+    check "the tray starts with its icon shown, in English" json_py '
+if not d["visible_before"] or d["status_before"] != d["active"]:
+    print("visible=%r status=%r active=%r"
+          % (d["visible_before"], d["status_before"], d["active"]))
+    raise SystemExit(1)
+if "Settings…" not in d["labels_before"]:
+    print("labels: %r" % (d["labels_before"],))
+    raise SystemExit(1)
+'
+    check "a hidden icon in the config hides the running icon" json_py '
+if not d["hid"] or d["visible_after"] or d["status_after"] != d["passive"]:
+    print("hid=%r visible=%r status=%r passive=%r"
+          % (d["hid"], d["visible_after"], d["status_after"], d["passive"]))
+    raise SystemExit(1)
+'
+    check "a language change in the config reaches the running menu" json_py '
+if not d["switched"]:
+    print("the menu never changed language: %r" % (d["labels_after"],))
+    raise SystemExit(1)
+if not any("\u4e00" <= c <= "\u9fff" for c in d["labels_after"]):
+    print("labels after the switch: %r" % (d["labels_after"],))
+    raise SystemExit(1)
+if "Settings…" in d["labels_after"] or "Sync now" in d["labels_after"]:
+    print("still English after the switch: %r" % (d["labels_after"],))
+    raise SystemExit(1)
+'
+    check "a key that is not live leaves the running tray alone" json_py '
+if not d["unrelated_kept_item"]:
+    print("the menu was rebuilt for a key nothing live uses")
+    raise SystemExit(1)
+if d["unrelated_labels"] != d["labels_after"]:
+    print("labels changed: %r -> %r" % (d["labels_after"], d["unrelated_labels"]))
+    raise SystemExit(1)
+if d["unrelated_visible"] != d["visible_after"]:
+    print("visibility changed: %r -> %r"
+          % (d["visible_after"], d["unrelated_visible"]))
+    raise SystemExit(1)
+if d["unrelated_status_text"] != d["status_text_before"]:
+    print("status text changed: %r -> %r"
+          % (d["status_text_before"], d["unrelated_status_text"]))
+    raise SystemExit(1)
+'
+fi
+
+title "What an idle tick costs"
+# The three-second tick used to fork systemctl twice and re-read 64 KB of log
+# every time, whether or not either had changed. Both are counted by the driver,
+# which wraps the calls the tray makes.
+if run_driver poll-cost; then
+    check "an unchanged log is neither re-read nor re-parsed" json_py '
+if d["applies"] < 5:
+    print("only %d ticks landed, so nothing was measured" % (d["applies"],))
+    raise SystemExit(1)
+if d["log_reads"] or d["log_parses"]:
+    print("an unchanged log was read %d times and parsed %d times over %d ticks"
+          % (d["log_reads"], d["log_parses"], d["applies"]))
+    raise SystemExit(1)
+'
+    check "a log that grew is read again" json_expr "d['reread_on_change']"
+    check "the enabled state is not asked on every tick" json_py '
+if d["active_asks"] < 5:
+    print("only %d active-state ticks, so nothing was measured"
+          % (d["active_asks"],))
+    raise SystemExit(1)
+if (d["enabled_asks"] >= d["active_asks"]
+        or d["enabled_asks"] * 3 > d["active_asks"]):
+    print("is-enabled ran %d times for %d ticks"
+          % (d["enabled_asks"], d["active_asks"]))
+    raise SystemExit(1)
+'
+fi
 
 title "Folders to sync"
 if run_driver folders; then
@@ -2335,6 +2605,24 @@ if run_driver notify TRAY_NOTIFY=0; then
     check "a failure is announced even then" json_expr "bool(d['failure_bodies'])"
 fi
 
+title "A manual run that failed"
+# The setting covers "a sync I start", and a scheduled run is meant to stay
+# quiet. A run that failed used to leave the tray marked as if the user had
+# started one, so the next run the timer made was announced as a manual success.
+if run_driver notify-manual; then
+    check "a manual run that succeeds is still announced" json_py '
+if not any("Sync finished" in body for body in d["manual_bodies"]):
+    print("manual bodies: %r" % (d["manual_bodies"],))
+    raise SystemExit(1)
+'
+    check "a scheduled success after a failed manual run stays quiet" json_py '
+if any("Sync finished" in body for body in d["scheduled_bodies"]):
+    print("the scheduled run announced itself: %r (the failure before it was %r)"
+          % (d["scheduled_bodies"], d["failed_bodies"]))
+    raise SystemExit(1)
+'
+fi
+
 title "The status icons"
 if run_driver icons; then
     check "all five states are drawn" json_py '
@@ -2460,6 +2748,29 @@ if "already running" in d["held_stderr"]:
 '
 fi
 
+title "A config with no REMOTE"
+# A hand-edited config can have REMOTE commented out, and a tray started from the
+# autostart entry has no terminal to show a traceback in. The wrapper and the
+# doctor both report this condition; the tray has to say the same kind of thing.
+if run_driver no-remote TRAY_NO_REMOTE_HOME="$WORK/noremote"; then
+    check "the tray exits 1 instead of starting" json_expr "d['exit_code'] == 1"
+    check "and names REMOTE and the file it is missing from" json_py '
+if "REMOTE" not in d["stderr"] or d["config_file"] not in d["stderr"]:
+    print("stderr: %r" % (d["stderr"],))
+    raise SystemExit(1)
+'
+    check "and points at setup.sh or onedrive-doctor" json_py '
+if "setup.sh" not in d["stderr"] and "onedrive-doctor" not in d["stderr"]:
+    print("nothing points at the fix: %r" % (d["stderr"],))
+    raise SystemExit(1)
+'
+    check "and no traceback reaches stderr" json_py '
+if "Traceback" in d["stderr"] or "KeyError" in d["stderr"]:
+    print("stderr: %r" % (d["stderr"],))
+    raise SystemExit(1)
+'
+fi
+
 title "Progress, in the shapes a real run writes"
 # The fixture above feeds one statistics block, the one with a percentage. A real
 # log is mostly the other shape: a run that transfers nothing prints "-" where the
@@ -2504,6 +2815,45 @@ if not got or got.get("pct") != 100 or got.get("speed") != "188 B/s":
 elif got.get("file") != "99-Daily/2026-10-02-dsh.md":
     problems.append("the file in flight was reported as %r" % (got.get("file"),))
 
+if problems:
+    print("; ".join(problems))
+    raise SystemExit(1)
+PY
+
+# rclone writes the file name, then a colon, then the percentage, and a name can
+# hold a colon of its own. A parser that stops at the first colon reports
+# "archive" for "archive:2026/plan.md", and the status line is the tray's only
+# per-file signal, so naming a file that does not exist is worse than naming
+# none. Both shapes rclone writes are checked: the finished one has no space
+# after the colon, the one still in flight has one.
+check "a colon in the file name is not read as the percentage separator" \
+    python3 - "$TRAY" <<'PY'
+import importlib.machinery
+import importlib.util
+import sys
+
+sys.dont_write_bytecode = True
+loader = importlib.machinery.SourceFileLoader("tray_colon", sys.argv[1])
+spec = importlib.util.spec_from_loader("tray_colon", loader)
+module = importlib.util.module_from_spec(spec)
+loader.exec_module(module)
+
+problems = []
+cases = {
+    "finished": ("Transferred:   \t        752 B / 752 B, 100%, 188 B/s, ETA 0s\n"
+                 "Transferring:\n"
+                 " *         archive:2026/plan.md:100% / 752 B, 187 B/s, 0s\n"),
+    "in flight": ("Transferred:   \t        1.5 MiB / 10 MiB, 15%, 250 KiB/s, "
+                  "ETA 1m0s\n"
+                  "Transferring:\n"
+                  " *         archive:2026/plan.md: 15% / 752 B, 187 B/s, 1s\n"),
+}
+for shape, text in cases.items():
+    got = module.read_progress(text, max_age=10 ** 9)
+    if not got:
+        problems.append("the %s block read as None" % shape)
+    elif got.get("file") != "archive:2026/plan.md":
+        problems.append("the %s block named %r" % (shape, got.get("file")))
 if problems:
     print("; ".join(problems))
     raise SystemExit(1)

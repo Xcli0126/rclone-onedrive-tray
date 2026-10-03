@@ -5,7 +5,9 @@
 #   ./uninstall.sh                 remove programs, units (including the timer's
 #                                  interval drop-in) and the autostart entry
 #   ./uninstall.sh --prefix DIR    match a non-default install prefix
-#   ./uninstall.sh --purge         also remove the configuration and filters
+#   ./uninstall.sh --purge         also remove the configuration and the filters,
+#                                  the cache (the log, the lock, the pause stamp)
+#                                  and the icon directory
 #
 # Your synced folder, the rclone remote config, and any conflict/backup files
 # bisync created are never touched.
@@ -33,6 +35,7 @@ done
 BIN_DIR="$PREFIX/bin"
 CONFIG_DIR="$XDG_CONFIG/rclone-onedrive-tray"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/rclone-onedrive-tray"
+DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/rclone-onedrive-tray"
 UNIT_DIR="$XDG_CONFIG/systemd/user"
 AUTOSTART="$XDG_CONFIG/autostart/rclone-onedrive-tray.desktop"
 
@@ -103,16 +106,21 @@ if [ -f "$NM_TARGET" ]; then
 fi
 
 if [ "$PURGE" -eq 1 ]; then
-    say "Removing configuration"
+    say "Removing configuration, filters, cache and icons"
     rm -rf "$CONFIG_DIR"
-    rm -rf "${XDG_DATA_HOME:-$HOME/.local/share}/rclone-onedrive-tray"
+    rm -rf "$DATA_DIR"
     # The cache holds the sync log, the lock and the pause stamp. They describe
     # the install that is being removed, so --purge takes them too; a plain
     # uninstall keeps everything, which is what makes a repair easy.
     rm -rf "$CACHE_DIR"
+    say "removed $CONFIG_DIR (the configuration and the filters)"
+    say "removed $DATA_DIR (the icon directory)"
+    say "removed $CACHE_DIR (the cache: log, lock and pause stamp)"
     warn "the rclone remote config (~/.config/rclone/rclone.conf) was kept"
-else
+elif [ -d "$CONFIG_DIR" ]; then
     warn "configuration kept in $CONFIG_DIR (use --purge to remove it)"
+else
+    say "nothing to remove: $CONFIG_DIR does not exist"
 fi
 
 warn "Left untouched: your synced folder, and any *.conflict* / *-old files"

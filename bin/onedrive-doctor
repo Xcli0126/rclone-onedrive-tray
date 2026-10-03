@@ -408,7 +408,22 @@ case "${WATCH,,}" in
         fi
         have inotifywait || report warn watch "inotifywait is missing (inotify-tools), so the watcher cannot start even once its unit is enabled"
         ;;
-    *) report ok watch "WATCH is off, so no watcher unit is expected" ;;
+    *)
+        if ! have systemctl; then
+            report ok watch "WATCH is off, and systemctl is not on PATH, so the watcher unit cannot be read"
+        else
+            # WATCH off with the unit still running means syncs keep starting on
+            # every local edit. The old line asserted there was no watcher
+            # without asking systemd, so it certified exactly this state healthy.
+            watch_active="$(timeout 10 systemctl --user is-active "${unit}-watch.service" 2>&1 || true)"
+            watch_enabled="$(timeout 10 systemctl --user is-enabled "${unit}-watch.service" 2>&1 || true)"
+            if [ "$watch_active" = active ] || [ "$watch_enabled" = enabled ]; then
+                report warn watch "WATCH is off in the config but ${unit}-watch.service is ${watch_enabled:-unknown}/${watch_active:-unknown}; turn it off with: systemctl --user disable --now ${unit}-watch.service"
+            else
+                report ok watch "WATCH is off and ${unit}-watch.service is ${watch_enabled:-unknown}/${watch_active:-unknown}"
+            fi
+        fi
+        ;;
 esac
 
 tray_pid="$(timeout 5 pgrep -f 'onedrive-tray' 2>/dev/null | head -1 || true)"

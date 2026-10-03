@@ -978,12 +978,15 @@ def read_quota(remote: str):
 # rclone prints a stats block every --stats seconds. Only the last one matters.
 PROG_RE = re.compile(
     r"Transferred:\s+([\d.]+\s*\S+)\s*/\s*([\d.]+\s*\S+),\s*(\d+)%,\s*([\d.]+\s*\S+/s)")
-# rclone writes the file it is working on after a "*", and puts a space
-# after the colon while the transfer is in flight but not once it has
-# finished ("note.md:  0% ..." against "note.md:100% ..."). Requiring that
-# space lost the name on every finished block, which is the shape most
-# stats blocks end with.
-BUSY_RE = re.compile(r"^\s*\*\s+(.+?):\s*", re.M)
+# rclone writes the file it is working on after a "*", then a colon, then the
+# percentage, and it puts a space after the colon while the transfer is in flight
+# but not once it has finished ("note.md:  0% ..." against "note.md:100% ...").
+# Requiring that space lost the name on every finished block, which is the shape
+# most stats blocks end with. Matching the percentage instead of the space keeps
+# both shapes and still walks past a colon inside the name: "archive:2026.md" is
+# one name, and stopping at the first colon reported "archive", a file that does
+# not exist, on the line that is the tray's only per-file signal.
+BUSY_RE = re.compile(r"^\s*\*\s+(.+?):\s*\d+%", re.M)
 STAMP_RE = re.compile(r"^(\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2})", re.M)
 
 
@@ -1017,6 +1020,14 @@ def read_progress(text: str, max_age: int = 30):
 
 
 # ---------------------------------------------------------------- tray
+# How many poll ticks may pass before the timer's enabled state is asked again
+# while the active state has not moved. Twelve ticks are thirty-six seconds at
+# the tray's own three-second cadence, which is short enough that a unit switched
+# over by something other than this tray is noticed promptly and long enough to
+# take the second systemctl fork out of almost every tick.
+ENABLED_EVERY = 12
+
+
 class Tray:
     """The status icon and the menu that drives one bisync pair.
 
@@ -1031,7 +1042,12 @@ class Tray:
         self.service = f"{self.unit}.service"
         self.timer = f"{self.unit}.timer"
         self.watch = f"{self.unit}-watch.service"
-        self.remote = cfg["REMOTE"]
+        # cfg.get(), not cfg["REMOTE"]: load_config() leaves REMOTE to the config
+        # file because it has no sensible default, so a hand-edited config with
+        # the key commented out used to end in a traceback and no icon at all.
+        # main() refuses such a config before it gets here, and this keeps a
+        # caller that builds a Tray itself from raising.
+        self.remote = cfg.get("REMOTE") or ""
         self.local = cfg["LOCAL"]
         self.log = cfg["LOG"]
         self.exclude_file = cfg["EXCLUDE_FOLDERS_FILE"]
@@ -1063,6 +1079,25 @@ class Tray:
         self.building_folders = False
         self.check_busy = False
         self.icon_visible = truthy(self.cfg.get("SHOW_ICON", "1"))
+        # The config file's size and mtime as of the last read. The tray does not
+        # own that file: --show-icon/--hide-icon and a --settings window in
+        # another process write it and exit, and nothing else tells this process,
+        # so poll() stats it and reloads the two settings that are meant to be
+        # live. One stat per tick is the whole cost of watching it.
+        self.config_seen = self._config_signature()
+        # The last log read, kept between ticks. Re-reading 64 KB and running
+        # every parser over it every three seconds was most of what an idle tray
+        # did, and both answers only change while the file does.
+        self.log_signature = None
+        self.log_tail = ""
+        self.log_result = ("unknown", "", "", "")
+        # The timer's enabled state and the last active state seen. is-enabled is
+        # the second systemctl fork of a tick and its answer only changes when the
+        # units do, so it is asked on a change of the active state or every
+        # ENABLED_EVERY ticks, and the previous answer is reused in between.
+        self.timer_state = None
+        self.active_seen = None
+        self.poll_count = 0
 
         if Notify is not None:
             Notify.init(APP_ID)
@@ -1599,6 +1634,37 @@ class Tray:
         if resolve_lang(self.cfg) != was_lang:
             self.set_language(values.get("UI_LANG", ""))
 
+    def _config_signature(self):
+        """The config file's size and mtime, or None when it cannot be read.
+
+        Both are in the tuple because a rewrite that keeps the size still moves
+        the mtime. This is the entire cost of noticing that somebody else edited
+        the file, and it runs on every poll.
+        """
+        try:
+            info = os.stat(CONFIG_FILE)
+        except OSError:
+            return None
+        return (info.st_size, info.st_mtime_ns)
+
+    def _reload_config(self):
+        """Apply the two live settings after the config file changed.
+
+        --show-icon, --hide-icon and a --settings window in a process that does
+        not own the icon all write the file and exit, so the file is the only way
+        they can reach a tray that is already running: without this, the icon
+        stayed hidden and the language stayed put until the process was killed,
+        which with no icon also means no menu.
+
+        Only the two settings that mean anything to a running process are taken
+        from the reload. The rest are properties of the file and of the next sync,
+        and applying them mid-run would change behaviour the user never asked the
+        running tray to change.
+        """
+        fresh = load_config()
+        self.apply_settings({"UI_LANG": fresh.get("UI_LANG", ""),
+                             "SHOW_ICON": fresh.get("SHOW_ICON", "1")})
+
     def on_settings(self, *_):
         """Open the settings window; it applies its changes to this tray."""
         dialog = SettingsDialog(self)
@@ -1876,6 +1942,16 @@ class Tray:
         Type=oneshot service runs, so both are accepted, and it exits non-zero
         when any named unit is inactive, which is a normal answer and not a
         failure here.
+
+        `systemctl is-enabled` is the second fork of the tick, and its answer only
+        changes when the units do. It is asked when the active state moved since
+        the last tick, every ENABLED_EVERY ticks, or the first time; otherwise the
+        previous answer is reused, which is what took a fork out of almost every
+        tick of an idle tray.
+
+        This needs `service` and `timer` and nothing else, so the three throttle
+        attributes are read through getattr: a caller that hands it a minimal
+        stand-in instead of a constructed Tray has to keep working.
         """
         _, out, _ = sh("systemctl --user is-active "
                        f"{shlex.quote(self.service)} {shlex.quote(self.timer)}",
@@ -1883,23 +1959,29 @@ class Tray:
         lines = [line.strip() for line in out.splitlines() if line.strip()]
         active = bool(lines) and lines[0] in ("active", "activating")
 
-        rc, out, _ = sh(f"systemctl --user is-enabled {shlex.quote(self.timer)}",
-                        timeout=30)
-        answer = out.splitlines()[0].strip() if out.strip() else ""
-        # The answer decides, not the exit status: `systemctl is-enabled` exits
-        # non-zero for a unit that exists and is disabled, and reading that as
-        # "unknown" hid a real state behind a vague message. An empty answer is
-        # what an unreadable or unknown unit looks like.
-        if not answer:
-            timer = "unknown"
-        elif answer.startswith(("enabled", "linked", "alias")):
-            timer = "enabled"
-        elif answer.startswith(("disabled", "masked", "static", "indirect",
-                                "generated", "transient", "bad")):
-            timer = "off"
-        else:
-            timer = "unknown"
-        return active, timer
+        self.poll_count = getattr(self, "poll_count", 0) + 1
+        moved = active != getattr(self, "active_seen", None)
+        self.active_seen = active
+        known = getattr(self, "timer_state", None)
+        if known is None or moved or self.poll_count % ENABLED_EVERY == 0:
+            _, out, _ = sh(f"systemctl --user is-enabled {shlex.quote(self.timer)}",
+                           timeout=30)
+            answer = out.splitlines()[0].strip() if out.strip() else ""
+            # The answer decides, not the exit status: `systemctl is-enabled`
+            # exits non-zero for a unit that exists and is disabled, and reading
+            # that as "unknown" hid a real state behind a vague message. An empty
+            # answer is what an unreadable or unknown unit looks like.
+            if not answer:
+                timer = "unknown"
+            elif answer.startswith(("enabled", "linked", "alias")):
+                timer = "enabled"
+            elif answer.startswith(("disabled", "masked", "static", "indirect",
+                                    "generated", "transient", "bad")):
+                timer = "off"
+            else:
+                timer = "unknown"
+            self.timer_state = timer
+        return active, self.timer_state
 
     def poll(self):
         """Ask for the state in the background and return at once.
@@ -1907,7 +1989,15 @@ class Tray:
         systemctl can take seconds, or hang, when the user manager is busy, so
         the subprocess work happens in a worker and _apply_state() runs back on
         the main loop through GLib.idle_add().
+
+        The config file is stat'ed here as well, and reloaded when it moved: it is
+        the only channel an external writer (--show-icon, --hide-icon, a
+        standalone --settings window) has into this process.
         """
+        signature = self._config_signature()
+        if signature != self.config_seen:
+            self.config_seen = signature
+            self._reload_config()
         self._query_state()
         return True
 
@@ -1962,7 +2052,11 @@ class Tray:
                 # worth a notification.
                 if truthy(self.cfg.get("NOTIFY_ON_SUCCESS", "1")):
                     self.notify(APP_NAME, self.t("Sync finished {when}", when=when))
-                self.manual_requested = False
+            # The run is over whichever way it ended. Clearing this only on the
+            # success path left a manual run that failed marked as manual for the
+            # life of the process, so the next scheduled success was announced as
+            # if the user had started it.
+            self.manual_requested = False
         if kind != "error":
             self.notified_error_at = None
         self.was_syncing = syncing
@@ -2006,6 +2100,26 @@ class Tray:
             self.folders_seen = self.folders
             self._build_folder_menu()
 
+    def _log_snapshot(self):
+        """The parsed tail of the log, re-read only when the file changed.
+
+        tail_text() reads up to 64 KB and read_last_result() runs its regexes over
+        it, and an idle tray did both on every three-second tick for a file that
+        only changes while a sync runs. Size and mtime together are the cheap
+        test: a rewrite that keeps the size still moves the mtime, and a rotation
+        changes both.
+        """
+        try:
+            info = os.stat(self.log)
+            signature = (info.st_size, info.st_mtime_ns)
+        except OSError:
+            signature = None
+        if signature != self.log_signature:
+            self.log_signature = signature
+            self.log_tail = tail_text(self.log)
+            self.log_result = read_last_result(self.log_tail)
+        return self.log_tail, self.log_result
+
     def _apply_state(self, syncing, timer_state):
         """Put one worker's answer on screen, on the main loop.
 
@@ -2019,8 +2133,7 @@ class Tray:
             self.auto_seen = auto
             self._refresh_checks()
 
-        log_tail = tail_text(self.log)
-        kind, when, tag, raw = read_last_result(log_tail)
+        log_tail, (kind, when, tag, raw) = self._log_snapshot()
         hint = self._hint(tag, raw)
 
         # The order decides: a run in progress outranks everything, then a pause
@@ -2498,6 +2611,15 @@ def main(argv=None):
             return 1
 
         cfg = load_config()
+        if not cfg.get("REMOTE"):
+            # load_config() leaves REMOTE alone: it has no sensible default, and
+            # everything the tray does needs one. Hand-edited configs do lose the
+            # line, and a tray started from the autostart entry has no terminal to
+            # show a traceback in, so this is one sentence and exit 1.
+            print(f"{APP_ID}: REMOTE is not set in {CONFIG_FILE}; "
+                  f"run setup.sh or onedrive-doctor to set it up.",
+                  file=sys.stderr)
+            return 1
         if not icon_dir_ok():
             print("Warning: cannot write icons, the tray icon may be blank.",
                   file=sys.stderr)

@@ -143,6 +143,13 @@ if [ "$HAVE_INOTIFY" -eq 0 ]; then
 fi
 
 # --------------------------------------------------------------- scripts
+# Whether the tray was already here is one half of "is this a first install".
+# setup.sh writes the config before it hands over, so on the documented first
+# run the config exists by the time this script starts and cannot tell a first
+# install from a re-run. A tray that was not installed before is the other half.
+TRAY_WAS_INSTALLED=0
+if [ -x "$BIN_DIR/onedrive-tray" ]; then TRAY_WAS_INSTALLED=1; fi
+
 say "Installing scripts into $BIN_DIR"
 mkdir -p "$BIN_DIR"
 install -m 0755 "$SRC_DIR/bin/onedrive-sync" "$BIN_DIR/onedrive-sync"
@@ -155,7 +162,9 @@ install -m 0755 "$SRC_DIR/bin/onedrive-doctor" "$BIN_DIR/onedrive-doctor"
 # --------------------------------------------------------------- config
 say "Installing configuration into $CONFIG_DIR"
 mkdir -p "$CONFIG_DIR"
+CONFIG_EXISTED=0
 if [ -f "$CONFIG_DIR/config" ]; then
+    CONFIG_EXISTED=1
     warn "existing config kept: $CONFIG_DIR/config"
 else
     install -m 0644 "$SRC_DIR/config/config.example" "$CONFIG_DIR/config"
@@ -186,12 +195,43 @@ chmod 0644 "$UNIT_DIR/$UNIT_NAME.service" "$UNIT_DIR/$UNIT_NAME.timer"
 WATCH="$(sed -n 's/^[[:space:]]*WATCH="\{0,1\}\([^"]*\)"\{0,1\}.*/\1/p' \
          "$CONFIG_DIR/config" | tail -1)"
 WATCH="${WATCH:-1}"
-if [ "$WATCH" = "1" ]; then
-    sed -e "s|%WATCH_SCRIPT%|$(sed_replacement "$(systemd_exec_arg "$BIN_DIR/onedrive-watch")")|g" \
-        "$SRC_DIR/systemd/onedrive-watch.service.in" \
-        > "$UNIT_DIR/$UNIT_NAME-watch.service"
-    chmod 0644 "$UNIT_DIR/$UNIT_NAME-watch.service"
+# The unit is written whether or not WATCH is on: the settings dialog's
+# "Realtime sync" switch enables this unit, and it cannot enable one that was
+# never created. Whether it runs is decided at the enable step below.
+sed -e "s|%WATCH_SCRIPT%|$(sed_replacement "$(systemd_exec_arg "$BIN_DIR/onedrive-watch")")|g" \
+    "$SRC_DIR/systemd/onedrive-watch.service.in" \
+    > "$UNIT_DIR/$UNIT_NAME-watch.service"
+chmod 0644 "$UNIT_DIR/$UNIT_NAME-watch.service"
+
+# The timer is owned by this script, which writes it from INTERVAL_MIN on every
+# run, while the tray's settings dialog writes OnUnitInactiveSec into a drop-in
+# beside it. A drop-in wins over the unit, so an old one silently overrode a
+# config edit. The config is the owner here: a drop-in that disagrees is brought
+# back in line, and the run says which value is now in force.
+TIMER_DROPIN="$UNIT_DIR/$UNIT_NAME.timer.d/interval.conf"
+if [ -f "$TIMER_DROPIN" ]; then
+    dropin_interval="$(sed -n \
+        's/^[[:space:]]*OnUnitInactiveSec=\([0-9][0-9]*\)min.*/\1/p' \
+        "$TIMER_DROPIN" | tail -1)"
+    if [ -n "$dropin_interval" ] && [ "$dropin_interval" != "$INTERVAL_MIN" ]; then
+        sed -i "s|^[[:space:]]*OnUnitInactiveSec=.*|OnUnitInactiveSec=${INTERVAL_MIN}min|" \
+            "$TIMER_DROPIN"
+        say "timer drop-in said ${dropin_interval}min; it now says ${INTERVAL_MIN}min, so INTERVAL_MIN in $CONFIG_DIR/config is what runs"
+    elif [ -n "$dropin_interval" ]; then
+        say "timer drop-in and INTERVAL_MIN agree on ${INTERVAL_MIN}min"
+    fi
 fi
+
+# A UNIT_NAME that changed between installs leaves the old unit pair behind
+# still enabled, and nothing said so. The timer is the entry point systemd
+# starts, so it is the one named here.
+for sibling in "$UNIT_DIR"/*.timer; do
+    [ -e "$sibling" ] || continue
+    sibling_name="$(basename "$sibling")"
+    [ "$sibling_name" = "$UNIT_NAME.timer" ] && continue
+    warn "$sibling_name is not the configured unit name; if an earlier install used it:"
+    warn "    systemctl --user disable --now $sibling_name"
+done
 
 # --------------------------------------------------------------- autostart
 # Exec= in a desktop entry is not a shell word list: the value is split on
@@ -216,13 +256,24 @@ desktop_exec_arg() {  # desktop_exec_arg <path> -> the Exec argument
 }
 
 
-say "Installing autostart entry"
-mkdir -p "$AUTOSTART_DIR"
-tray_exec="$(desktop_exec_arg "$BIN_DIR/onedrive-tray")"
-sed -e "s|%TRAY_SCRIPT%|$(sed_replacement "$tray_exec")|g" \
-    "$SRC_DIR/autostart/rclone-onedrive-tray.desktop.in" \
-    > "$AUTOSTART_DIR/rclone-onedrive-tray.desktop"
-chmod 0644 "$AUTOSTART_DIR/rclone-onedrive-tray.desktop"
+# The entry is the tray's "Start tray at login" setting: the checkbox removes
+# this file, and the tray reads its presence. Rewriting it on every run turned
+# that setting back on after a `git pull && ./install.sh` with no message. The
+# entry is written for a first install and refreshed when it is already there;
+# on a re-run where it was removed, it stays removed.
+AUTOSTART_FILE="$AUTOSTART_DIR/rclone-onedrive-tray.desktop"
+if [ "$CONFIG_EXISTED" -eq 1 ] && [ "$TRAY_WAS_INSTALLED" -eq 1 ] &&
+        [ ! -f "$AUTOSTART_FILE" ]; then
+    say "autostart entry left absent: it was already removed, so 'Start tray at login' stays off"
+else
+    say "Installing autostart entry"
+    mkdir -p "$AUTOSTART_DIR"
+    tray_exec="$(desktop_exec_arg "$BIN_DIR/onedrive-tray")"
+    sed -e "s|%TRAY_SCRIPT%|$(sed_replacement "$tray_exec")|g" \
+        "$SRC_DIR/autostart/rclone-onedrive-tray.desktop.in" \
+        > "$AUTOSTART_FILE"
+    chmod 0644 "$AUTOSTART_FILE"
+fi
 
 # --------------------------------------------------------------- NM dispatcher
 if [ "$NM_DISPATCHER" -eq 1 ]; then
@@ -278,6 +329,18 @@ if systemctl --user daemon-reload 2>/dev/null; then
         if [ "$WATCH" = "1" ] && [ "$HAVE_INOTIFY" -eq 1 ]; then
             systemctl --user enable --now "$UNIT_NAME-watch.service" 2>/dev/null || \
                 warn "could not enable $UNIT_NAME-watch.service"
+            # enable --now is a no-op on a unit that is already active, and the
+            # watcher is a long-running loop, so an update would leave the old
+            # code running until reboot. try-restart touches only a running unit
+            # and does nothing when it is not there.
+            systemctl --user try-restart "$UNIT_NAME-watch.service" 2>/dev/null || true
+        elif [ "$WATCH" = "1" ]; then
+            : # inotifywait is missing; the unit exists but cannot run (warned above)
+        else
+            # WATCH was turned off, by hand or through the wizard, and nothing
+            # used to stop a watcher that was already running.
+            systemctl --user disable --now "$UNIT_NAME-watch.service" 2>/dev/null || true
+            say "watcher disabled: WATCH is not 1 in $CONFIG_DIR/config"
         fi
     fi
 else
@@ -296,7 +359,7 @@ $(say "Installed")
   config    $CONFIG_DIR/config
   filters   $CONFIG_DIR/filters.txt
   units     $UNIT_DIR/$UNIT_NAME.{service,timer}
-            ${UNIT_DIR}/${UNIT_NAME}-watch.service (realtime, when WATCH=1)
+            ${UNIT_DIR}/${UNIT_NAME}-watch.service (realtime; enabled when WATCH=1)
   autostart $AUTOSTART_DIR/rclone-onedrive-tray.desktop
 
 Next steps:

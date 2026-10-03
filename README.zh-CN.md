@@ -271,8 +271,8 @@ OneDrive 1.4.0
 | 语言 | `UI_LANG` | 跟随系统语言、English 或中文，立即生效 |
 | 面板图标 | `SHOW_ICON` | `0` 表示不显示；托盘照旧运行和同步，`onedrive-tray --show-icon` 可以调回来 |
 | 开机自启 | | 增删 `~/.config/autostart` 下的自启文件 |
-| 每 … 分钟同步 | `INTERVAL_MIN` | 写成 `<unit>.timer.d/interval.conf`，之后重跑 `./install.sh` 不会把它改回去 |
-| 实时同步 | `WATCH` | 打开或关掉监听器单元 |
+| 每 … 分钟同步 | `INTERVAL_MIN` | 写入 `<unit>.timer.d/interval.conf`；两者不一致时，重跑 `./install.sh` 会把它改回配置里的值 |
+| 实时同步 | `WATCH` | 打开或关掉监听器单元；配置里写 `0` 时，重跑 `./install.sh` 会把它关掉 |
 | 成功时通知 | `NOTIFY_ON_SUCCESS` | `0` 时失败仍会通知，只是不再报成功 |
 | 删除超过 … 个就中止 | `MAX_DELETE` | 就是 `onedrive-sync` 中止一轮同步的上限 |
 | 带宽上限 | `BW_LIMIT` | 不限、1M、5M、10M、20M。rclone 解析不了的值会被拒掉，只在同步日志里留一条警告，不会让每次同步都失败 |

@@ -330,8 +330,8 @@ spot, without a restart: the language and whether the icon sits in the panel.
 | Language | `UI_LANG` | Follow the system locale, English or 中文. Applies at once |
 | Icon in the panel | `SHOW_ICON` | `0` hides it; the tray still runs and syncs, and `onedrive-tray --show-icon` brings it back |
 | Start at login | | Writes or removes the autostart file under `~/.config/autostart` |
-| Sync every … minutes | `INTERVAL_MIN` | Written as a drop-in at `<unit>.timer.d/interval.conf`, so a later `./install.sh` will not undo it |
-| Realtime sync | `WATCH` | Turns the watcher unit on or off |
+| Sync every … minutes | `INTERVAL_MIN` | Written to `<unit>.timer.d/interval.conf`, and `./install.sh` brings that file back into line with the config when the two disagree |
+| Realtime sync | `WATCH` | Turns the watcher unit on or off; `./install.sh` disables the unit again if the config says `0` |
 | Notify on success | `NOTIFY_ON_SUCCESS` | `0` keeps failures notifying and drops the rest |
 | Abort above … deletions | `MAX_DELETE` | The ceiling `onedrive-sync` applies before it stops a run |
 | Bandwidth limit | `BW_LIMIT` | Unlimited, 1M, 5M, 10M or 20M. A value rclone could not parse is refused with a warning in the sync log instead of failing every run |
@@ -469,7 +469,7 @@ intervention are all written up in
 
 ```bash
 ./uninstall.sh            # keeps your config
-./uninstall.sh --purge    # removes config too
+./uninstall.sh --purge    # also removes config, filters, cache and icons
 ```
 
 Your synced folder and the rclone remote are never touched.
