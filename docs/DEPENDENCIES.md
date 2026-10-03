@@ -20,7 +20,7 @@ some distributions is too old to sync safely.
 | `bash` 4.4+ | `bash` (essential) | all shell scripts | Arrays used under `set -u` misbehave |
 | systemd, user session | `systemd` | timer, watcher, timed pause | No scheduled sync at all |
 | `python3` | `python3` | `onedrive-tray` | No tray icon |
-| PyGObject | `python3-gi` | `onedrive-tray` | The tray exits with a message naming the packages to install |
+| PyGObject | `python3-gi` | `onedrive-tray` | The tray exits with a message naming the packages to install. The installer warns and carries on without the icon, so the sync half still works |
 | GTK 3 typelib | `gir1.2-gtk-3.0` | `onedrive-tray` | Same |
 | AppIndicator typelib | `gir1.2-ayatanaappindicator3-0.1`, or `gir1.2-appindicator3-0.1` | tray icon | Same. The runtime library `libayatana-appindicator3-1` is not enough: the `gir1.2-*` package is what Python imports |
 | pycairo | `python3-cairo` | draws the five status icons | Same. The icons are drawn at startup, so without it there would be an invisible tray entry with no explanation |

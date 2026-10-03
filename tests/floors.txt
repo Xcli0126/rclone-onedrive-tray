@@ -12,7 +12,7 @@
 # NetworkManager hook installed, because its last case skips on a machine
 # without one and a skip is not a pass. That one case is environmental by
 # design; every other case must pass everywhere.
-dependency-matrix.sh 39
+dependency-matrix.sh 41
 install-flow.sh 232
 filters.sh 37
 docs.sh 57

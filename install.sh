@@ -79,14 +79,19 @@ command -v flock >/dev/null 2>&1 || missing+=("util-linux (flock)")
 
 py_has() { python3 -c "$1" >/dev/null 2>&1; }
 
-py_has 'import gi' || missing+=("python3-gi")
-py_has 'import cairo' || missing+=("python3-cairo")
+# The tray needs these; the sync half does not, and both the README and
+# DEPENDENCIES.md tell a server user to run onedrive-sync and the timer. Blocking
+# the whole install on a desktop stack made that advice impossible to follow:
+# nothing was installed at all. They warn, and the icon is left out below.
+tray_missing=()
+py_has 'import gi' || tray_missing+=("python3-gi")
+py_has 'import cairo' || tray_missing+=("python3-cairo")
 py_has 'import gi; gi.require_version("Gtk","3.0"); from gi.repository import Gtk' \
-    || missing+=("gir1.2-gtk-3.0")
+    || tray_missing+=("gir1.2-gtk-3.0")
 
 if ! py_has 'import gi; gi.require_version("AyatanaAppIndicator3","0.1"); from gi.repository import AyatanaAppIndicator3' \
    && ! py_has 'import gi; gi.require_version("AppIndicator3","0.1"); from gi.repository import AppIndicator3'; then
-    missing+=("gir1.2-ayatanaappindicator3-0.1")
+    tray_missing+=("gir1.2-ayatanaappindicator3-0.1")
 fi
 
 # These only take features away, so they are reported separately.
@@ -95,6 +100,7 @@ py_has 'import gi; gi.require_version("Notify","0.7"); from gi.repository import
 command -v xdg-open >/dev/null 2>&1 || optional+=("xdg-utils (open folder / view log)")
 
 APT_LINE="sudo apt install rclone python3-gi python3-cairo gir1.2-gtk-3.0 gir1.2-ayatanaappindicator3-0.1 gir1.2-notify-0.7 inotify-tools"
+APT_TRAY_LINE="python3-gi python3-cairo gir1.2-gtk-3.0 gir1.2-ayatanaappindicator3-0.1 gir1.2-notify-0.7"
 
 if [ "${#missing[@]}" -gt 0 ]; then
     warn "Missing required dependencies:"
@@ -114,6 +120,21 @@ a current build from https://rclone.org/downloads/ and put the binary in
 Full list, including what each absence causes: docs/DEPENDENCIES.md
 EOF
     exit 1
+fi
+
+if [ "${#tray_missing[@]}" -gt 0 ]; then
+    warn "The tray icon needs packages that are not installed:"
+    printf '    - %s\n' "${tray_missing[@]}" >&2
+    cat >&2 <<EOF
+
+The sync half does not need them, so it is installed and the timer will run.
+On Debian/Ubuntu the tray needs:
+
+    sudo apt install $APT_TRAY_LINE
+
+Without them the icon is not installed as an autostart entry, so nothing tries to
+start a tray that cannot run. docs/DEPENDENCIES.md has the full list.
+EOF
 fi
 
 if [ "${#optional[@]}" -gt 0 ]; then
@@ -266,7 +287,9 @@ desktop_exec_arg() {  # desktop_exec_arg <path> -> the Exec argument
 # entry is written for a first install and refreshed when it is already there;
 # on a re-run where it was removed, it stays removed.
 AUTOSTART_FILE="$AUTOSTART_DIR/rclone-onedrive-tray.desktop"
-if [ "$CONFIG_EXISTED" -eq 1 ] && [ "$TRAY_WAS_INSTALLED" -eq 1 ] &&
+if [ "${#tray_missing[@]}" -gt 0 ]; then
+    say "no autostart entry: the tray cannot run without the packages above"
+elif [ "$CONFIG_EXISTED" -eq 1 ] && [ "$TRAY_WAS_INSTALLED" -eq 1 ] &&
         [ ! -f "$AUTOSTART_FILE" ]; then
     say "autostart entry left absent: it was already removed, so 'Start tray at login' stays off"
 else

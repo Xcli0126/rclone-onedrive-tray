@@ -24,7 +24,7 @@ uninstall-drop-in	uninstall.sh	s|rm -rf "$UNIT_DIR/$UNIT_NAME.timer.d"|true|	ins
 # the unit's ExecStart unquoted, which systemd reads as two arguments
 install-execstart-quoting	systemd/onedrive-sync.service.in	s|ExecStart="%SYNC_SCRIPT%"|ExecStart=%SYNC_SCRIPT%|	install-flow
 # and a --purge that leaves the cache, and with it the log and the pause stamp
-uninstall-purge-cache	uninstall.sh	s|rm -rf "$CACHE_DIR"|true|	install-flow
+uninstall-purge-cache	uninstall.sh	s#    purge_one "\$CACHE_DIR" "the sync log and the pause stamp"#    : "cache left alone"#	install-flow
 watch-debounce	bin/onedrive-watch	s|DEBOUNCE="${WATCH_DEBOUNCE:-8}"|DEBOUNCE="${WATCH_DEBOUNCE:-0}"|	dependency-matrix
 watch-exclude-dropped	bin/onedrive-watch	s|ARGS+=(--exclude "$EXCLUDE_RE")|true|	dependency-matrix
 access-skip-local-marker	bin/onedrive-check-access	s|        > "$local_check" \|\| die "cannot write $local_check"|        true|	install-flow
@@ -43,6 +43,6 @@ install-systemd-percent	install.sh	s|    text="${text//%/%%}"|    :|	install-flo
 sync-glob-escape-dropped	bin/onedrive-sync	s#ARGS+=(--exclude "/\${literal}/\*\*")#ARGS+=(--exclude "/${folder}/**")#	install-flow
 sync-verbose-log-level	bin/onedrive-sync	s|    ARGS+=(--log-file "$LOG")|    ARGS+=(--log-level INFO --log-file "$LOG")|	install-flow
 check-rename-subtree	bin/onedrive-check	s|                  \[ -d "$LOCAL/$2" \] && renamed_dirs\["$2"\]=1 ;;|                  : ;;|	filters
-tray-setunits-invalidate	bin/onedrive-tray	s|        self._units_changed()\n|        pass\n|	tray
+tray-setunits-invalidate	bin/onedrive-tray	/def _set_units/,/^$/ s/^        self\._units_changed()$/        pass/	tray
 tray-bw-limit-fallback	bin/onedrive-tray	s|                             else self.original\["BW_LIMIT"\]),|                             else ""),|	tray
 doctor-pattern-drift	bin/onedrive-doctor	s|^RE_LOCK='prior lock file found'|RE_LOCK='prior lock file present'|	docs

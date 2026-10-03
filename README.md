@@ -92,7 +92,7 @@ config file drives all of it, so no paths are hard-coded.
 |---|---|---|
 | Linux with systemd (user session) | Timer, watcher, timed pause | Nothing syncs on a schedule |
 | [rclone](https://rclone.org/downloads/) 1.65 or newer | Every sync | Nothing syncs. Below 1.65 an interrupted run needs a manual `--resync` |
-| `python3-gi`, `python3-cairo`, `gir1.2-gtk-3.0` | Tray app and its icons | The tray exits and names the packages |
+| `python3-gi`, `python3-cairo`, `gir1.2-gtk-3.0` | Tray app and its icons | The tray exits and names the packages. `install.sh` warns and installs the sync half anyway, without an autostart entry, so a server can use the timer |
 | `gir1.2-ayatanaappindicator3-0.1` | Tray icon | Same. The `libayatana-appindicator3-1` runtime library is not enough on its own |
 | `gir1.2-notify-0.7` | Desktop notifications | The tray runs and says so, without notifications |
 | `util-linux` (`flock`) | Serialising sync runs | The wrapper refuses to start rather than risk corrupting bisync state |

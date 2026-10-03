@@ -437,9 +437,18 @@ EOF
 run "all present: installs" 0 "Installed" \
     env PATH="$STUB:$PATH" XDG_CONFIG_HOME="$WORK/i1" XDG_CACHE_HOME="$WORK/i1c" XDG_DATA_HOME="$WORK/i1d" \
     bash "$SRC_DIR/install.sh" --prefix "$WORK/i1p" --no-start
-run "no pycairo: refuses and names python3-cairo" 1 "python3-cairo" \
+# The tray's stack is not the sync's: the README tells a server user to run
+# onedrive-sync and the timer, and blocking the whole install on a desktop stack
+# made that impossible to follow. It warns, installs the sync half, and leaves the
+# icon out.
+run "no pycairo: installs the sync half and names python3-cairo" 0 "python3-cairo" \
     env PYTHONPATH="$PYSHIM_DIR" HIDE_MODULE=cairo XDG_CONFIG_HOME="$WORK/i2" \
+        XDG_CACHE_HOME="$WORK/i2c" XDG_DATA_HOME="$WORK/i2d" \
     bash "$SRC_DIR/install.sh" --prefix "$WORK/i2p" --no-start
+check "and the wrapper is installed anyway" \
+    test -x "$WORK/i2p/bin/onedrive-sync"
+check "and no autostart entry is offered for a tray that cannot run" \
+    test ! -e "$WORK/i2/.config/autostart/rclone-onedrive-tray.desktop"
 build_reduced_path flock
 run "no flock: refuses and names flock" 1 "flock" \
     env -i PATH="$REDUCED" HOME="$HOME" XDG_CONFIG_HOME="$WORK/i3" \
