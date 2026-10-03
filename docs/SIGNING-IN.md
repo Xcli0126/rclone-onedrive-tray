@@ -177,8 +177,10 @@ been off for a season.
 `~/.config/rclone/rclone.conf`, owned by you, mode 0600. It holds a refresh
 token that grants access to the whole drive, so it is worth as much as your
 password and belongs in no repository and no chat window. This project reads it
-and never writes to it. `uninstall.sh` does not touch it either, so removing the
-tray leaves your account connected.
+and never writes to it itself; the one exception is when you ask for it, through
+the tray's "Re-authorise OneDrive" item, which runs rclone's own
+`rclone config reconnect`. `uninstall.sh` does not touch the file either, so
+removing the tray leaves your account connected.
 
 Multiple accounts are multiple remotes, for example `onedrive-work:` and
 `onedrive-personal:`. Each one becomes its own config in this project, with its

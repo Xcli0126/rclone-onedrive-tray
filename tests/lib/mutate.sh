@@ -37,6 +37,7 @@ note() {
 survived=0
 caught=0
 skipped=0
+unresolved=0
 
 while IFS=$'\t' read -r id target expr suite; do
     case "$id" in ''|'#'*) continue ;; esac
@@ -61,15 +62,31 @@ while IFS=$'\t' read -r id target expr suite; do
 
     out="$(cd "$WORK/tree" && timeout 900 bash "tests/$suite.sh" 2>&1 | tail -1 |
         sed -e 's/\x1b\[[0-9;]*m//g')"
+    # A row counts as caught only when the suite really reported failures. A
+    # suite that died before printing its summary lands here as unresolved, not
+    # as a catch: otherwise a broken harness reads as a strong one.
     case "$out" in
         *"0 failed"*)
             note "$(printf '%-34s SURVIVED %s' "$id" "$out")"
             survived=$((survived + 1)) ;;
-        *)
+        *"failed"*)
             note "$(printf '%-34s caught   %s' "$id" "$out")"
             caught=$((caught + 1)) ;;
+        *)
+            note "$(printf '%-34s NO RESULT %s' "$id" "${out:-<no output>}")"
+            unresolved=$((unresolved + 1)) ;;
     esac
 done < "$TABLE"
 
-note "$(printf '\n%d caught, %d survived, %d skipped' "$caught" "$survived" "$skipped")"
-[ "$survived" -eq 0 ]
+# Naming an id that matches no row verifies nothing, and saying so is the point
+# of running one.
+if [ "${#wanted[@]}" -gt 0 ] && [ "$((caught + survived + skipped + unresolved))" -eq 0 ]; then
+    echo "no row matched: ${wanted[*]}" >&2
+    exit 1
+fi
+
+note "$(printf '\n%d caught, %d survived, %d skipped, %d unresolved' \
+    "$caught" "$survived" "$skipped" "$unresolved")"
+# A row whose expression matches nothing, or a suite that dies, is a broken
+# instrument rather than a clean run, so both fail this script.
+[ "$survived" -eq 0 ] && [ "$skipped" -eq 0 ] && [ "$unresolved" -eq 0 ]

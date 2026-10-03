@@ -378,7 +378,7 @@ onedrive-check: /home/you/OneDrive/Vault against onedrive:Vault
 
 It exits 0 when the tree is fine, 1 when something will actually fail, and 2 on a usage error, so
 a script can tell "bad names" from "I called it wrong". `onedrive-sync --resync` runs it first and
-logs the report, because that is the run that uploads everything. The tray has it as a menu item. The limits and how they were measured are in
+logs the report when it finds something, because that is the run that uploads everything. The tray has it as a menu item. The limits and how they were measured are in
 [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
 
 ### Syncing sooner after the network comes back

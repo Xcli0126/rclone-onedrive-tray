@@ -68,9 +68,11 @@ RCLONE="${RCLONE:-rclone}"
 # for unless --check-filename says otherwise.
 CHECK_FILENAME="${CHECK_FILENAME:-RCLONE_TEST}"
 
+# An empty value cannot reach this: the default above turns it into RCLONE_TEST
+# first, which is what "unset it to use RCLONE_TEST" in that message meant. The
+# pattern is about the shape of a name, not about emptiness.
 case "$CHECK_FILENAME" in
     */*|*'..'*) die "CHECK_FILENAME='$CHECK_FILENAME' must be a bare file name, not a path" ;;
-    '') die "CHECK_FILENAME is empty; unset it to use RCLONE_TEST, or give a file name" ;;
 esac
 
 command -v "$RCLONE" >/dev/null 2>&1 || die "rclone not found in PATH"

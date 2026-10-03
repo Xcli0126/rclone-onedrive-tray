@@ -152,6 +152,23 @@ else
     done <<<"$zh"
 fi
 
+# ------------------------------------------------- the keys the settings window writes
+# SETTINGS_DEFAULTS is the list of keys the tray's settings window writes. Every
+# one of them has to be in the annotated config, or a reader of that file
+# concludes the setting does not exist. This is how SHOW_ICON and
+# NOTIFY_ON_SUCCESS were missing from it for two releases.
+title "the keys the settings window writes are documented"
+tray_keys="$(sed -n '/^SETTINGS_DEFAULTS = {/,/^}/p' bin/onedrive-tray |
+    sed -n 's/^[[:space:]]*"\([A-Z_]*\)":.*/\1/p')"
+if [ -z "$tray_keys" ]; then
+    bad "could not read SETTINGS_DEFAULTS out of bin/onedrive-tray"
+else
+    for key in $tray_keys; do
+        check "config.example documents $key" \
+            grep -q "^$key=" config/config.example
+    done
+fi
+
 # ---------------------------------------------------------------- installer drift
 # A script that install.sh ships and uninstall.sh forgets is invisible until
 # somebody removes the package and finds a stray binary in ~/.local/bin.

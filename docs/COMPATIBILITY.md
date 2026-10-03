@@ -10,15 +10,17 @@ and a guess is not something you can plan an install around.
 Five scripts, none of which needs an rclone remote and all safe on a working setup:
 
 ```bash
-tests/dependency-matrix.sh      # 31 cases: one missing dependency at a time, plus the tray
-tests/install-flow.sh           # 165 cases: the documented install path, end to end
-tests/filters.sh                # 33 cases: the default filters still filter, plus the checker
-tests/tray.sh                   # 100 cases: the real GTK menu, driven with stubs
-tests/docs.sh                   # 31 cases: the links and rules the docs depend on
+tests/dependency-matrix.sh      # one missing dependency at a time, plus the tray
+tests/install-flow.sh           # the documented install path, end to end
+tests/filters.sh                # the default filters still filter, plus the checker
+tests/tray.sh                   # the real GTK menu, driven with stubs
+tests/docs.sh                   # the links and rules the docs depend on
 ```
 
-360 cases in total, and each suite prints its own count on the last line, so this
-list can be checked against the tree in a few seconds.
+Each suite prints its own count on the last line, and the fewest passing assertions
+each one may report is in `tests/floors.txt`, which CI enforces. This page used to
+quote the counts as well and they went stale twice, so the numbers live in one
+place now.
 
 Add `--verbose` to any of them to see each command and its output.
 
@@ -147,9 +149,9 @@ systemd 255 is four major versions behind the development machine, python3 is
 does say something the local run cannot. The 22.04 runner is older again, with
 GLib 2.72 against 2.80 here, and it earned its place on the first run: it caught
 a test that imported `GioUnix`, a module that only exists from GLib 2.80, and so
-died before checking anything on the older distribution. Two floors move with the
-environment, because a case that needs a NetworkManager hook skips where there is
-none; the reasons are in `tests/floors.txt`.
+died before checking anything on the older distribution. One floor moves with the
+environment, install-flow's, because its last case needs a NetworkManager hook and
+skips where there is none; the reason is in `tests/floors.txt` next to the number.
 
 The runner's rclone being 1.60.1 helps in one direction only. `install.sh`
 warns about that version, which is one of the cases the matrix checks. The sync

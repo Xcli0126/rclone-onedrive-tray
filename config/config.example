@@ -120,6 +120,16 @@ OPEN_APP_NAME="the app"
 # the log ([network], [maxdelete], ...) and the tray renders the matching text.
 UI_LANG=""
 
+# Show the tray icon in the panel. 0 hides it while the tray keeps running and
+# syncing; `onedrive-tray --show-icon` writes 1 back. The settings window writes
+# this key, and the tray picks the change up without a restart.
+SHOW_ICON="1"
+
+# Notify when a sync you started from the tray succeeds. Failures always notify.
+# Scheduled runs stay quiet: a five-minute timer announcing every success would
+# train you to ignore the ones that matter. The settings window writes this key.
+NOTIFY_ON_SUCCESS="1"""
+
 # ------------------------------------------------------------------ realtime
 # Watch the local folder and start a sync as soon as files change, instead of
 # waiting for the timer. Requires the inotify-tools package.
@@ -144,3 +154,11 @@ WATCH_EXCLUDE=""
 RETRIES="3"
 # Seconds between retries.
 RETRY_DELAY="60"
+
+# Rotate the sync log once it passes this many bytes. Read by onedrive-sync, not
+# written by the settings window.
+MAX_LOG_BYTES="5242880"
+
+# The rclone binary to run, by name or by path. Change it to use a build outside
+# PATH, or to test a different version.
+RCLONE="rclone"

@@ -10,9 +10,11 @@ git pull
 
 Then restart the tray so the new menu and translations are loaded. The panel
 icons are drawn at that start as well, so a redrawn set appears with the same
-restart. Everything else picks the new code up on its own: `onedrive-sync` and
-`onedrive-watch` are run fresh by systemd on every tick and every local edit, so
-the next run uses the new version without anything being restarted.
+restart. `onedrive-sync` needs nothing: it is a oneshot service that systemd runs
+fresh on every tick, so the next run uses the new code. The watcher is different,
+because it is a long-lived process: `install.sh` restarts it for you after
+rewriting its unit, and if you installed by copying files by hand you have to
+restart it yourself (`systemctl --user restart <unit>-watch.service`).
 
 ```bash
 kill "$(pgrep -f 'python3 .*/onedrive-tray')" ; onedrive-tray &

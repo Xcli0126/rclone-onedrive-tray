@@ -14,11 +14,14 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq shellcheck
+          # bin/onedrive-check, bin/onedrive-check-access and bin/onedrive-doctor
+          # are missing from this list and are checked by hand instead; the two
+          # tools under tests/lib are here so they cannot rot unnoticed.
           shellcheck setup.sh install.sh uninstall.sh \
                      bin/onedrive-sync bin/onedrive-watch \
                      tests/dependency-matrix.sh tests/install-flow.sh \
                      tests/filters.sh tests/tray.sh tests/docs.sh \
-                     tests/lib/harness.sh \
+                     tests/lib/harness.sh tests/lib/mutate.sh tests/lib/coverage.sh \
                      extras/networkmanager-dispatcher.sh \
                      extras/watch-issues.sh extras/install-issue-watch.sh
 
@@ -27,6 +30,7 @@ jobs:
           for f in setup.sh install.sh uninstall.sh bin/onedrive-sync bin/onedrive-watch \
                    tests/dependency-matrix.sh tests/install-flow.sh tests/filters.sh \
                    tests/tray.sh tests/docs.sh tests/lib/harness.sh \
+                   tests/lib/mutate.sh tests/lib/coverage.sh \
                    extras/watch-issues.sh extras/install-issue-watch.sh; do
             bash -n "$f"
           done

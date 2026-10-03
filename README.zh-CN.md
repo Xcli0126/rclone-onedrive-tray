@@ -230,29 +230,29 @@ OneDrive 1.4.0
 上次同步 14:32
 已用 426.0 GiB / 1.0 TiB（40%）
 ────────────────────────────────
-Sync now
-Open sync folder
-View sync log
-Folders to sync ▸        01-投资     ☑
+立即同步
+打开同步文件夹
+查看同步日志
+同步的文件夹 ▸            01-投资     ☑
                          02-工作     ☑
                          …
                          ────────
                          .rag        ☐
 ────────────────────────────────
-Pause automatic sync ▸   30 minutes
-                         2 hours
-                         8 hours
+暂停自动同步 ▸           30 分钟
+                         2 小时
+                         8 小时
                          ────────
-                         Resume now
-☑ Start tray at login
+                         立即恢复
+☑ 开机自动启动托盘
 ────────────────────────────────
-Check file names
-Re-authorise OneDrive…
-Rebuild sync baseline (resync)…
+检查文件名
+重新登录 OneDrive…
+重建同步基线（resync）…
 ────────────────────────────────
-Settings…
-About
-Quit
+设置…
+关于
+退出
 ```
 
 最上面两行是版本号和上次同步时间，点了不会有反应。用量那一行要等 `rclone about` 返回之后才出现。
@@ -422,9 +422,9 @@ tests/tray.sh                   # 真的把菜单建出来，逐个 handler 驱�
 tests/docs.sh                   # 文档互链、写字规矩、文档里点名的文件
 ```
 
-四个脚本都不需要 rclone 远程。前两个会把 `HOME` 和各个 XDG 目录指向临时目录，用替身脚本顶掉
+五个脚本都不需要 rclone 远程。前两个会把 `HOME` 和各个 XDG 目录指向临时目录，用替身脚本顶掉
 rclone、systemctl 和 sudo，并使用专门的单元名；`filters.sh` 拿真的 rclone 在一个临时目录上跑；
-`docs.sh` 只读仓库。四个都不会打扰正在工作的那套安装。加 `--verbose` 可以看到每条命令及其输出。CI 会在
+`docs.sh` 只读仓库。五个都不会打扰正在工作的那套安装。加 `--verbose` 可以看到每条命令及其输出。CI 会在
 `ubuntu-latest` 上跑一遍，那台机器的发行版、systemd 和 rclone 都跟开发机不同。
 [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) 记录了它们覆盖了什么、在哪些版本上真的跑过，以及
 还有哪些环境没人试过。
