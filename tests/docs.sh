@@ -152,6 +152,27 @@ else
     done <<<"$zh"
 fi
 
+# ------------------------------------------------- the failure tags cross a line
+# onedrive-sync writes its failure hints into the log as "[tag] message", and the
+# tray renders them by looking the tag up as a translation key, through a
+# variable. The tray suite's check that every literal passed to t() is translated
+# cannot see those, because the literal is the tag, not the message. A tag the
+# tray has no text for shows raw English inside a Chinese UI.
+title "the failure tags the wrapper writes and the tray renders"
+wrapper_tags="$(grep -oE 'tag=[a-z]+' bin/onedrive-sync | sed 's/^tag=//' | sort -u)"
+missing=0
+for tag in $wrapper_tags; do
+    if grep -qE "^        \"$tag\": " bin/onedrive-tray; then
+        ok "the tray has text for the [$tag] tag"
+    else
+        bad "the wrapper writes [$tag] and the tray has no text for it"
+        missing=$((missing + 1))
+    fi
+done
+if [ -z "$wrapper_tags" ]; then
+    bad "no tags were found in bin/onedrive-sync; the pattern or the wrapper moved"
+fi
+
 # ------------------------------------------------- the keys the settings window writes
 # SETTINGS_DEFAULTS is the list of keys the tray's settings window writes. Every
 # one of them has to be in the annotated config, or a reader of that file
