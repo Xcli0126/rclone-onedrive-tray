@@ -167,3 +167,6 @@ tray-truthy-enabled	bin/onedrive-tray	s|in ("1", "true", "yes", "on", "enabled")
 tray-settings-keeps-spelling	bin/onedrive-tray	s|            if truthy(original) == active:|            if False:|	tray
 tray-boot-reads-the-file	bin/onedrive-tray	s|self.check_boot.set_active(self.original_boot)|self.check_boot.set_active(False)|	tray
 tray-remote-fix-names-writer	bin/onedrive-tray	s|or add REMOTE="yourremote:" to that file.|or run onedrive-doctor to set it up.|	tray
+# the doctor warning line the five non-auth classes share, which no fixture fed
+# before, so its wording could be anything
+doctor-tag-warn-line	bin/onedrive-doctor	s|a \[$tag\] failure is in the log|a failure is in the log|	install-flow

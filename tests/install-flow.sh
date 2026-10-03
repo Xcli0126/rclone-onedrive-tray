@@ -1761,6 +1761,27 @@ else
     bad "one-line refusal: exit $DOCTOR_RC, $(head -1 <<<"$DOCTOR_OUT")"
 fi
 
+# The classification table names six classes and only three were ever fed a line
+# (auth, network and none), so the warn line the other five share could be replaced
+# with anything and every suite stayed green. One fixture per class, through the
+# real doctor, so a class that stops being named is a failure.
+title "the failure classes the doctor names"
+doc_class() {  # doc_class <a log line> <the class it must be named as>
+    doc_fixture "class-$2"
+    printf '%s\n' "$1" >> "$DOC_FX/cache/sync.log"
+    DOCTOR_OUT="$(doc_run "$DOC_FX" --quiet --offline 2>&1)"; DOCTOR_RC=$?
+    if [ "$DOCTOR_RC" -eq 0 ] && grep -qF "a [$2] failure is in the log" <<<"$DOCTOR_OUT"; then
+        ok "a line in the $2 class is named as [$2]"
+    else
+        bad "$2: exit $DOCTOR_RC, $(grep -m1 ' log ' <<<"$DOCTOR_OUT")"
+    fi
+}
+doc_class '2026/10/01 20:05:00 CRITICAL: prior lock file found in ~/.cache/rclone/bisync' lock
+doc_class '2026/10/01 20:05:00 ERROR : Safety abort: too many deletes (>50%, 150 of 200) on Path1' maxdelete
+doc_class '2026/10/01 20:05:00 ERROR : Access test failed: Path1 count 1, Path2 count 0 - RCLONE_TEST' access
+doc_class '2026/10/01 20:05:00 ERROR : Bisync aborted. Must run --resync to recover.' resync
+doc_class '2026/10/01 20:05:00 ERROR : unknown flag: --resilient' oldrclone
+
 # A network blip lands on top of the refusal that is the actual reason nothing
 # syncs. Only reading the newest hint reported the blip, which clears itself, and
 # said nothing about the sign-in, which does not.
