@@ -55,7 +55,7 @@ fi
 # `grep -qvE '^[[:space:]]*$'`, exits 0 as soon as ANY line is not blank, which is
 # true of every file with a rule in it, so it could not fail.
 check "no line is made only of blanks" \
-    bash -c '! grep -qE "^[[:space:]]+$" "$1"' _ "$FILTERS"
+    test -z "$(grep -E '^[[:space:]]+$' "$FILTERS" || true)"
 # And the same expression has to notice one, or the check above proves nothing.
 BLANKS_PROBE="$WORK/blanks-probe"
 cp "$FILTERS" "$BLANKS_PROBE"
