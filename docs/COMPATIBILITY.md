@@ -25,11 +25,12 @@ place now.
 Add `--verbose` to any of them to see each command and its output.
 
 How much those cases would notice is a separate question from how many there are,
-so the tree is also put through a mutation pass: twenty-nine deliberate changes to
-the shipped scripts, one at a time, each run against the suite that covers it.
-`tests/lib/mutate.sh` runs it and `tests/lib/mutations.txt` lists the rows.
-Twenty-eight are caught, several by a dozen assertions at once, and every row was
-a change no suite noticed before its assertion was written.
+so the tree is also put through a mutation pass: deliberate changes to the shipped
+scripts, one at a time, each run against the suite that covers it. `tests/lib/mutate.sh`
+runs it, `tests/lib/mutations.txt` lists the rows, and the run prints how many were
+caught. Almost every row was a change no suite noticed before its assertion was
+written; the one that survives is named below rather than counted here, because
+these numbers went stale twice when they were written out.
 
 The one that survives is the name-length branch in `onedrive-check`, and it
 survives for a reason worth writing down: a local filesystem refuses a name longer

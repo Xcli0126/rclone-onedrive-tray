@@ -128,7 +128,7 @@ SHOW_ICON="1"
 # Notify when a sync you started from the tray succeeds. Failures always notify.
 # Scheduled runs stay quiet: a five-minute timer announcing every success would
 # train you to ignore the ones that matter. The settings window writes this key.
-NOTIFY_ON_SUCCESS="1"""
+NOTIFY_ON_SUCCESS="1"
 
 # ------------------------------------------------------------------ realtime
 # Watch the local folder and start a sync as soon as files change, instead of

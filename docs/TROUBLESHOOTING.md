@@ -335,12 +335,14 @@ check refuses to run against a tree it cannot read at all.
 ```bash
 onedrive-check-access                # creates the marker file on both sides
 # then set CHECK_ACCESS="1" in ~/.config/rclone-onedrive-tray/config
-onedrive-sync --resync               # once, because the flag set changed
 ```
 
 `onedrive-check-access` is the file creation step: rclone never creates the marker itself. It writes
 `RCLONE_TEST` at the root of the local folder and copies it to the root of the remote with
 `rclone copyto`, so running it a second time transfers nothing. `--dry-run` says what it would do.
+Turning the key on needs no `--resync`: measured on rclone 1.75.1, a run with the markers in place
+uses the new flag and asks for nothing. A `--resync` would work too, but it downloads back every file
+you have deleted locally, which is a high price for a setting that needs no rebuild.
 
 The check is on `--resync` runs too, so `--resync` is not a way to set the files up. Set the key off,
 create them, and turn it back on.

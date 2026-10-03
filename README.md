@@ -213,10 +213,11 @@ git pull
 ./install.sh            # --no-start leaves the tray alone
 ```
 
-Then restart the tray: the menu and the translations live in that process, while
-the sync wrapper and the watcher are started fresh by systemd, so they pick the
-new code up on the next run without anything being restarted. Your config and
-filters are kept, and a sync that is already running is not interrupted.
+Then restart the tray: the menu and the translations live in that process. The
+sync wrapper needs nothing, because systemd runs it fresh on every tick; the
+watcher is a long-lived process, so `install.sh` restarts it for you after
+rewriting its unit. Your config and filters are kept, and a sync that is already
+running is not interrupted.
 
 [docs/UPDATING.md](docs/UPDATING.md) covers the rest: how to tell which version
 is actually running, which settings force a `--resync` afterwards, how to roll

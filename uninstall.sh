@@ -78,6 +78,27 @@ rm -f "$BIN_DIR/onedrive-check"
 rm -f "$BIN_DIR/onedrive-check-access"
 rm -f "$BIN_DIR/onedrive-doctor"
 
+# A unit pair left behind by an earlier UNIT_NAME still fires on its own schedule
+# at an ExecStart this run has just deleted. install.sh only warns about it, and
+# only while installing; the uninstaller is where it can actually be turned off.
+for orphan in "$UNIT_DIR"/*.timer; do
+    [ -e "$orphan" ] || continue
+    case "$orphan" in
+        "$UNIT_DIR/$UNIT_NAME.timer") continue ;;
+    esac
+    orphan_unit="$(basename "$orphan" .timer)"
+    orphan_service="$UNIT_DIR/$orphan_unit.service"
+    [ -e "$orphan_service" ] || continue
+    # Only pairs that run something this project installed.
+    grep -q "$BIN_DIR/onedrive-" "$orphan_service" 2>/dev/null || continue
+    if systemctl --user show-environment >/dev/null 2>&1; then
+        systemctl --user disable --now "$orphan_unit.timer" 2>/dev/null || true
+    fi
+    rm -f "$orphan" "$orphan_service" "$UNIT_DIR/$orphan_unit-watch.service"
+    rm -rf "$UNIT_DIR/$orphan_unit.timer.d"
+    warn "removed a unit pair left by another name: $orphan_unit"
+done
+
 systemctl --user daemon-reload 2>/dev/null || \
     warn "run 'systemctl --user daemon-reload' after your next login"
 
@@ -107,15 +128,22 @@ fi
 
 if [ "$PURGE" -eq 1 ]; then
     say "Removing configuration, filters, cache and icons"
-    rm -rf "$CONFIG_DIR"
-    rm -rf "$DATA_DIR"
-    # The cache holds the sync log, the lock and the pause stamp. They describe
-    # the install that is being removed, so --purge takes them too; a plain
-    # uninstall keeps everything, which is what makes a repair easy.
-    rm -rf "$CACHE_DIR"
-    say "removed $CONFIG_DIR (the configuration and the filters)"
-    say "removed $DATA_DIR (the icon directory)"
-    say "removed $CACHE_DIR (the cache: log, lock and pause stamp)"
+    # Say what was really there rather than what was meant to be: announcing
+    # three removals on a machine that had none of them is how a report stops
+    # being worth reading.
+    purge_one() {  # purge_one <path> <what it is>
+        if [ -e "$1" ]; then
+            rm -rf "$1"
+            say "removed $1 ($2)"
+        else
+            say "nothing at $1 ($2)"
+        fi
+    }
+    purge_one "$CONFIG_DIR" "the configuration and the filters"
+    purge_one "$DATA_DIR" "the icon directory"
+    # The cache holds the sync log and the pause stamp. The lock is not here: the
+    # tray keeps that in $XDG_RUNTIME_DIR, which the logout removes anyway.
+    purge_one "$CACHE_DIR" "the sync log and the pause stamp"
     warn "the rclone remote config (~/.config/rclone/rclone.conf) was kept"
 elif [ -d "$CONFIG_DIR" ]; then
     warn "configuration kept in $CONFIG_DIR (use --purge to remove it)"

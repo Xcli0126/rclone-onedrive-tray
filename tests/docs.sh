@@ -185,8 +185,11 @@ if [ -z "$tray_keys" ]; then
     bad "could not read SETTINGS_DEFAULTS out of bin/onedrive-tray"
 else
     for key in $tray_keys; do
+        # The whole line, not just the key: a stray quote or a trailing token
+        # makes the tray read a different value than the shell does, which is how
+        # NOTIFY_ON_SUCCESS shipped as 1"" for two commits.
         check "config.example documents $key" \
-            grep -q "^$key=" config/config.example
+            grep -qE "^$key=\"[^\"]*\"$" config/config.example
     done
 fi
 

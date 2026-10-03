@@ -168,8 +168,12 @@ if [ -f "$CONFIG_DIR/config" ]; then
     warn "existing config kept: $CONFIG_DIR/config"
 else
     install -m 0644 "$SRC_DIR/config/config.example" "$CONFIG_DIR/config"
-    cp -f "$CONFIG_DIR/config" "$CONFIG_DIR/config.example"
 fi
+# The header comment in every script points at "config.example" beside the config,
+# and nothing reads it. It used to be written only when there was no config, so it
+# went stale on the first re-run; refreshing it costs one copy and keeps the file
+# those comments point at matching the release that installed it.
+install -m 0644 "$SRC_DIR/config/config.example" "$CONFIG_DIR/config.example"
 if [ -f "$CONFIG_DIR/filters.txt" ]; then
     warn "existing filters kept: $CONFIG_DIR/filters.txt"
 else

@@ -91,6 +91,11 @@ run "the non-interactive wizard finishes" 0 "Wrote" \
         --filters obsidian --interval 7 --watch yes --unit-name "$UNIT" --yes
 
 check "writes the config" test -f "$CFG"
+if cmp -s "$SRC_DIR/config/config.example" "$CFG_DIR/config.example"; then
+    ok "and the example beside it is the shipped one"
+else
+    bad "config.example beside the config differs from the shipped file"
+fi
 check "writes the filters" test -f "$CFG_DIR/filters.txt"
 # A filters file that exists but holds "# none" is the same as no filters at all,
 # and a user following the wizard would never see it. The copy of the example was
@@ -1550,6 +1555,15 @@ title "uninstall.sh"
 # makes the next install of the same unit name inherit the old interval.
 mkdir -p "$UNIT_DIR/$UNIT.timer.d"
 printf '[Timer]\nOnUnitInactiveSec=42min\n' > "$UNIT_DIR/$UNIT.timer.d/interval.conf"
+
+# A unit pair left behind by an earlier UNIT_NAME. It fires on its own schedule
+# at a script this run deletes, so the uninstaller has to turn it off rather than
+# leave it running until somebody notices.
+STALE="zz-stale-probe"
+printf '[Unit]\nDescription=old install\n[Service]\nExecStart=%s/onedrive-sync\n' \
+    "$HOME/.local/bin" > "$UNIT_DIR/$STALE.service"
+printf '[Unit]\nDescription=old install\n[Timer]\nOnUnitInactiveSec=5min\n' \
+    > "$UNIT_DIR/$STALE.timer"
 UNINSTALL_OUT="$(bash "$SRC_DIR/uninstall.sh" --prefix "$HOME/.local" 2>&1)"
 UNINSTALL_RC=$?
 if [ "$UNINSTALL_RC" -eq 0 ]; then
@@ -1564,6 +1578,10 @@ check_absent "removes the installed scripts" \
     "$HOME/.local/bin/onedrive-check-access" "$HOME/.local/bin/onedrive-doctor"
 check_absent "removes the units" \
     "$UNIT_DIR/$UNIT.service" "$UNIT_DIR/$UNIT.timer" "$UNIT_DIR/$UNIT-watch.service"
+check_absent "removes a unit pair left by an earlier name" \
+    "$UNIT_DIR/$STALE.service" "$UNIT_DIR/$STALE.timer"
+check "and says which one it was" \
+    grep -qF "left by another name: $STALE" <<<"$UNINSTALL_OUT"
 check_absent "removes the timer interval drop-in with the units" \
     "$UNIT_DIR/$UNIT.timer.d" "$UNIT_DIR/$UNIT.timer.d/interval.conf"
 check "keeps the configuration (documented; --purge removes it)" test -f "$CFG"
