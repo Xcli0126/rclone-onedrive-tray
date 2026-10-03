@@ -71,6 +71,64 @@ test is allowed to touch before anyone starts.
   that allow longer names, and it is not tested because there is nothing to test
   it with.
 
+### The tray's state is read out of English prose in a shared log
+
+`onedrive-sync` writes its own messages and rclone's `--log-file` output into one
+file, and the tray decides what happened by matching fragments of English in the
+newest lines of it (`read_last_result`). What keeps that correct today is
+ordering: rclone writes "Bisync successful" after its own failures, so the last
+match wins. A wrapper message added after that line, or an rclone reword, flips a
+green icon to red with no test between them. The wrapper already tags its own
+hints as `[tag]` precisely so that consumers do not match English, and the doctor
+matches English anyway.
+
+The fix worth doing is one machine-readable line per run, a single `key=value` or
+JSON line at the end of the log, with the current prose reader kept for one
+release as a fallback. It would also retire the duplicated pattern table that the
+documentation check now merely guards.
+
+### Two sync pairs cannot coexist, in three places
+
+`UNIT_NAME` is a config knob and `install.sh --prefix` exists, but a second pair
+would collide: the wrapper's lock is one file per cache directory, the tray's
+pause stamp is one file per cache directory, and the tray's single-instance lock
+is one fixed name, so only one pair can have a tray. None of that is written
+down anywhere except here.
+
+Either the three names get the unit name appended, which is a few lines, or the
+single-pair limit is a decision. This entry exists so the next person does not
+have to derive it from three file names.
+
+### Smaller, and real
+
+- Installing the sync half on a server is not possible: `install.sh` treats the
+  GTK, cairo and AppIndicator typelibs as hard requirements and exits before
+  writing anything, while `docs/DEPENDENCIES.md` and the README both say the tray
+  is what needs them and point server users at `onedrive-sync` and the timer. A
+  sync-only path (or moving those probes into the warning bucket) is the fix.
+- The first-run wizard never offers the access check, so a fresh install ships
+  with only the delete cap guarding it. The reason the key defaults to off is
+  about upgrades, not new installs.
+- A sync that fails inside one three-second poll raises no notification at all:
+  the failure notification fires on the falling edge of the running state, and a
+  run that starts and ends between two polls is never seen as running. The icon
+  still shows the error.
+- The tray has no way to run `onedrive-doctor`, the first thing the README tells a
+  user to run when something breaks, so the product's own diagnostic is reachable
+  only from a terminal.
+- `SettingsDialog._worker` writes its failures into `self.failures` instead of
+  returning them, which is the last method in the file that both computes and
+  stores.
+- `tests/filters.sh` builds its 400-character name with
+  `printf 'r%.0s' $(seq 1 400)`, which relies on word splitting of the `seq`
+  output. It works, and it is the suite's own fixture.
+- `onedrive-check`'s name-length branch cannot fire on a local filesystem: the
+  limit is the documented 255, and a filesystem refuses a name longer than 255
+  bytes, so nothing on disk can reach it. It was found by mutating the limit to
+  99999 and watching every suite stay green. The branch is kept for filesystems
+  that allow longer names, and it is not tested because there is nothing to test
+  it with.
+
 ## Accepted, with the reason
 
 - `NOTIFY_ON_SUCCESS` covers a sync you start from the tray, not the scheduled
