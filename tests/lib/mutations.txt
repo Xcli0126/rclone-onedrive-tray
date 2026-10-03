@@ -40,3 +40,9 @@ setup-filters-choice	setup.sh	s|    obsidian\|default) cp -f "$SRC_DIR/config/fi
 tray-busy-line-space	bin/onedrive-tray	s|:\\s\*\\d+%", re.M)|:\\s*", re.M)|	tray
 # a % in the ExecStart path, which systemd expands as a specifier
 install-systemd-percent	install.sh	s|    text="${text//%/%%}"|    :|	install-flow
+sync-glob-escape-dropped	bin/onedrive-sync	s#ARGS+=(--exclude "/\${literal}/\*\*")#ARGS+=(--exclude "/${folder}/**")#	install-flow
+sync-verbose-log-level	bin/onedrive-sync	s|    ARGS+=(--log-file "$LOG")|    ARGS+=(--log-level INFO --log-file "$LOG")|	install-flow
+check-rename-subtree	bin/onedrive-check	s|                  \[ -d "$LOCAL/$2" \] && renamed_dirs\["$2"\]=1 ;;|                  : ;;|	filters
+tray-setunits-invalidate	bin/onedrive-tray	s|        self._units_changed()\n|        pass\n|	tray
+tray-bw-limit-fallback	bin/onedrive-tray	s|                             else self.original\["BW_LIMIT"\]),|                             else ""),|	tray
+doctor-pattern-drift	bin/onedrive-doctor	s|^RE_LOCK='prior lock file found'|RE_LOCK='prior lock file present'|	docs

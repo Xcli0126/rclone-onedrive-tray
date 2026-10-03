@@ -193,6 +193,25 @@ else
     done
 fi
 
+# --------------------------------------------- the one flag set three files write
+# The wrapper has a built-in default for BISYNC_ARGS, config.example states it for
+# the reader, and setup.sh writes it into every new config. Three copies of one
+# string, and nothing compared them, so a flag added to one and not the others
+# would change what a generated config does without changing what the wrapper
+# defaults to.
+title "the recovery flags are the same string everywhere"
+wrapper_args="$(sed -n 's/^DEFAULT_BISYNC_ARGS="\(.*\)"$/\1/p' bin/onedrive-sync)"
+example_args="$(sed -n 's/^BISYNC_ARGS="\(.*\)"$/\1/p' config/config.example)"
+wizard_args="$(sed -n 's/^BISYNC_ARGS="\(.*\)"$/\1/p' setup.sh)"
+if [ -z "$wrapper_args" ] || [ -z "$example_args" ] || [ -z "$wizard_args" ]; then
+    bad "could not read the flag string out of one of the three files"
+else
+    check "config.example carries the wrapper's default" \
+        test "$example_args" = "$wrapper_args"
+    check "setup.sh writes the wrapper's default too" \
+        test "$wizard_args" = "$wrapper_args"
+fi
+
 # ------------------------------------------- the failure patterns two files share
 # onedrive-sync classifies rclone's output with these patterns and tags its own
 # hint line "[tag] message"; onedrive-doctor reads the same log and carries a
