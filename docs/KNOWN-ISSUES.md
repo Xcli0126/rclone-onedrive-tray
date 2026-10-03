@@ -86,6 +86,12 @@ test is allowed to touch before anyone starts.
   folders until the answer after it arrives. It needs a generation counter or an
   answer tagged with the remote it belongs to, which is a larger change than the
   reload path.
+- The settings window rewrites a line it changes without its `export ` prefix:
+  `KEY_RE` matches `export REMOTE=`, and `update_config_file` writes the line back
+  as `REMOTE=`. The value and the meaning are the same either way, so this is a
+  hand-written file losing its style rather than a setting changing; it is written
+  down because the reader now accepts the prefix and the writer does not produce
+  it.
 
 ### The tray's state is read out of English prose in a shared log
 
