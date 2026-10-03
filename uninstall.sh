@@ -92,7 +92,11 @@ for orphan in "$UNIT_DIR"/*.timer; do
     # Only pairs that run something this project installed.
     grep -q "$BIN_DIR/onedrive-" "$orphan_service" 2>/dev/null || continue
     if systemctl --user show-environment >/dev/null 2>&1; then
+        # Both halves: the watcher is a long-lived process, so removing its unit
+        # file while it stays enabled leaves it restarting against a script this
+        # run has just deleted.
         systemctl --user disable --now "$orphan_unit.timer" 2>/dev/null || true
+        systemctl --user disable --now "$orphan_unit-watch.service" 2>/dev/null || true
     fi
     rm -f "$orphan" "$orphan_service" "$UNIT_DIR/$orphan_unit-watch.service"
     rm -rf "$UNIT_DIR/$orphan_unit.timer.d"

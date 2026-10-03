@@ -1138,7 +1138,13 @@ class Tray:
 
             def worker():
                 try:
-                    self.folders = remote_folders(self.remote)
+                    listed = remote_folders(self.remote)
+                    # None means the listing failed. Storing it turned the submenu
+                    # into one greyed "Loading…" row, and a folder the user had
+                    # deselected could not be ticked again until the next
+                    # half-hour refresh.
+                    if listed is not None:
+                        self.folders = listed
                 finally:
                     self.folders_busy = False
 
@@ -1667,7 +1673,14 @@ class Tray:
         # read when a run ends, so a standalone --settings save has to land in
         # self.cfg as well, and apply_settings stores the rest for the callers
         # that read them later.
-        self.apply_settings(load_config())
+        #
+        # UNIT_NAME is the exception. self.service, self.timer and self.watch were
+        # resolved from it when the tray started, and the poll keeps asking about
+        # those; letting the file move it would have the dialog write a drop-in
+        # for a unit nothing polls.
+        fresh = load_config()
+        fresh["UNIT_NAME"] = self.cfg.get("UNIT_NAME", fresh.get("UNIT_NAME", ""))
+        self.apply_settings(fresh)
 
     def on_settings(self, *_):
         """Open the settings window; it applies its changes to this tray."""
@@ -1750,6 +1763,10 @@ class Tray:
         """start/stop/enable the timer and the watcher together."""
         for unit in (self.timer, self.watch):
             self._sc(*action, unit)
+        # Here rather than at each caller: forgetting one left the cached answer
+        # describing the units as they were before, and the next poll then deleted
+        # a pause stamp or claimed sync was off.
+        self._units_changed()
 
     def pause_for(self, minutes: int):
         """Stop syncing for a while and let systemd bring it back by itself.
@@ -2065,7 +2082,9 @@ class Tray:
             # A manual run can start and finish between two polls, and then there
             # is nothing to announce: without forgetting the request, the next
             # scheduled success was announced as though the user had started it.
-            if syncing:
+            # While the start is still in flight nothing is counted, or a run
+            # that is slow to come up would be forgotten before it began.
+            if syncing or self.busy:
                 self.manual_seen_syncing = True
                 self.manual_ticks = 0
             else:
@@ -2307,6 +2326,13 @@ def _settings_dialog_class():
             for value in BANDWIDTH_CHOICES:
                 self.combo_bw.append(bw_id(value),
                                      self.t("Unlimited") if not value else value)
+            # A value set by hand, 1.5M say, is not one of the choices. Appending
+            # it keeps it visible and round-trips it; without this the combo had
+            # no matching id, get_active_id() returned None, and any Save wrote
+            # BW_LIMIT="" over a setting that was working.
+            if self.original["BW_LIMIT"] and self.original["BW_LIMIT"] not in BANDWIDTH_CHOICES:
+                self.combo_bw.append(bw_id(self.original["BW_LIMIT"]),
+                                     self.original["BW_LIMIT"])
             self.combo_bw.set_active_id(bw_id(self.original["BW_LIMIT"]))
             row(7, self.t("Bandwidth limit"), self.combo_bw)
 
@@ -2360,7 +2386,11 @@ def _settings_dialog_class():
                 "WATCH": "1" if self.check_watch.get_active() else "0",
                 "NOTIFY_ON_SUCCESS": "1" if self.check_notify.get_active() else "0",
                 "MAX_DELETE": str(int(self.spin_delete.get_value())),
-                "BW_LIMIT": bw_value(self.combo_bw.get_active_id()),
+                # No matching entry means the combo lost the value rather than
+                # the user clearing it, so the config keeps what it had.
+                "BW_LIMIT": (bw_value(self.combo_bw.get_active_id())
+                             if self.combo_bw.get_active_id() is not None
+                             else self.original["BW_LIMIT"]),
                 "CHECK_ACCESS": "1" if self.check_access.get_active() else "0",
             }
 

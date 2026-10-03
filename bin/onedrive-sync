@@ -295,7 +295,14 @@ esac
 read -r -a BISYNC_OPTS <<<"$BISYNC_ARGS"
 ARGS=(bisync "$REMOTE" "$LOCAL")
 ARGS+=("${BISYNC_OPTS[@]}")
-ARGS+=(--log-level INFO --log-file "$LOG")
+# rclone refuses -v together with --log-level ("Can't set -v and --log-level"),
+# so asking for --verbose used to fail every attempt of the run. Verbose implies
+# debug, which is what the flag is for.
+if [[ " ${BISYNC_OPTS[*]-} ${*:-} " == *" --verbose "* ]]; then
+    ARGS+=(--log-file "$LOG")
+else
+    ARGS+=(--log-level INFO --log-file "$LOG")
+fi
 [ -n "$max_delete_pct" ] && ARGS+=(--max-delete "$max_delete_pct")
 
 # The tray's settings dialog writes BW_LIMIT. A value rclone cannot parse turns
@@ -352,7 +359,18 @@ if [ -n "$EXCLUDE_FOLDERS_FILE" ] && [ -f "$EXCLUDE_FOLDERS_FILE" ]; then
                 log_line "WARNING: ignoring exclude entry '$folder': a folder name here must not contain '/' or '..'"
                 continue ;;
         esac
-        ARGS+=(--exclude "/${folder}/**")
+        # rclone reads the pattern as a glob, so a folder literally named
+        # "Photos [2024]" was handed to it as a character class, matched nothing,
+        # and kept syncing while the tray reported it as left out. Each
+        # metacharacter is wrapped in a class of its own, which is how a glob
+        # spells "this character, literally".
+        # The closing bracket first: wrapping a "[" produces a "]" of its own,
+        # and a later pass over "]" would corrupt it.
+        # One pass, because two would corrupt each other: wrapping "[" produces a
+        # "]" for the next replacement to escape. The class holds "]" first, which
+        # is how a bracket expression spells it.
+        literal="$(printf '%s' "$folder" | sed -e 's/[][*?{}]/[&]/g')"
+        ARGS+=(--exclude "/${literal}/**")
         excluded=$((excluded + 1))
     done < "$EXCLUDE_FOLDERS_FILE"
     [ "$excluded" -gt 0 ] && log_line "NOTICE: ${excluded} folder(s) deselected"

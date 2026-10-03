@@ -877,8 +877,12 @@ argv_row "CHECK_ACCESS=1 with a CHECK_FILENAME adds the name as well" \
 CHECK_FILENAME=".sync-id"'
 argv_row "--dry-run is forwarded and changes nothing else" \
     "$(argv_line "$CAP/local" '--max-delete 50 --dry-run')" "" --dry-run
-argv_row "--verbose is forwarded and changes nothing else" \
-    "$(argv_line "$CAP/local" '--max-delete 50 --verbose')" "" --verbose
+# rclone refuses -v together with --log-level, so --verbose drops the level and
+# keeps only the log file. Pinned here because the flag used to fail every
+# attempt of the run.
+argv_row "--verbose is forwarded, and replaces --log-level" \
+    "bisync $CAP_REMOTE $CAP/local $DEF_ARGS --log-file $CAP/sync.log --max-delete 50 --verbose" \
+    "" --verbose
 argv_row "--force is forwarded and the delete cap stays on the line" \
     "$(argv_line "$CAP/local" '--max-delete 50 --force')" "" --force
 argv_row "--resync reaches rclone exactly once" \
@@ -961,6 +965,16 @@ check "a name with .. is refused too" \
     grep -qF "ignoring exclude entry 'Evil..Dir'" "$CAP/sync.log"
 check "and the bare .. entry with it" \
     grep -qF "ignoring exclude entry '..'" "$CAP/sync.log"
+
+# rclone reads the pattern as a glob. A folder named "Photos [2024]" was handed
+# over as a character class, matched nothing, and kept syncing while the tray
+# reported it as left out; a name holding a "*" behaves the same way.
+printf 'Photos [2024]\nstar*dir\n' > "$EXF"
+args="$(probe_case "EXCLUDE_FOLDERS_FILE=\"$EXF\"")"
+check "a name with a bracket is escaped, not read as a class" \
+    grep -qF -- '--exclude /Photos [[]2024[]]/**' <<<"$args"
+check "a name with a star is escaped too" \
+    grep -qF -- '--exclude /star[*]dir/**' <<<"$args"
 
 # ---------------------------------------------------------------- the log itself
 # mkdir -p with 2>/dev/null hid its own failure, so a run could report success
