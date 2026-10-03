@@ -14,6 +14,6 @@
 # design; every other case must pass everywhere.
 dependency-matrix.sh 39
 install-flow.sh 232
-filters.sh 35
-docs.sh 48
+filters.sh 37
+docs.sh 55
 tray.sh 136

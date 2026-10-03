@@ -169,6 +169,24 @@ run "--max refuses a negative number" 2 "positive integer" \
 run "CON.txt is refused like CON" 1 "reserved name: CON.txt" \
     env XDG_CONFIG_HOME="$WORK/checkcfg" "$CHECKER"
 rm -f "$CHK_TREE/CON.txt"
+
+# A directory whose name the service will rewrite covers everything inside it, so
+# it is one entry rather than one per file: 501 lines for one fix is a report
+# nobody reads, and the docs promise one entry per offending subtree.
+mkdir -p "$CHK_TREE/renamed:dir"
+: > "$CHK_TREE/renamed:dir/one.md"
+: > "$CHK_TREE/renamed:dir/two.md"
+: > "$CHK_TREE/renamed:dir/three.md"
+CHK_OUT="$(env XDG_CONFIG_HOME="$WORK/checkcfg" "$CHECKER" 2>&1)"; CHK_RC=$?
+check "a renamed directory is one entry, not one per file under it" \
+    grep -qF "OneDrive will rename these (1)" <<<"$CHK_OUT"
+if grep -q "renamed:dir/one.md" <<<"$CHK_OUT"; then
+    bad "the files inside a renamed directory were listed again"
+else
+    ok "and the files inside it are not listed again"
+fi
+rm -rf "$CHK_TREE/renamed:dir"
+
 : > "$CHK_TREE/a:b.md"
 run "a renamed name does not fail the check" 0 "will rename these" \
     env XDG_CONFIG_HOME="$WORK/checkcfg" "$CHECKER"

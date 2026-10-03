@@ -98,6 +98,9 @@ declare -A seen_lower=()
 # Every path that landed in any group, so the closing line can count distinct
 # paths: one file that is both renamed and over-long is one thing to look at.
 declare -A reported=()
+# Directories already reported as renamed, so their contents are covered by that
+# one entry rather than repeated per file.
+declare -A renamed_dirs=()
 
 # Microsoft reserves the Windows device names, and the one that was tried was
 # refused: "CON: Failed to copy: invalidRequest: Invalid request". Windows also
@@ -171,7 +174,11 @@ is_valid_utf8() {
 add() {  # add <group> <path> <entry>
     case "$1" in
         long)     long_paths=$((long_paths + 1)); long_list+=("$3") ;;
-        renamed)  renamed=$((renamed + 1));       renamed_list+=("$3") ;;
+        renamed)  renamed=$((renamed + 1));       renamed_list+=("$3")
+                  # A directory with a name the service will rewrite affects
+                  # everything under it, and find visits it first, so remembering
+                  # it here lets the scan below report the subtree once.
+                  [ -d "$LOCAL/$2" ] && renamed_dirs["$2"]=1 ;;
         rejected) rejected=$((rejected + 1));     rejected_list+=("$3") ;;
     esac
     reported["$2"]=1
@@ -232,6 +239,23 @@ while IFS= read -r -d '' path; do
         add rejected "$rel" "$rel clashes with ${seen_lower[$key]} (OneDrive ignores case)"
     else
         seen_lower[$key]="$name"
+    fi
+
+    # An ancestor already reported as renamed covers this path: the documentation
+    # promises one entry per offending subtree, and a directory named "a:b" with
+    # five hundred files in it used to be reported five hundred and one times.
+    if [ "${#renamed_dirs[@]}" -gt 0 ]; then
+        ancestor="${rel%/*}"
+        skip_renamed=0
+        while [ -n "$ancestor" ] && [ "$ancestor" != "$rel" ]; do
+            if [ -n "${renamed_dirs["$ancestor"]:-}" ]; then
+                skip_renamed=1
+                break
+            fi
+            [ "$ancestor" = "${ancestor%/*}" ] && break
+            ancestor="${ancestor%/*}"
+        done
+        [ "$skip_renamed" -eq 1 ] && continue
     fi
 
     # --- what rclone will silently rename on the way up ----------------------

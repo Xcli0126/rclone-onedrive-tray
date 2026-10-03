@@ -69,8 +69,9 @@ clicking "Sync now" while the timer fires waits instead of racing. Two bisync pr
 same file pair delete each other's listing files, and the recovery costs a full `--resync`.
 
 Deletions are capped at `MAX_DELETE` files per run. A wiped local folder aborts the sync rather
-than propagating to the cloud, though it does mean a deliberate bulk delete needs
-`onedrive-sync --resync` afterwards.
+than propagating to the cloud, though it does mean a deliberate bulk delete needs `onedrive-sync
+--force` once, which lifts the cap for that run. A `--resync` looks like the safer answer and is
+not: nothing is deleted by a resync, so every file you removed locally comes back down.
 
 Conflicts keep both copies. When a file changed on both sides, rclone renames both versions
 instead of picking a winner, so nothing is lost. The cost is that you merge them by hand.

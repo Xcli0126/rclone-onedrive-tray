@@ -193,6 +193,29 @@ else
     done
 fi
 
+# ------------------------------------------- the failure patterns two files share
+# onedrive-sync classifies rclone's output with these patterns and tags its own
+# hint line "[tag] message"; onedrive-doctor reads the same log and carries a
+# second copy of the same table, because a wrapper killed mid-run leaves raw
+# rclone text and no tag. The copies were identical the day this was written and
+# nothing kept them so: a class added to one would have the two disagree about the
+# same failure, silently.
+title "the failure patterns the wrapper and the doctor share"
+wrapper_re="$(sed -n "s/^RE_\([A-Z_]*\)='\(.*\)'$/\1|\2/p" bin/onedrive-sync | sort)"
+doctor_re="$(sed -n "s/^RE_\([A-Z_]*\)='\(.*\)'$/\1|\2/p" bin/onedrive-doctor | sort)"
+if [ -z "$wrapper_re" ]; then
+    bad "no RE_ patterns were found in bin/onedrive-sync"
+else
+    while IFS= read -r pair; do
+        name="${pair%%|*}"
+        if grep -qxF -- "$pair" <<<"$doctor_re"; then
+            ok "both files classify RE_$name the same way"
+        else
+            bad "the wrapper and the doctor disagree about RE_$name"
+        fi
+    done <<<"$wrapper_re"
+fi
+
 # ---------------------------------------------------------------- installer drift
 # A script that install.sh ships and uninstall.sh forgets is invisible until
 # somebody removes the package and finds a stray binary in ~/.local/bin.
@@ -201,7 +224,10 @@ for path in bin/*; do
     [ -f "$path" ] || continue
     name="$(basename "$path")"
     check "install.sh installs $name" grep -q "bin/$name\"" install.sh
-    check "uninstall.sh removes $name" grep -q "BIN_DIR/$name" uninstall.sh
+    # The real removal, not just a mention: the old pattern matched any line
+    # naming the file, so deleting the rm left this check green.
+    check "uninstall.sh removes $name" \
+        grep -qE "rm[[:space:]]+-[rf]+.*\"[^\"]*BIN_DIR/$name\"" uninstall.sh
 done
 
 summary

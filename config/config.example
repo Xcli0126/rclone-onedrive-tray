@@ -51,8 +51,10 @@ MAX_DELETE="100"
 #
 #     onedrive-check-access     # creates them, safe to run twice
 #
-# then set CHECK_ACCESS="1" and run one `onedrive-sync --resync`. The abort names
-# the side it could not read, and nothing is copied or deleted when it trips.
+# then set CHECK_ACCESS="1". No --resync: measured on rclone 1.75.1, a run with
+# the markers in place uses the new flag and asks for nothing, while a resync
+# would download back every file you have deleted locally. The abort names the
+# side it could not read, and nothing is copied or deleted when it trips.
 # docs/TROUBLESHOOTING.md has the message and the recovery.
 CHECK_ACCESS="0"
 
