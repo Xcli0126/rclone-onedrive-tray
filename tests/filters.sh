@@ -149,7 +149,7 @@ mkdir -p "$CHK_CFG" "$CHK_TREE"
 
 # A 400-character remote path puts every entry past the measured 380 limit, so
 # the trailing slash on LOCAL is the only thing that can hide the report.
-CHK_REMOTE="onedrive:$(printf 'r%.0s' $(seq 1 400))"
+CHK_REMOTE="onedrive:$(printf 'r%.0s' {1..400})"
 printf 'LOCAL="%s/"\nREMOTE="%s"\n' "$CHK_TREE" "$CHK_REMOTE" > "$CHK_CFG/config"
 run "a trailing slash on LOCAL still reports over-long paths" 1 "too long" \
     env XDG_CONFIG_HOME="$WORK/checkcfg" "$CHECKER"
@@ -203,7 +203,7 @@ for _ in 1 2 3 4 5 6; do
     CHK_DEEP="$CHK_DEEP/$(printf 'd%.0s' $(seq 1 55))"
 done
 mkdir -p "$CHK_DEEP"
-CHK_LONG="$CHK_DEEP/$(printf 'd%.0s' $(seq 1 54)):$(printf 'x%.0s' $(seq 1 40))"
+CHK_LONG="$CHK_DEEP/$(printf 'd%.0s' {1..54}):$(printf 'x%.0s' {1..40})"
 mkdir "$CHK_LONG"
 CHK_OUT="$(env XDG_CONFIG_HOME="$WORK/checkcfg" "$CHECKER" 2>&1)"; CHK_RC=$?
 check "a name that is renamed and over-long still exits 1" \
