@@ -440,15 +440,34 @@ run "all present: installs" 0 "Installed" \
 # The tray's stack is not the sync's: the README tells a server user to run
 # onedrive-sync and the timer, and blocking the whole install on a desktop stack
 # made that impossible to follow. It warns, installs the sync half, and leaves the
-# icon out.
+# icon out. The entry is pre-created so the case covers the machine that used to
+# have the tray and no longer has the stack, which is the state the removal is
+# for; a first install has nothing there to remove.
+# XDG_CONFIG_HOME is what install.sh reads, so the entry lives directly under it.
+mkdir -p "$WORK/i2/autostart"
+printf 'stale entry from a machine that used to have the tray\n' \
+    > "$WORK/i2/autostart/rclone-onedrive-tray.desktop"
 run "no pycairo: installs the sync half and names python3-cairo" 0 "python3-cairo" \
     env PYTHONPATH="$PYSHIM_DIR" HIDE_MODULE=cairo XDG_CONFIG_HOME="$WORK/i2" \
         XDG_CACHE_HOME="$WORK/i2c" XDG_DATA_HOME="$WORK/i2d" \
     bash "$SRC_DIR/install.sh" --prefix "$WORK/i2p" --no-start
 check "and the wrapper is installed anyway" \
     test -x "$WORK/i2p/bin/onedrive-sync"
-check "and no autostart entry is offered for a tray that cannot run" \
-    test ! -e "$WORK/i2/.config/autostart/rclone-onedrive-tray.desktop"
+# The old check here named "$WORK/i2/.config/autostart", a path this run never
+# writes to: it passed because the file was absent from a directory that is not
+# the autostart directory at all.
+check "and no autostart entry is left for a tray that cannot run" \
+    test ! -e "$WORK/i2/autostart/rclone-onedrive-tray.desktop"
+# Put one back and run again: the removal has to be reported, so a user who had
+# the tray installed before the packages went away is told what happened to it.
+printf 'stale entry from a machine that used to have the tray\n' \
+    > "$WORK/i2/autostart/rclone-onedrive-tray.desktop"
+run "a re-run with the entry back removes it and says so" 0 "removed the autostart entry" \
+    env PYTHONPATH="$PYSHIM_DIR" HIDE_MODULE=cairo XDG_CONFIG_HOME="$WORK/i2" \
+        XDG_CACHE_HOME="$WORK/i2c" XDG_DATA_HOME="$WORK/i2d" \
+    bash "$SRC_DIR/install.sh" --prefix "$WORK/i2p" --no-start
+check "and it is gone afterwards" \
+    test ! -e "$WORK/i2/autostart/rclone-onedrive-tray.desktop"
 build_reduced_path flock
 run "no flock: refuses and names flock" 1 "flock" \
     env -i PATH="$REDUCED" HOME="$HOME" XDG_CONFIG_HOME="$WORK/i3" \

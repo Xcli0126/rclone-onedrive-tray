@@ -1510,6 +1510,399 @@ def scenario_config_reload():
     return data
 
 
+def scenario_config_comments():
+    """A trailing comment in the config is a comment to the tray too.
+
+    bash reads config with `.`, which drops an unquoted `#` and everything after
+    it. The tray's own reader kept the comment as part of the value, so a
+    hand-edited INTERVAL_MIN="15"   # every fifteen minutes showed the default 15
+    in the settings dialog while the wrapper and systemd used the real number, and
+    a comment after LOG or LOCAL pointed a menu item at a path with prose in it.
+    A # that is not preceded by whitespace is inside the word bash is reading and
+    stays, which is why `foo --tag#1` and a bare `a#b` have to survive.
+    """
+    # A table, so the shell side names what it is checking rather than indexing
+    # into a list whose order nothing else depends on.
+    values = {
+        # Removed: a comment at the end of the line, after the closing quote or
+        # after a bare word, with one or more spaces in front of the #.
+        "INTERVAL_MIN": '"15" # every fifteen minutes',
+        "SHOW_ICON": '1 # keep the icon',
+        "BW_LIMIT": "5M\t# megabytes",
+        # Kept: a # inside the quotes, a # inside the word, a # in the middle of
+        # a quoted value, and an escaped hash that is not a comment either.
+        "MIXED": 'value#1  # comment',
+        "QUOTED": '"a # b"',
+        "TAGGED": 'foo --tag#1',
+        "UNQUOTED": "a#b",
+        "SINGLE": "'b # c'",
+        "ESCAPED": "x \\# y # gone",
+    }
+    config = os.path.join(WORK, "comments-config")
+    with open(config, "w", encoding="utf-8") as fh:
+        fh.write('OPEN_APP_CMD="foo --tag#1"   # the launcher\n')
+        fh.write('UNIT_NAME="a#b"\n')
+        fh.write('LOCAL="%s"   # the sync folder\n' % os.path.join(WORK, "local"))
+        for key, value in values.items():
+            fh.write("%s=%s\n" % (key, value))
+
+    # load_config() reads the module global, so pointing that at the file above is
+    # how this scenario reads a file the rest of the suite does not share. It is
+    # put back before anything else runs.
+    real_config = MODULE.CONFIG_FILE
+    try:
+        MODULE.CONFIG_FILE = config
+        cfg = MODULE.load_config()
+    finally:
+        MODULE.CONFIG_FILE = real_config
+    return {
+        "values": {key: cfg.get(key) for key in values},
+        "open_app_cmd": cfg.get("OPEN_APP_CMD"),
+        "unit_name": cfg.get("UNIT_NAME"),
+        "local": cfg.get("LOCAL"),
+        "local_want": os.path.join(WORK, "local"),
+    }
+
+
+def scenario_config_reload_fresh():
+    """A reload re-resolves the six paths, and a changed one rebuilds the menu.
+
+    __init__ turns six config keys into attributes once and the rest of the class
+    reads the attributes: the two menu items that open a path, the "Open {app}"
+    label and its command, the exclusion list the folder submenu reads, the remote
+    the quota and folder listing ask about, and the root the delete guard checks
+    against. A reload that only refilled self.cfg left every one of them pointing
+    at the old file while the menu and the dialog claimed the new one, so the
+    folder menu read the wrong exclusion list and the delete guard checked the
+    wrong root.
+    """
+    paths = {
+        "local_old": os.path.join(WORK, "local"),
+        "local_new": os.path.join(WORK, "reloaded", "local"),
+        "log_old": os.path.join(WORK, "cache", "sync.log"),
+        "log_new": os.path.join(WORK, "reloaded", "cache", "sync.log"),
+        "exclude_old": os.path.join(WORK, "config", "rclone-onedrive-tray",
+                                    "exclude-folders.txt"),
+        "exclude_new": os.path.join(WORK, "reloaded", "exclude-folders.txt"),
+        "old_link": os.path.join(WORK, "reloaded", "local", "link-to-old-root"),
+        "open_name_old": "the old app",
+        "open_name_new": "the new app",
+        "remote_old": "old-remote:",
+        "remote_new": "fresh-remote:",
+    }
+    # The tray polls a config file whose path is a module global, so swapping that
+    # global is how the file's new contents reach the reload without a second tray
+    # process. Nothing else in the suite depends on the new path.
+    real_config = MODULE.CONFIG_FILE
+    config = os.path.join(WORK, "reloaded-config")
+    os.makedirs(os.path.dirname(paths["local_new"]), exist_ok=True)
+    os.makedirs(os.path.join(paths["local_new"], "ordinary", "sub"), exist_ok=True)
+    os.makedirs(os.path.join(paths["local_new"], "sibling-old"), exist_ok=True)
+    os.makedirs(os.path.join(paths["local_old"], "ordinary"), exist_ok=True)
+    # A symlink inside the new root pointing back at the old one. Its real path is
+    # outside the new root, so the guard has to refuse it - and refusing it is only
+    # possible if the guard is using the reloaded root, because the old root's own
+    # prefix would accept it.
+    if not os.path.lexists(paths["old_link"]):
+        os.symlink(paths["local_old"], paths["old_link"])
+    with open(paths["exclude_new"], "w", encoding="utf-8") as fh:
+        fh.write("git\n")
+
+    # Where the two path items would open, and what launching the app would run.
+    # Captured instead of opening a window or starting a program.
+    opened = []
+    spawned = []
+
+    def fake_open_path(self, path, *args, **kwargs):
+        opened.append(path)
+        return ""
+
+    def fake_spawn(argv):
+        spawned.append(list(argv))
+        return True
+
+    real_open_path = MODULE.Tray.open_path
+    real_spawn = MODULE.spawn
+    real_message = MODULE.Gtk.MessageDialog
+    MODULE.Tray.open_path = fake_open_path
+    MODULE.spawn = fake_spawn
+
+    asked = []
+
+    class FakeDialog:
+        def __init__(self, *a, **k):
+            asked.append(k.get("text", ""))
+
+        def format_secondary_text(self, text):
+            pass
+
+        def add_button(self, label, response):
+            pass
+
+        def run(self):
+            return MODULE.Gtk.ResponseType.OK
+
+        def destroy(self):
+            pass
+
+    MODULE.Gtk.MessageDialog = FakeDialog
+    shown = []
+    real_notify = MODULE.Notify
+    MODULE.Notify = install_fake_notify(shown)
+
+    def fresh(lang=None):
+        with open(config, "w", encoding="utf-8") as fh:
+            fh.write('REMOTE="%s"\n' % paths["remote_new"])
+            fh.write('LOCAL="%s"\n' % paths["local_new"])
+            fh.write('LOG="%s"\n' % paths["log_new"])
+            fh.write('EXCLUDE_FOLDERS_FILE="%s"\n' % paths["exclude_new"])
+            fh.write('OPEN_APP_CMD="/bin/true"\n')
+            fh.write('OPEN_APP_NAME="%s"\n' % paths["open_name_new"])
+            fh.write('UNIT_NAME="zmoved"\n')
+            fh.write('SHOW_ICON="1"\n')
+            if lang is not None:
+                fh.write('UI_LANG="%s"\n' % lang)
+
+    # This scenario is the one that writes a config file of its own, and writing
+    # "ordinary" into the exclusion list is part of driving the delete guard. Both
+    # files are put back afterwards, because the writes would otherwise leak into
+    # the scenarios that run after this one.
+    original_config = read_text(real_config)
+    original_excludes = read_text(paths["exclude_old"])
+
+    try:
+        # The tray starts on the file it will keep polling, with the old values in
+        # it. The table above says what those are, so this does not depend on what
+        # the suite wrote into its own config at startup.
+        with open(config, "w", encoding="utf-8") as fh:
+            fh.write('REMOTE="%s"\n' % paths["remote_old"])
+            fh.write('LOCAL="%s"\n' % paths["local_old"])
+            fh.write('LOG="%s"\n' % paths["log_old"])
+            fh.write('EXCLUDE_FOLDERS_FILE="%s"\n' % paths["exclude_old"])
+            fh.write('OPEN_APP_CMD="/bin/false"\n')
+            fh.write('OPEN_APP_NAME="%s"\n' % paths["open_name_old"])
+            fh.write('UNIT_NAME="zmoved"\n')
+            fh.write('UI_LANG="en"\n')
+        MODULE.CONFIG_FILE = config
+        tray = MODULE.Tray(MODULE.load_config())
+        GLib.timeout_add(200, tray.poll)
+        pump(0.5)
+        data = {"start_local": tray.local, "start_app_cmd": tray.open_cmd}
+        data["start_local_want"] = paths["local_old"]
+        # The paths the shell side compares against, so the expectations are not
+        # rebuilt there from a second guess at the sandbox layout.
+        data.update({key: value for key, value in paths.items()
+                     if key in ("local_new", "log_new", "exclude_new",
+                                "open_name_old", "open_name_new")})
+        # The remote is put out of the way so the assertion below is about the
+        # reload rather than about what the suite's config happens to say.
+        tray.remote = paths["remote_old"]
+
+        # The remote listing the folder submenu is built from. One folder is on the
+        # new exclusion list and one is not, so a stale exclusion list is a tick in
+        # the wrong place rather than a missing row.
+        tray.folders = ["src", "git"]
+        tray.folders_seen = ["src", "git"]
+
+        # No UI_LANG change here on purpose: apply_settings only rebuilds the menu
+        # for a language change, so the label below moves only if the code that
+        # re-resolves the paths is also what rebuilds it.
+        fresh()
+        data["reloaded"] = wait_for(
+            lambda: (tray.open_name == paths["open_name_new"]
+                     and tray.local == paths["local_new"]), 8.0)
+        labels = visible_labels(tray.menu)
+        data["old_label"] = "Open %s" % paths["open_name_old"]
+        data["new_label"] = "Open %s" % paths["open_name_new"]
+        data["old_label_gone"] = data["old_label"] not in labels
+        data["new_label_there"] = data["new_label"] in labels
+
+        data["remote"] = tray.remote
+        data["log"] = tray.log
+        data["exclude_file"] = tray.exclude_file
+
+        # Activating a menu item resolves its handler the same way a right-click
+        # does, so this is what the two "open" rows would really do. The app row
+        # is looked up by the new label rather than assumed: when the menu was not
+        # rebuilt, the old label is what is there, and that is a failure the shell
+        # side reports rather than a crash here.
+        find_at(tray.menu, "Open sync folder").activate()
+        find_at(tray.menu, "View sync log").activate()
+        try:
+            app_item = find_at(tray.menu, data["new_label"])
+            data["app_item_found"] = True
+        except SystemExit:
+            app_item = find_at(tray.menu, data["old_label"])
+            data["app_item_found"] = False
+        app_item.activate()
+        pump(0.3)
+        data["opened"] = opened
+        data["spawned"] = spawned
+        data["open_name"] = tray.open_name
+
+        # The folder submenu is built from the exclusion list at build time.
+        data["folder_checks"] = {}
+        for item in find_at(tray.menu, "Folders to sync").get_submenu().get_children():
+            label = item.get_label()
+            if label and hasattr(item, "get_active"):
+                data["folder_checks"][label] = bool(item.get_active())
+
+        # The delete guard checks against the new root. A folder inside it is
+        # offered, a sibling whose name merely starts with the root's is outside it
+        # once reached through a symlink, and a symlink pointing at the old root
+        # resolves outside the new one - which is the shape that only the reloaded
+        # root refuses.
+        link = os.path.join(paths["local_new"], "link-to-sibling")
+        if not os.path.lexists(link):
+            os.symlink(os.path.join(paths["local_new"], "sibling-old"), link)
+        data["new_delete"] = tray._local_delete_path("ordinary")
+        data["link_delete"] = tray._local_delete_path("link-to-old-root")
+        # The offer only stands on an exclusion that really took effect, and
+        # unticking a folder is the only way the handler ever reaches it.
+        MODULE.write_excluded_folders(tray.exclude_file, ["ordinary", "sibling-old"])
+        del shown[:]
+        MODULE.Gtk.MessageDialog = FakeDialog
+        del asked[:]
+        tray._offer_local_delete("ordinary")
+        data["asked"] = list(asked)
+        data["deleted_new"] = wait_for(
+            lambda: not os.path.isdir(os.path.join(paths["local_new"], "ordinary")), 8.0)
+        data["told_deleted"] = any("deleted" in body.lower() for body in shown)
+        data["old_kept"] = os.path.isdir(os.path.join(paths["local_old"], "ordinary"))
+        data["sibling_kept"] = os.path.isdir(
+            os.path.join(paths["local_new"], "sibling-old"))
+
+        # A language change on top of the same file still reaches the menu, which
+        # is the mechanism the rebuild above reuses.
+        fresh(lang="zh")
+        data["switched"] = wait_for(
+            lambda: any("\u4e00" <= c <= "\u9fff"
+                        for c in "".join(visible_labels(tray.menu))), 8.0)
+    finally:
+        MODULE.CONFIG_FILE = real_config
+        MODULE.Tray.open_path = real_open_path
+        MODULE.spawn = real_spawn
+        MODULE.Gtk.MessageDialog = real_message
+        MODULE.Notify = real_notify
+        with open(real_config, "w", encoding="utf-8") as fh:
+            fh.write(original_config)
+        with open(paths["exclude_old"], "w", encoding="utf-8") as fh:
+            fh.write(original_excludes)
+    return data
+
+
+def scenario_log_result():
+    """The [tag] in a wrapper hint line is what the tray localises.
+
+    onedrive-sync writes "ERROR: attempt 3/3 failed (rc=1) [network] ..." into a
+    log shared with rclone, and the tray decides the icon and the notification
+    text from the tail of it. The tag is the contract between the two; without a
+    case here, a reworded tag or a changed regex kept the icon red and the hint
+    English with nothing failing.
+    """
+    cfg = dict(MODULE.load_config())
+    cfg["UI_LANG"] = "zh"
+    cfg["LOG"] = os.path.join(WORK, "reloaded", "result.log")
+    os.makedirs(os.path.dirname(cfg["LOG"]), exist_ok=True)
+    # The wrapper's own format, copied from bin/onedrive-sync: log_line prefixes
+    # date and time, and hint_for prints "[tag] message".
+    lines = [
+        "2026/10/03 22:20:58 NOTICE: delete cap MAX_DELETE=100 of about 1200 files "
+        "= --max-delete 8%",
+        "2026/10/03 22:21:14 ERROR : : error listing: dial tcp: i/o timeout",
+        "2026/10/03 22:21:16 ERROR: attempt 3/3 failed (rc=1) [network] network "
+        "problem reaching the remote, so nothing was changed; the next run will retry",
+    ]
+    with open(cfg["LOG"], "w", encoding="utf-8") as fh:
+        fh.write("\n".join(lines) + "\n")
+
+    tray = MODULE.Tray(cfg)
+    tail = read_text(cfg["LOG"])
+    kind, when, tag, raw = MODULE.read_last_result(tail)
+    cases = {"tagged": [kind, when, tag, raw, tray._hint(tag, raw)]}
+
+    success = ("2026/10/03 22:30:00 INFO  : Bisync successful\n")
+    kind, when, tag, raw = MODULE.read_last_result(success)
+    cases["synced"] = [kind, when, tag, raw, tray._hint(tag, raw)]
+
+    plain = ("2026/10/03 22:40:00 ERROR : Bisync aborted. Must run --resync to "
+             "recover.\n")
+    kind, when, tag, raw = MODULE.read_last_result(plain)
+    cases["untagged"] = [kind, when, tag, raw, tray._hint(tag, raw)]
+
+    # The same three lines as this tray sees them through poll(), not only through
+    # the parser: the icon and the notification come from _apply_state, and the
+    # log is read behind a size/mtime cache. The timer answer is the stub's own,
+    # so what the state machine is handed is what a tick hands it.
+    real_notify = MODULE.Notify
+    MODULE.Notify = install_fake_notify([])
+    try:
+        _, timer_state = tray.unit_states()
+        tray.was_syncing = True
+        tray.notified_error_at = None
+        tray.state = None
+        tray._apply_state(False, timer_state)
+        cases["state"] = tray.state
+        cases["status"] = tray.item_status.get_label() or ""
+    finally:
+        MODULE.Notify = real_notify
+    return cases
+
+
+def scenario_log_cache_moved():
+    """A reload that moves LOG drops the cached tail rather than reusing it.
+
+    _log_snapshot() decides whether to re-read the log from its size and mtime
+    alone, which is what keeps an idle tick cheap. A reload that moves LOG to a
+    file matching the old one's pair, which is what a `cp -p` of a log leaves
+    behind, was therefore read as unchanged: the status line went on describing
+    the file the tray had been reading while the menu, the settings window and
+    the poll all pointed at the new one. The second file is written to the same
+    byte length and given the first one's timestamp on purpose, because that
+    collision is the whole of the bug.
+    """
+    old = os.path.join(WORK, "cache", "moved-from.log")
+    new = os.path.join(WORK, "moved", "moved-to.log")
+    os.makedirs(os.path.dirname(new), exist_ok=True)
+    failure = "2026/10/01 10:00:00 ERROR: [network] no such host\n"
+    success = "2026/10/01 11:00:00 INFO  : Bisync successful"
+    success = success + " " * (len(failure) - len(success) - 1) + "\n"
+    with open(old, "w", encoding="utf-8") as fh:
+        fh.write(failure)
+    with open(new, "w", encoding="utf-8") as fh:
+        fh.write(success)
+    info = os.stat(old)
+    os.utime(new, ns=(info.st_atime_ns, info.st_mtime_ns))
+
+    cfg = dict(MODULE.load_config())
+    cfg["LOG"] = old
+    tray = MODULE.Tray(cfg)
+    tray._log_snapshot()          # the tick that caches the old file
+    data = {"before": list(tray.log_result),
+            "same_pair": (os.stat(new).st_size == info.st_size
+                          and os.stat(new).st_mtime_ns == info.st_mtime_ns)}
+
+    # The reload the poll performs when the config file's signature moves, on a
+    # file whose only change is LOG. Nothing else in the config moves, so the log
+    # cache is the only thing this can be measuring.
+    real_config = MODULE.CONFIG_FILE
+    config = os.path.join(WORK, "moved-log-config")
+    with open(config, "w", encoding="utf-8") as fh:
+        fh.write('REMOTE="%s"\n' % (cfg.get("REMOTE") or ""))
+        fh.write('LOCAL="%s"\n' % cfg["LOCAL"])
+        fh.write('LOG="%s"\n' % new)
+        fh.write('UI_LANG="en"\nSHOW_ICON="1"\n')
+    try:
+        MODULE.CONFIG_FILE = config
+        tray._reload_config()
+    finally:
+        MODULE.CONFIG_FILE = real_config
+    tray._log_snapshot()
+    data["after"] = list(tray.log_result)
+    data["want"] = list(MODULE.read_last_result(success))
+    return data
+
+
 def scenario_pause_survives_poll():
     """A pause the tray arranged survives the poll that follows it.
 
@@ -1773,6 +2166,10 @@ SCENARIOS = {
     "notify": scenario_notify,
     "notify-manual": scenario_notify_manual,
     "config-reload": scenario_config_reload,
+    "config-comments": scenario_config_comments,
+    "config-reload-fresh": scenario_config_reload_fresh,
+    "log-result": scenario_log_result,
+    "log-cache-moved": scenario_log_cache_moved,
     "pause-survives-poll": scenario_pause_survives_poll,
     "manual-missed": scenario_manual_missed,
     "poll-cost": scenario_poll_cost,
@@ -2203,6 +2600,182 @@ if d["unrelated_visible"] != d["visible_after"]:
 if d["unrelated_status_text"] != d["status_text_before"]:
     print("status text changed: %r -> %r"
           % (d["status_text_before"], d["unrelated_status_text"]))
+    raise SystemExit(1)
+'
+fi
+
+title "An inline comment in the config"
+# bash drops an unquoted # from a sourced config and keeps a # inside a word or
+# inside quotes. The tray's own reader used to keep the whole comment as part of
+# the value, so a hand-edited INTERVAL_MIN="15"   # every fifteen minutes showed
+# the default in the settings dialog while the wrapper and systemd used the real
+# one. The scenario reads the file through load_config() and the shell side names
+# each value it expects.
+if run_driver config-comments; then
+    check "a trailing comment is not part of the value" json_py '
+cases = {"INTERVAL_MIN": "15", "SHOW_ICON": "1", "BW_LIMIT": "5M"}
+for key, want in cases.items():
+    got = d["values"].get(key)
+    if got != want:
+        print("%s=%r, bash reads %r" % (key, got, want))
+        raise SystemExit(1)
+if d["open_app_cmd"] != "foo --tag#1":
+    print("a # inside the quotes was treated as a comment: %r"
+          % (d["open_app_cmd"],))
+    raise SystemExit(1)
+'
+    check "a # inside a word is not a comment" json_py '
+cases = {"TAGGED": "foo --tag#1", "UNQUOTED": "a#b", "MIXED": "value#1"}
+for key, want in cases.items():
+    got = d["values"].get(key)
+    if got != want:
+        print("%s=%r, a # with no space in front of it is not a comment" % (key, got))
+        raise SystemExit(1)
+'
+    check "a # in the middle of a quoted value survives" json_py '
+cases = {"QUOTED": "a # b", "SINGLE": "b # c", "ESCAPED": "x \\# y"}
+for key, want in cases.items():
+    got = d["values"].get(key)
+    if got != want:
+        print("%s=%r, wanted %r" % (key, got, want))
+        raise SystemExit(1)
+'
+    check "a quoted value before the comment is unchanged" json_py '
+if d["unit_name"] != "a#b":
+    print("UNIT_NAME=%r" % (d["unit_name"],))
+    raise SystemExit(1)
+if d["local"] != d["local_want"]:
+    print("LOCAL=%r wanted %r" % (d["local"], d["local_want"]))
+    raise SystemExit(1)
+'
+fi
+
+title "A reload re-resolves the six startup snapshots"
+# The config keys behind the two "open" rows, the folder submenu's exclusion
+# list, the remote the quota asks about and the delete guard's root are resolved
+# once in __init__ and read as attributes afterwards. A reload that only refilled
+# self.cfg left every one of them on the old file. The scenario reloads a config
+# with no language change in it, so the menu moves only if re-resolving the paths
+# is also what rebuilds it.
+if run_driver config-reload-fresh; then
+    check "the tray reloads the file it is polling" \
+        json_expr "d['reloaded']"
+    check "the delete guard uses the reloaded LOCAL" json_py '
+if d["new_delete"] is None:
+    print("the guard refused a folder inside the reloaded LOCAL: %r"
+          % (d["new_delete"],))
+    raise SystemExit(1)
+if d["link_delete"] is not None:
+    print("a symlink to the old LOCAL passed the guard: %r"
+          % (d["link_delete"],))
+    raise SystemExit(1)
+if not d["deleted_new"] or not d["old_kept"] or not d["sibling_kept"]:
+    print("deleted=%r old_kept=%r sibling_kept=%r"
+          % (d["deleted_new"], d["old_kept"], d["sibling_kept"]))
+    raise SystemExit(1)
+if not d["told_deleted"]:
+    print("the delete was never reported: %r" % (d["asked"],))
+    raise SystemExit(1)
+'
+    check "the Open {app} row follows OPEN_APP_NAME without a language change" json_py '
+if not d["new_label_there"] or not d["old_label_gone"]:
+    print("old=%r present=%r new=%r present=%r"
+          % (d["old_label"], not d["old_label_gone"],
+             d["new_label"], d["new_label_there"]))
+    raise SystemExit(1)
+'
+    check "the two path rows and the app row use the reloaded values" json_py '
+if d["opened"] != [d["local_new"], d["log_new"]]:
+    print("opened %r, wanted %r" % (d["opened"], [d["local_new"], d["log_new"]]))
+    raise SystemExit(1)
+if d["spawned"] != [["/bin/true"]]:
+    print("the app row ran %r, wanted the reloaded OPEN_APP_CMD" % (d["spawned"],))
+    raise SystemExit(1)
+if d["open_name"] != d["open_name_new"]:
+    print("open_name=%r wanted %r" % (d["open_name"], d["open_name_new"]))
+    raise SystemExit(1)
+'
+    check "the folder submenu reads the reloaded exclusion list" json_py '
+if d["folder_checks"].get("git"):
+    print("a folder on the new exclusion list is still ticked: %r"
+          % (d["folder_checks"],))
+    raise SystemExit(1)
+if not d["folder_checks"].get("src"):
+    print("a folder that is not excluded is unticked: %r" % (d["folder_checks"],))
+    raise SystemExit(1)
+'
+    check "the remote and the log follow the file too" json_py '
+if d["remote"] != "fresh-remote:" or d["log"] != d["log_new"]:
+    print("remote=%r log=%r wanted fresh-remote: and %r"
+          % (d["remote"], d["log"], d["log_new"]))
+    raise SystemExit(1)
+if d["exclude_file"] != d["exclude_new"]:
+    print("exclude_file=%r wanted %r" % (d["exclude_file"], d["exclude_new"]))
+    raise SystemExit(1)
+'
+    check "a language change after the reload still reaches the menu" json_py '
+if not d["switched"]:
+    print("the menu never changed language: %r" % (d["folder_checks"],))
+    raise SystemExit(1)
+'
+fi
+
+title "The [tag] a wrapper hint line carries"
+# The tag is the contract between onedrive-sync's hint_for and the tray's
+# read_last_result/_hint: it is what lets a Chinese hint stand in for an English
+# log line, and what decides the icon. The suite had no case for it, so a
+# reworded tag or a changed regex would have kept the icon red and the hint
+# English with nothing failing.
+if run_driver log-result; then
+    check "a tagged wrapper failure keeps its tag, time and raw hint" json_py '
+want = ["error", "22:21", "network",
+        "network problem reaching the remote, so nothing was changed; "
+        "the next run will retry",
+        "网络或 DNS 暂时不可用，稍后自动重试"]
+if d["tagged"] != want:
+    print("got %r" % (d["tagged"],))
+    print("want %r" % (want,))
+    raise SystemExit(1)
+'
+    check "Bisync successful is synced, with no tag and no hint" json_py '
+if d["synced"] != ["synced", "22:30", "", "", ""]:
+    print("got %r" % (d["synced"],))
+    raise SystemExit(1)
+'
+    check "a failure with no tag falls back to other and the raw line" json_py '
+line = ("2026/10/03 22:40:00 ERROR : Bisync aborted. Must run --resync to "
+        "recover.")
+want = ["error", "22:40", "other", line, "详见同步日志"]
+if d["untagged"] != want:
+    print("got %r" % (d["untagged"],))
+    raise SystemExit(1)
+'
+    check "and poll() paints that failure from the same parse" json_py '
+if d["state"] != "error":
+    print("state=%r status=%r" % (d["state"], d["status"]))
+    raise SystemExit(1)
+if "22:21" not in d["status"] or "网络" not in d["status"]:
+    print("status=%r" % (d["status"],))
+    raise SystemExit(1)
+'
+fi
+
+title "A reload that moves the log it reads"
+# The snapshot cache is keyed on size and mtime, so the case has to build the
+# collision by hand: a new log of the same length carrying the old one's
+# timestamp, which is what copying a log with its times leaves behind.
+if run_driver log-cache-moved; then
+    check "the moved log really does carry the old one's size and mtime" \
+        json_expr "d['same_pair']"
+    check "the tick before the reload read the old file" json_py '
+if d["before"][0] != "error" or d["before"][2] != "network":
+    print("before the reload: %r" % (d["before"],))
+    raise SystemExit(1)
+'
+    check "a reload that moves LOG re-reads it instead of reusing the cache" json_py '
+if d["after"] != d["want"]:
+    print("after the reload: %r" % (d["after"],))
+    print("want %r" % (d["want"],))
     raise SystemExit(1)
 '
 fi

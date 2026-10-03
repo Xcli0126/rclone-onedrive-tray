@@ -340,19 +340,47 @@ else
             log_age="last write $(human_age "$log_age") ago; "
         fi
     fi
+    # Line numbers rather than text throughout: the question is whether a
+    # successful run came after the hint. Only the tools the doctor may call are
+    # used here, so no awk.
+    last_ok="$(grep -n 'Bisync successful' "$LOG" | tail -1 | cut -d: -f1 || true)"
+    hint_at="$(grep -n -iE "$ALL_HINTS" "$LOG" | tail -1 | cut -d: -f1 || true)"
     newest_hint="$(grep -iE "$ALL_HINTS" "$LOG" | tail -1 || true)"
     tag="none"; [ -n "$newest_hint" ] && tag="$(classify_hint "$newest_hint")"
+    # A hint that a later run synced past is history, which is the difference
+    # between "this failed once" and "this is failing": reporting the first as a
+    # fault sends a user to reconnect a remote that already works.
+    cleared=0
+    if [ -n "$hint_at" ] && [ -n "$last_ok" ] && [ "$hint_at" -lt "$last_ok" ]; then
+        cleared=1; newest_hint=""; tag="none"
+    fi
+    # And a hint the next run cannot clear still stands while nothing has synced
+    # since it. Reading only the newest line let a network blip, which retries
+    # itself, hide the refused sign-in that was the reason nothing was syncing,
+    # and the line then said the sign-in was not what failed.
+    if [ "$tag" = network ]; then
+        standing="$(grep -n -iE "$ALL_HINTS" "$LOG" | grep -viE "$RE_NETWORK" |
+            tail -1 || true)"
+        standing_at="${standing%%:*}"
+        if [ -n "$standing" ] &&
+                { [ -z "$last_ok" ] || [ "$standing_at" -gt "$last_ok" ]; }; then
+            newest_hint="${standing#*:}"
+            tag="$(classify_hint "$newest_hint")"
+        fi
+    fi
     hint_age=""
     if [ -n "$newest_hint" ]; then
         hint_secs="$(line_age "$newest_hint")"
         [ -n "$hint_secs" ] && hint_age=" from ${hint_secs} ago"
     fi
     case "$tag" in
-        auth) report fail log "${log_age}the newest failure hint${hint_age} is a refused or expired sign-in; re-authorise from the tray's 'Re-authorise OneDrive' item, or run: rclone config reconnect ${REMOTE%%:*}:." ;;
+        auth) report fail log "${log_age}a refused or expired sign-in is in the log${hint_age}; re-authorise from the tray's 'Re-authorise OneDrive' item, or run: rclone config reconnect ${REMOTE%%:*}:." ;;
         network) report warn log "${log_age}the newest failure hint${hint_age} is a network problem, which the next run retries; the sign-in is not what failed${newest_hint:+: $(printf '%s\n' "$newest_hint" | head -1 | cut -c1-160)}" ;;
-        lock|maxdelete|access|resync|oldrclone) report warn log "${log_age}the newest failure hint${hint_age} is [$tag]; tail the log for the full message: $LOG" ;;
+        lock|maxdelete|access|resync|oldrclone) report warn log "${log_age}a [$tag] failure is in the log${hint_age}; tail the log for the full message: $LOG" ;;
         *)
-            if [ -n "$last_ts" ]; then
+            if [ "$cleared" -eq 1 ]; then
+                report ok log "${log_age}every failure hint in it was followed by a sync that worked"
+            elif [ -n "$last_ts" ]; then
                 report ok log "${log_age}no failure hint in it"
             else
                 report warn log "no timestamped line in $LOG yet, so nothing has run through the wrapper"

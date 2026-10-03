@@ -884,6 +884,14 @@ argv_row "--dry-run is forwarded and changes nothing else" \
 argv_row "--verbose is forwarded, and replaces --log-level" \
     "bisync $CAP_REMOTE $CAP/local $DEF_ARGS --log-file $CAP/sync.log --max-delete 50 --verbose" \
     "" --verbose
+# rclone's check is on the verbose flag, not on its spelling, and BISYNC_ARGS is
+# the way a short one reaches the command line.
+argv_row "-v in BISYNC_ARGS also replaces --log-level" \
+    "bisync $CAP_REMOTE $CAP/local -v --log-file $CAP/sync.log --max-delete 50" \
+    'BISYNC_ARGS="-v"'
+argv_row "a short cluster holding a v counts as verbose too" \
+    "bisync $CAP_REMOTE $CAP/local -Pv --log-file $CAP/sync.log --max-delete 50" \
+    'BISYNC_ARGS="-Pv"'
 argv_row "--force is forwarded and the delete cap stays on the line" \
     "$(argv_line "$CAP/local" '--max-delete 50 --force')" "" --force
 argv_row "--resync reaches rclone exactly once" \
@@ -1424,6 +1432,51 @@ if [ "$DOCTOR_RC" -eq 0 ] && grep -q "network problem" <<<"$DOCTOR_OUT" &&
     ok "a token fetch that never reached Microsoft is a network problem, not an expiry"
 else
     bad "token EOF: exit $DOCTOR_RC, $(head -1 <<<"$DOCTOR_OUT")"
+fi
+
+# A network blip lands on top of the refusal that is the actual reason nothing
+# syncs. Only reading the newest hint reported the blip, which clears itself, and
+# said nothing about the sign-in, which does not.
+doc_fixture signin-behind-network
+cat >> "$DOC_FX/cache/sync.log" <<'EOF'
+2026/10/01 20:05:00 CRITICAL: Failed to refresh token: oauth2: cannot fetch token: 400 Bad Request: {"error":"invalid_grant","error_description":"AADSTS70043: The refresh token has expired"}
+2026/10/01 20:10:00 ERROR: failed to get root: Post "https://login.microsoftonline.com/common/oauth2/v2.0/token": EOF
+EOF
+DOCTOR_OUT="$(doc_run "$DOC_FX" --quiet --offline 2>&1)"; DOCTOR_RC=$?
+if [ "$DOCTOR_RC" -eq 1 ] && grep -q "expired sign-in" <<<"$DOCTOR_OUT" &&
+        ! grep -q "a network problem" <<<"$DOCTOR_OUT"; then
+    ok "a refused sign-in is still reported when a newer network error hides it"
+else
+    bad "sign-in behind a network error: exit $DOCTOR_RC, $(head -1 <<<"$DOCTOR_OUT")"
+fi
+# The same log with a successful run after the refusal: the sign-in worked, so a
+# case that keeps reporting it would send the user to reconnect a working remote.
+doc_fixture signin-then-recovered
+cat >> "$DOC_FX/cache/sync.log" <<'EOF'
+2026/10/01 20:05:00 CRITICAL: Failed to refresh token: oauth2: cannot fetch token: 400 Bad Request: {"error":"invalid_grant","error_description":"AADSTS70043: The refresh token has expired"}
+2026/10/01 21:00:00 INFO  : Bisync successful
+EOF
+DOCTOR_OUT="$(doc_run "$DOC_FX" --quiet --offline 2>&1)"; DOCTOR_RC=$?
+if [ "$DOCTOR_RC" -eq 0 ] && ! grep -q "expired sign-in" <<<"$DOCTOR_OUT"; then
+    ok "a sign-in refusal a later run synced past is not reported as a live fault"
+else
+    bad "sign-in then recovered: exit $DOCTOR_RC, $(head -1 <<<"$DOCTOR_OUT")"
+fi
+# And the boundary: a cleared refusal must not come back when a network error
+# follows the success. The refusal is older than the last run that worked, so the
+# network hint is the one to report, even though it is not the only hint around.
+doc_fixture signin-cleared-then-network
+cat >> "$DOC_FX/cache/sync.log" <<'EOF'
+2026/10/01 20:05:00 CRITICAL: Failed to refresh token: oauth2: cannot fetch token: 400 Bad Request: {"error":"invalid_grant","error_description":"AADSTS70043: The refresh token has expired"}
+2026/10/01 21:00:00 INFO  : Bisync successful
+2026/10/01 22:00:00 ERROR: failed to get root: Post "https://login.microsoftonline.com/common/oauth2/v2.0/token": EOF
+EOF
+DOCTOR_OUT="$(doc_run "$DOC_FX" --quiet --offline 2>&1)"; DOCTOR_RC=$?
+if [ "$DOCTOR_RC" -eq 0 ] && grep -q "a network problem" <<<"$DOCTOR_OUT" &&
+        ! grep -q "expired sign-in" <<<"$DOCTOR_OUT"; then
+    ok "a cleared refusal stays cleared when a later network error follows it"
+else
+    bad "cleared then network: exit $DOCTOR_RC, $(head -1 <<<"$DOCTOR_OUT")"
 fi
 
 doc_fixture timer-off

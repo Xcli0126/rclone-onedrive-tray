@@ -296,9 +296,23 @@ read -r -a BISYNC_OPTS <<<"$BISYNC_ARGS"
 ARGS=(bisync "$REMOTE" "$LOCAL")
 ARGS+=("${BISYNC_OPTS[@]}")
 # rclone refuses -v together with --log-level ("Can't set -v and --log-level"),
-# so asking for --verbose used to fail every attempt of the run. Verbose implies
-# debug, which is what the flag is for.
-if [[ " ${BISYNC_OPTS[*]-} ${*:-} " == *" --verbose "* ]]; then
+# so asking for verbose used to fail every attempt of the run. Verbose implies
+# debug, which is what the flag is for. The check is on the flag rather than on
+# one spelling of it: rclone parses -v, -vv and a cluster such as -Pv the same
+# way, and BISYNC_ARGS is where a short one arrives from. -v is the only short
+# flag rclone gives the letter v to, so a cluster holding one is verbose.
+verbose_wanted=0
+for opt in "${BISYNC_OPTS[@]-}" "${@:-}"; do
+    case "$opt" in
+        --verbose|--verbose=*)
+            verbose_wanted=1 ;;
+        --*)
+            : ;;                    # another long flag, so not this one
+        -*v*)
+            verbose_wanted=1 ;;
+    esac
+done
+if [ "$verbose_wanted" -eq 1 ]; then
     ARGS+=(--log-file "$LOG")
 else
     ARGS+=(--log-level INFO --log-file "$LOG")

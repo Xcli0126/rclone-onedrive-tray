@@ -288,7 +288,15 @@ desktop_exec_arg() {  # desktop_exec_arg <path> -> the Exec argument
 # on a re-run where it was removed, it stays removed.
 AUTOSTART_FILE="$AUTOSTART_DIR/rclone-onedrive-tray.desktop"
 if [ "${#tray_missing[@]}" -gt 0 ]; then
-    say "no autostart entry: the tray cannot run without the packages above"
+    # An entry left behind by an earlier install would have the desktop try to
+    # start a tray whose GTK stack is gone, once per login. Saying nothing about
+    # it while leaving it there is the worst of both.
+    if [ -f "$AUTOSTART_FILE" ]; then
+        rm -f "$AUTOSTART_FILE"
+        say "removed the autostart entry: the tray cannot run without the packages above"
+    else
+        say "no autostart entry: the tray cannot run without the packages above"
+    fi
 elif [ "$CONFIG_EXISTED" -eq 1 ] && [ "$TRAY_WAS_INSTALLED" -eq 1 ] &&
         [ ! -f "$AUTOSTART_FILE" ]; then
     say "autostart entry left absent: it was already removed, so 'Start tray at login' stays off"

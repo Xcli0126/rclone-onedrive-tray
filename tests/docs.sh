@@ -249,4 +249,32 @@ for path in bin/*; do
         grep -qE "rm[[:space:]]+-[rf]+.*\"[^\"]*BIN_DIR/$name\"" uninstall.sh
 done
 
+# ------------------------------------------------- one entry per thing
+# The two ledgers are meant to hold each thing once. docs/KNOWN-ISSUES.md had two
+# "Smaller, and real" sections with three bullets in both, and two of those
+# bullets described things that had since been fixed, which is the drift this
+# catches: nothing here can tell whether an entry is still true, but it can tell
+# whether the file says the same thing twice. CHANGELOG.md had two `### Added`
+# and two `### Fixed` under one release, where the format allows one of each, so
+# its headings are compared inside a release rather than across the file.
+title "one entry per thing"
+no_repeats() {  # no_repeats <label> <the repeated lines, if any>
+    if [ -z "$2" ]; then
+        ok "$1"
+    else
+        bad "$1"
+        printf '%s\n' "$2" | sed 's/^/        /'
+    fi
+}
+no_repeats "docs/KNOWN-ISSUES.md repeats no section heading" \
+    "$(grep '^### ' docs/KNOWN-ISSUES.md | sort | uniq -d)"
+# Only the opening line of each bullet is compared, so a bullet repeated with a
+# changed second line still gets through. That is the shape the duplicate took.
+no_repeats "docs/KNOWN-ISSUES.md repeats no open bullet" \
+    "$(sed -n '/^## Open/,/^## Accepted/p' docs/KNOWN-ISSUES.md |
+        grep '^- ' | sort | uniq -d)"
+no_repeats "CHANGELOG.md repeats no heading inside one release" \
+    "$(awk '/^## \[/{section = $0; next} /^### /{print section " | " $0}' CHANGELOG.md |
+        sort | uniq -d)"
+
 summary

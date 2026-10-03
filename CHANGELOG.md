@@ -13,6 +13,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `fail-fast` off. It found a real portability defect on its first run: a test
   imported `GioUnix`, which only exists from GLib 2.80, so it died on 22.04's
   GLib 2.72 before checking anything.
+- `tests/lib/mutate.sh` and `tests/lib/mutations.txt`: deliberate changes to the
+  shipped scripts, applied one at a time against the suite that covers them, to
+  find behaviour no test would notice. The run prints the tally; the one row that
+  survives is a branch in `onedrive-check` that a local filesystem cannot reach,
+  which is written down in `docs/KNOWN-ISSUES.md` rather than assumed tested.
+- `Diagnostics…` in the tray menu runs `onedrive-doctor` and shows its report in
+  the dialog the name check already uses. The README's first instruction when
+  something looks wrong was reachable only from a terminal until now, which is the
+  opposite of what the tray is for.
 
 ### Fixed
 
@@ -25,6 +34,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `uninstall.sh --purge` removed the configuration and the icon directory but
   left the cache behind, so a reinstall started with the old log, the old lock
   and, if a pause had been in progress, its stamp.
+- The tray suite's case for the delete guard's sibling-directory prefix check
+  could not fail: the exclusion gate refused the name before the guard under test
+  ran. It now puts the name on the exclusion list first, so only the prefix check
+  can refuse it, and mutating that check turns the case red.
+- A timed pause was cut short by about three seconds. The poll cached systemd's
+  `is-enabled` answer, so once the pause had turned the units off the tray read
+  them as on again, deleted the resume stamp and left the timer running. The cache
+  is invalidated where the units are changed, which is the one place that knows
+  they moved.
+- A request whose start was still in flight was expired by the next poll, so a
+  sync started from the menu could be reported as finished while it was running.
+  The expiry is skipped while a request is in flight.
+- A reload of a hand-edited config left the values the tray read at startup in
+  place: the folder, log, app and remote rows and the delete guard's path check
+  kept the old file's values while the settings window showed the new ones, and a
+  moved `UNIT_NAME` could have the dialog write a drop-in for a unit nothing
+  polls. The unit stays frozen, the other six follow the file, and a moved label
+  or path rebuilds the menu that was built from them.
+- A reload that moved `LOG` left the tray reading the cached tail of the file
+  before it. The cache is keyed on size and mtime alone, so a new log copied with
+  its times (`cp -p`) matched and the status line went on describing the old file
+  for as long as the new one stayed still. The cache is dropped when the path
+  moves.
+- A bandwidth limit that was set by hand rather than picked from the list was
+  dropped when the settings window saved, and the value the list showed was not
+  the one in the file.
+- A folder listing that failed replaced the list the menu already had, so one
+  momentary `rclone lsf` failure emptied the folder submenu until the next poll.
+- `uninstall.sh` turned off a stale pair's `.timer` but not its
+  `-watch.service`, leaving a `Restart=always` unit restarting against a script
+  that had just been deleted.
+- `install.sh` left an existing autostart entry in place when the tray's packages
+  were missing, so the desktop kept trying to start a tray that cannot run, once
+  per login. It removes the entry and says that it did.
+- The wrapper recognised only the long `--verbose`, so `-v` or `-vv` in
+  `BISYNC_ARGS` still produced a command line rclone refuses outright ("Can't set
+  -v and --log-level"), which failed every attempt of every scheduled run. All
+  the spellings of the flag now take the same branch.
+- The tray's config reader kept an inline comment as part of the value, so
+  `MAX_DELETE="100"   # abort above this` read as junk and fell back to the
+  default while `bash` sourced the same line as `100` and the wrapper used it.
+  A comment is now stripped where shell would start one and kept inside quotes.
+- `onedrive-doctor` read only the newest failure hint, so a network blip that
+  landed after a refused sign-in was reported as "the sign-in is not what
+  failed" while the sign-in was the reason nothing was syncing. A hint the next
+  run cannot clear is reported while nothing has synced past it, and one that a
+  later run did sync past is no longer reported as a live fault.
+- `docs/KNOWN-ISSUES.md` had two "Smaller, and real" sections with three bullets
+  in both and two bullets describing things that had since been fixed, and
+  `CHANGELOG.md` repeated `### Added` and `### Fixed` in two release sections.
+  Both are merged, and `tests/docs.sh` now refuses a repeated heading or a
+  repeated opening line in either file.
+- `tests/lib/mutate.sh` decided a row's verdict by looking for the text "0 failed"
+  in the suite's closing line, so a suite that reported "20 failed" was recorded
+  as a survivor: the same row read caught at 18 failures and SURVIVED at 20. The
+  count is read as a number now, and `tests/lib/mutate.sh --self-test` checks the
+  classifier against six closing lines, including the two it used to misread.
 
 ### Changed
 
@@ -32,21 +98,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is what it does: scheduled runs stay quiet, because a five-minute timer
   announcing every success would train people to ignore the notifications that
   matter. A failure always notifies. The wording was the only thing wrong.
-
-### Added
-
-- `tests/lib/mutate.sh` and `tests/lib/mutations.txt`: deliberate changes to the
-  shipped scripts, applied one at a time against the suite that covers them, to
-  find behaviour no test would notice. The run prints the tally; the one row that
-  survives is a branch in `onedrive-check` that a local filesystem cannot reach,
-  which is written down in `docs/KNOWN-ISSUES.md` rather than assumed tested.
-
-### Fixed
-
-- The tray suite's case for the delete guard's sibling-directory prefix check
-  could not fail: the exclusion gate refused the name before the guard under test
-  ran. It now puts the name on the exclusion list first, so only the prefix check
-  can refuse it, and mutating that check turns the case red.
 
 ## [1.4.0] - 2026-10-01
 
@@ -297,6 +348,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   more than one, the `ObjectHandle is Invalid` trap that follows a wrong pick, `rclone authorize`
   for a machine with no browser, work and school accounts, and the 90-day token expiry. `setup.sh`
   points at it when it finds no remote, and so does `docs/DEPENDENCIES.md`.
+- `extras/watch-issues.sh` and its timer installer, for maintainers: polls the GitHub API twice a
+  day, ignores pull requests, notifies on anything not seen before, and appends to
+  `~/.cache/rclone-onedrive-tray/issues.log`. It is not part of the syncing and needs `curl` and
+  `notify-send`.
 
 ### Fixed
 
@@ -444,13 +499,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   separately and do not block the install.
 - The requirements listed `libnotify-bin`, which provides the `notify-send` command line tool. The
   tray needs the Python binding, which is `gir1.2-notify-0.7`.
-
-### Added
-
-- `extras/watch-issues.sh` and its timer installer, for maintainers: polls the GitHub API twice a
-  day, ignores pull requests, notifies on anything not seen before, and appends to
-  `~/.cache/rclone-onedrive-tray/issues.log`. It is not part of the syncing and needs `curl` and
-  `notify-send`.
 
 ## [1.0.0] - 2026-09-13
 

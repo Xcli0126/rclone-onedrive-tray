@@ -4,6 +4,7 @@
 #
 #   tests/lib/mutate.sh              every row
 #   tests/lib/mutate.sh <id>...      named rows only
+#   tests/lib/mutate.sh --self-test  check the verdict classifier on its own
 #   RESULTS=mutations.txt tests/lib/mutate.sh     also write the table to a file
 #
 # Each row of mutations.txt describes one small, deliberate change to a shipped
@@ -32,6 +33,52 @@ note() {
     printf '%s\n' "$*"
     [ -n "${RESULTS:-}" ] && printf '%s\n' "$*" >> "$RESULTS"
 }
+
+# classify <a suite's closing line> -> caught | survived | unresolved
+#
+# The count is read as a number. Matching the text "0 failed" called a suite that
+# reported "20 failed" a survivor, so one row here read caught at 18 failures and
+# SURVIVED at 20, which is the one answer this script exists to get right. A line
+# with no count at all is a suite that died before printing its summary, and that
+# is unresolved rather than a catch.
+classify() {
+    local failed_count
+    failed_count="$(printf '%s\n' "$1" |
+        grep -oE '[0-9]+ failed' | tail -1 | grep -oE '^[0-9]+' || true)"
+    if [ -z "$failed_count" ]; then
+        printf 'unresolved'
+    elif [ "$failed_count" -eq 0 ]; then
+        printf 'survived'
+    else
+        printf 'caught'
+    fi
+}
+
+# --self-test: the classifier decides every row's verdict, so it is checked
+# against lines it has to read correctly before any suite is run. It is the only
+# part of this script with an answer that can be wrong on its own.
+if [ "${1:-}" = "--self-test" ]; then
+    bad=0
+    while IFS='|' read -r line want; do
+        [ -n "$line" ] || continue
+        got="$(classify "$line")"
+        if [ "$got" != "$want" ]; then
+            printf 'self-test: %-44s want %s, got %s\n' "$line" "$want" "$got" >&2
+            bad=1
+        fi
+    done <<'ROWS'
+221 passed, 20 failed, 0 skipped|caught
+240 passed, 10 failed, 0 skipped|caught
+238 passed, 3 failed, 0 skipped|caught
+37 passed, 0 failed, 0 skipped|survived
+0 passed, 0 failed, 12 skipped|survived
+the suite printed no summary at all|unresolved
+ROWS
+    if [ "$bad" -eq 0 ]; then
+        echo "self-test: the classifier reads all six lines correctly"
+    fi
+    exit "$bad"
+fi
 
 [ -n "${RESULTS:-}" ] && : > "$RESULTS"
 survived=0
@@ -65,11 +112,11 @@ while IFS=$'\t' read -r id target expr suite; do
     # A row counts as caught only when the suite really reported failures. A
     # suite that died before printing its summary lands here as unresolved, not
     # as a catch: otherwise a broken harness reads as a strong one.
-    case "$out" in
-        *"0 failed"*)
+    case "$(classify "$out")" in
+        survived)
             note "$(printf '%-34s SURVIVED %s' "$id" "$out")"
             survived=$((survived + 1)) ;;
-        *"failed"*)
+        caught)
             note "$(printf '%-34s caught   %s' "$id" "$out")"
             caught=$((caught + 1)) ;;
         *)

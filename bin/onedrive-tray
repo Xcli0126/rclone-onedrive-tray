@@ -197,6 +197,37 @@ def bw_value(combo_id) -> str:
 
 
 # ---------------------------------------------------------------- configuration
+def strip_inline_comment(value: str) -> str:
+    """Cut an unquoted `#` and everything after it, the way bash reads the file.
+
+    `onedrive-sync` sources the config with `.`, which drops a comment at the end
+    of a line, so a hand-edited INTERVAL_MIN="15"   # every fifteen minutes was
+    15 to bash and `15"   # every fifteen minutes` to this parser: the dialog
+    showed one value and the wrapper and systemd used another.
+
+    What bash calls a comment is a `#` at the start of a word, so a `#` with a
+    non-space character in front of it, a `#` inside single or double quotes, and
+    a backslash-escaped `#` are all part of the value and stay. Quotes are
+    tracked here and removed later by load_config(), so the text between them is
+    never treated as a comment.
+    """
+    quote = ""
+    escaped = False
+    for index, char in enumerate(value):
+        if escaped:
+            escaped = False
+        elif char == "\\" and quote != "'":
+            escaped = True
+        elif quote:
+            if char == quote:
+                quote = ""
+        elif char in "\"'":
+            quote = char
+        elif char == "#" and (index == 0 or value[index - 1].isspace()):
+            return value[:index].rstrip()
+    return value
+
+
 def load_config() -> dict:
     """Parse the shell-style KEY="value" config (no shell execution)."""
     cfg: dict[str, str] = {}
@@ -207,7 +238,7 @@ def load_config() -> dict:
                 if not line or line.startswith("#") or "=" not in line:
                     continue
                 key, _, val = line.partition("=")
-                val = val.strip()
+                val = strip_inline_comment(val.strip())
                 if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
                     val = val[1:-1]
                 cfg[key.strip()] = os.path.expandvars(val)
@@ -1690,6 +1721,49 @@ class Tray:
             return None
         return (info.st_size, info.st_mtime_ns)
 
+    def _config_changed(self, fresh: dict) -> bool:
+        """Re-resolve the six config values that are read as attributes.
+
+        __init__ turns these into attributes once and every later read goes
+        through the attribute: the two menu rows that open a path, the "Open
+        {app}" label and its command, the exclusion file the folder submenu reads,
+        the remote the quota and folder listing ask about, and the root the delete
+        guard checks against. Refilling self.cfg alone left all six pointing at
+        the old file while the menu and the settings window said otherwise.
+
+        Returns True when one of them actually moved, because then the menu has to
+        be rebuilt: the labels and the handlers were built from the old paths.
+
+        UNIT_NAME is deliberately not one of them. self.service, self.timer and
+        self.watch were resolved from it when the tray started and the poll keeps
+        asking about those; letting the file move it would have the settings
+        window write a drop-in for a unit nothing polls.
+        """
+        wanted = {
+            "remote": fresh.get("REMOTE") or "",
+            "local": fresh["LOCAL"],
+            "log": fresh["LOG"],
+            "exclude_file": fresh["EXCLUDE_FOLDERS_FILE"],
+            "open_cmd": fresh["OPEN_APP_CMD"],
+            "open_name": fresh["OPEN_APP_NAME"],
+        }
+        moved = False
+        for name, value in wanted.items():
+            if getattr(self, name) != value:
+                moved = True
+                if name == "log":
+                    # The cached tail belongs to the file that was being read
+                    # until now, and _log_snapshot() decides by size and mtime
+                    # alone. A new log that matches the old one's pair, which is
+                    # what a `cp -p` of a log leaves behind, was therefore read as
+                    # unchanged: the status line kept describing the old file for
+                    # as long as the new one stayed still.
+                    self.log_signature = None
+                    self.log_tail = ""
+                    self.log_result = ("unknown", "", "", "")
+                setattr(self, name, value)
+        return moved
+
     def _reload_config(self):
         """Apply the two live settings after the config file changed.
 
@@ -1715,6 +1789,13 @@ class Tray:
         fresh = load_config()
         fresh["UNIT_NAME"] = self.cfg.get("UNIT_NAME", fresh.get("UNIT_NAME", ""))
         self.apply_settings(fresh)
+        # After apply_settings, so a menu the language change already rebuilt is
+        # not built a second time here, and before anything reads the new paths.
+        # set_language() is the existing way a rebuild is handed to the indicator;
+        # this is the same thing, for a label or a handler that moved.
+        if self._config_changed(fresh):
+            self._build_menu()
+            self.ind.set_menu(self.menu)
 
     def on_settings(self, *_):
         """Open the settings window; it applies its changes to this tray."""

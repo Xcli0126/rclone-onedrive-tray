@@ -46,3 +46,33 @@ check-rename-subtree	bin/onedrive-check	s|                  \[ -d "$LOCAL/$2" \]
 tray-setunits-invalidate	bin/onedrive-tray	/def _set_units/,/^$/ s/^        self\._units_changed()$/        pass/	tray
 tray-bw-limit-fallback	bin/onedrive-tray	s|                             else self.original\["BW_LIMIT"\]),|                             else ""),|	tray
 doctor-pattern-drift	bin/onedrive-doctor	s|^RE_LOCK='prior lock file found'|RE_LOCK='prior lock file present'|	docs
+# the short spellings of rclone's verbose flag, which trip the same refusal as
+# the long one and so have to take the same branch
+sync-verbose-short-flag	bin/onedrive-sync	s|        -\*v\*)|        --never-matches)|	install-flow
+# the entry an earlier install left behind, which would fail at every login
+install-autostart-stale	install.sh	s|        rm -f "$AUTOSTART_FILE"|        :|	dependency-matrix
+# a hint the next run cannot clear, which a newer network blip used to hide
+doctor-standing-hint	bin/onedrive-doctor	s|if \[ "$tag" = network \]; then|if false; then|	install-flow
+# and the success that clears it, which stops a fixed sign-in being reported
+doctor-cleared-hint	bin/onedrive-doctor	s|\[ "$hint_at" -lt "$last_ok" \]|true|	install-flow
+# the issues list splitting in two, which happened once and hid a fixed entry
+docs-duplicate-heading	docs/KNOWN-ISSUES.md	s|^### Two sync pairs cannot coexist|### Smaller, and real\n### Two sync pairs cannot coexist|	docs
+# a refusal a successful run already cleared, reported again because the hint is
+# in the file at all
+doctor-standing-old-hint	bin/onedrive-doctor	s|\[ "$standing_at" -gt "$last_ok" \]|true|	install-flow
+# a second Added inside one release, which the format allows only one of
+docs-duplicate-changelog	CHANGELOG.md	s|^### Changed|### Added\n\n### Changed|	docs
+# a trailing comment read as part of the value, which is what bash does not do
+tray-comment-hash-rule	bin/onedrive-tray	s|char == "#" and (index == 0 or value\[index - 1\].isspace())|char == "@" and (index == 0 or value[index - 1].isspace())|	tray
+# a reload that reads the file and leaves the six startup snapshots on the old one
+tray-reload-resolves-paths	bin/onedrive-tray	/def _config_changed/,/^        return moved$/ s/^                moved = True$/                pass/	tray
+# and a reload that moves them without rebuilding the menu built from them
+tray-reload-drop-rebuild	bin/onedrive-tray	s|^        if self\._config_changed(fresh):$|        if self._config_changed(fresh) and False:|	tray
+# a moved LOG whose file shares the old one's size and mtime, read out of the
+# cache that was built for the file before it
+tray-reload-log-cache	bin/onedrive-tray	/if name == "log":/,/self\.log_result = ("unknown", "", "", "")/ s/^                    self\.log_signature = None$/                    pass/	tray
+# the [tag] the wrapper writes, which the tray localises from: a pattern that
+# cannot match it, and one that matches only its first letter. The search side
+# takes the whole line by its prefix, so no backslash has to survive the table.
+tray-hint-regex-length	bin/onedrive-tray	s|^HINT_RE = re.compile(r".*)$|HINT_RE = re.compile(r"\[(\\d+)\]\s*(.*)")|	tray
+tray-hint-regex-group	bin/onedrive-tray	s|^HINT_RE = re.compile(r".*)$|HINT_RE = re.compile(r"\[(\\w)\]\s*(.*)$")|	tray
