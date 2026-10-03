@@ -1627,6 +1627,9 @@ class Tray:
         """
         was_visible = self.icon_visible
         was_lang = resolve_lang(self.cfg)
+        if "WATCH" in values:
+            # The dialog has just enabled or disabled the watcher unit.
+            self._units_changed()
         self.cfg.update(values)
         visible = truthy(values.get("SHOW_ICON", "1"))
         if visible != was_visible:
@@ -1656,14 +1659,15 @@ class Tray:
         stayed hidden and the language stayed put until the process was killed,
         which with no icon also means no menu.
 
-        Only the two settings that mean anything to a running process are taken
-        from the reload. The rest are properties of the file and of the next sync,
-        and applying them mid-run would change behaviour the user never asked the
-        running tray to change.
+        The two settings that mean anything to a running process are applied;
+        the rest go into self.cfg for the code that reads them when it needs
+        them, because that code is running too.
         """
-        fresh = load_config()
-        self.apply_settings({"UI_LANG": fresh.get("UI_LANG", ""),
-                             "SHOW_ICON": fresh.get("SHOW_ICON", "1")})
+        # Every key, not only the two the window applies: NOTIFY_ON_SUCCESS is
+        # read when a run ends, so a standalone --settings save has to land in
+        # self.cfg as well, and apply_settings stores the rest for the callers
+        # that read them later.
+        self.apply_settings(load_config())
 
     def on_settings(self, *_):
         """Open the settings window; it applies its changes to this tray."""
@@ -1700,6 +1704,8 @@ class Tray:
             return
         self.busy = True
         self.manual_requested = True
+        self.manual_seen_syncing = False
+        self.manual_ticks = 0
         self.notify(APP_NAME, self.t("Syncing…"))
         threading.Thread(target=self._run, args=("start",), daemon=True).start()
 
@@ -1727,6 +1733,18 @@ class Tray:
         self.busy = True
         self.notify(APP_NAME, self.t("Rebuilding sync baseline…"))
         threading.Thread(target=self._run, args=("resync",), daemon=True).start()
+
+    def _units_changed(self):
+        """Forget what systemctl last said about the units.
+
+        The enabled answer is cached because asking costs a fork, and the tray
+        changes the units itself when it pauses, resumes or toggles the watcher.
+        Reusing the answer from before such a change reported automatic sync as
+        on during a pause, which deleted the pause stamp three seconds after the
+        pause began and left the menu claiming sync was off.
+        """
+        self.timer_state = None
+        self.active_seen = None
 
     def _set_units(self, *action):
         """start/stop/enable the timer and the watcher together."""
@@ -1768,6 +1786,7 @@ class Tray:
             key = PAUSE_LABELS.get(minutes, f"{minutes} min")
             self.notify(APP_NAME, self.t("Paused for {n}", n=self.t(key)))
             self.auto_seen = "paused"
+            self._units_changed()
         self._refresh_checks()
         return False
 
@@ -1783,6 +1802,7 @@ class Tray:
     def _after_resume(self):
         self._clear_stamp()
         self.auto_seen = "on"
+        self._units_changed()
         self.notify(APP_NAME, self.t("Automatic sync resumed"))
         self._refresh_checks()
         return False
@@ -2041,6 +2061,17 @@ class Tray:
 
     def _announce_finish(self, syncing, kind, when, hint):
         """Notify once when a run ends: a failure always, a success on request."""
+        if self.manual_requested:
+            # A manual run can start and finish between two polls, and then there
+            # is nothing to announce: without forgetting the request, the next
+            # scheduled success was announced as though the user had started it.
+            if syncing:
+                self.manual_seen_syncing = True
+                self.manual_ticks = 0
+            else:
+                self.manual_ticks = getattr(self, "manual_ticks", 0) + 1
+                if not getattr(self, "manual_seen_syncing", False) and self.manual_ticks >= 2:
+                    self.manual_requested = False
         if self.was_syncing and not syncing:
             if kind == "error":
                 if when != self.notified_error_at:
@@ -2057,6 +2088,8 @@ class Tray:
             # life of the process, so the next scheduled success was announced as
             # if the user had started it.
             self.manual_requested = False
+            self.manual_seen_syncing = False
+            self.manual_ticks = 0
         if kind != "error":
             self.notified_error_at = None
         self.was_syncing = syncing

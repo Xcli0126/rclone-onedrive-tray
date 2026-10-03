@@ -37,6 +37,6 @@ doctor-logfile-writable	bin/onedrive-doctor	s|        report fail logfile "$LOG 
 install-rclone-version-warning	install.sh	s|        warn "rclone $RCLONE_VER is older than 1.65: automatic recovery from an"|        warn "rclone $RCLONE_VER is fine"|	dependency-matrix
 setup-filters-choice	setup.sh	s|    obsidian\|default) cp -f "$SRC_DIR/config/filters.example" "$FILTERS_FILE" ;;|    obsidian\|default) printf "# none\n" > "$FILTERS_FILE" ;;|	install-flow
 # the colon-space rule, which lost the file name on finished transfers
-tray-busy-line-space	bin/onedrive-tray	s|:\\s\*", re.M)|:\\s+", re.M)|	tray
+tray-busy-line-space	bin/onedrive-tray	s|:\\s\*\\d+%", re.M)|:\\s*", re.M)|	tray
 # a % in the ExecStart path, which systemd expands as a specifier
 install-systemd-percent	install.sh	s|    text="${text//%/%%}"|    :|	install-flow

@@ -1390,6 +1390,65 @@ def scenario_config_reload():
     data["unrelated_status_text"] = tray.item_status.get_label() or ""
     data["status_text_before"] = status_text
     data["config_text"] = read_text(MODULE.CONFIG_FILE)
+
+    # A key the running tray reads when a run ends rather than when the window
+    # opens. Applying only the two live settings left this one at its old value
+    # in self.cfg, so a standalone --settings save never took effect.
+    MODULE.update_config_file(MODULE.CONFIG_FILE, {"NOTIFY_ON_SUCCESS": "0"})
+    data["notify_followed"] = wait_for(
+        lambda: str(tray.cfg.get("NOTIFY_ON_SUCCESS")) == "0", 8.0)
+    return data
+
+
+def scenario_pause_survives_poll():
+    """A pause the tray arranged survives the poll that follows it.
+
+    The enabled answer is cached to save a fork per tick, and the tray itself
+    disables the units when it pauses. Reusing the answer from before the pause
+    reported automatic sync as on three seconds later, which deleted the pause
+    stamp and left the menu saying sync was off.
+    """
+    tray = build()
+    wait_for(lambda: getattr(tray, "auto_seen", None) == "on", 8.0)
+    # What pause_for() leaves behind: the units disabled, which the stub answers
+    # from this marker, and an is-active that stays unhappy either way.
+    with open(os.path.join(os.environ["TRAY_CALLS"], "timer-disabled"), "w"):
+        pass
+    clear_calls()
+    tray.pause_for(30)
+    stamped = wait_for(lambda: os.path.exists(MODULE.PAUSE_STAMP), 8.0)
+    pump(7.0)                      # two polls, with no run in between
+    return {"stamped": stamped,
+            "stamp_left": os.path.exists(MODULE.PAUSE_STAMP),
+            "auto_seen": getattr(tray, "auto_seen", None),
+            "pause_label": tray.item_pause.get_label() or ""}
+
+
+def scenario_manual_missed():
+    """A manual run the poll never saw does not mark the next scheduled success.
+
+    on_sync_now asks systemd to start the service and the poll notices the run
+    ending. A run that starts and finishes between two ticks is never noticed, so
+    the request has to expire by itself; otherwise the next scheduled success was
+    announced as one the user had started.
+    """
+    tray = build()
+    shown = []
+    real_notify = MODULE.Notify
+    MODULE.Notify = install_fake_notify(shown)
+    try:
+        tray.manual_requested = True
+        tray.manual_seen_syncing = False
+        tray.manual_ticks = 0
+        tray._announce_finish(False, "ok", "14:00", "")
+        tray._announce_finish(False, "ok", "14:00", "")
+        data = {"forgotten": not tray.manual_requested, "notices": list(shown)}
+        # The scheduled run that follows must stay quiet.
+        tray.was_syncing = True
+        tray._announce_finish(False, "ok", "14:05", "")
+        data["notices_after"] = list(shown)
+    finally:
+        MODULE.Notify = real_notify
     return data
 
 
@@ -1550,6 +1609,8 @@ SCENARIOS = {
     "notify": scenario_notify,
     "notify-manual": scenario_notify_manual,
     "config-reload": scenario_config_reload,
+    "pause-survives-poll": scenario_pause_survives_poll,
+    "manual-missed": scenario_manual_missed,
     "poll-cost": scenario_poll_cost,
     "no-remote": scenario_no_remote,
     "icons": scenario_icons,
@@ -1930,6 +1991,11 @@ if not any("\u4e00" <= c <= "\u9fff" for c in d["labels_after"]):
     raise SystemExit(1)
 if "Settings…" in d["labels_after"] or "Sync now" in d["labels_after"]:
     print("still English after the switch: %r" % (d["labels_after"],))
+    raise SystemExit(1)
+'
+    check "a key the tray reads when a run ends follows the file too" json_py '
+if not d["notify_followed"]:
+    print("NOTIFY_ON_SUCCESS did not reach the running tray")
     raise SystemExit(1)
 '
     check "a key that is not live leaves the running tray alone" json_py '
@@ -2767,6 +2833,41 @@ if "setup.sh" not in d["stderr"] and "onedrive-doctor" not in d["stderr"]:
     check "and no traceback reaches stderr" json_py '
 if "Traceback" in d["stderr"] or "KeyError" in d["stderr"]:
     print("stderr: %r" % (d["stderr"],))
+    raise SystemExit(1)
+'
+fi
+
+title "A pause survives the poll that follows it"
+if run_driver pause-survives-poll; then
+    check "the pause stamp is still there after two polls" json_py '
+if not d["stamped"]:
+    print("pause_for never wrote the stamp")
+    raise SystemExit(1)
+if not d["stamp_left"]:
+    print("the poll after the pause deleted the stamp, so nothing will resume it")
+    raise SystemExit(1)
+'
+    check "and the menu still says when it comes back" json_py '
+if d["auto_seen"] != "paused":
+    print("auto_seen=%r, so the tray stopped believing its own pause"
+          % (d["auto_seen"],))
+    raise SystemExit(1)
+if "Paused until" not in d["pause_label"]:
+    print("pause label: %r" % (d["pause_label"],))
+    raise SystemExit(1)
+'
+fi
+
+title "A manual run the poll never saw"
+if run_driver manual-missed; then
+    check "the request expires when no run is ever seen" json_py '
+if not d["forgotten"]:
+    print("the manual request outlived a run that was never observed")
+    raise SystemExit(1)
+'
+    check "and the scheduled success after it stays quiet" json_py '
+if d["notices_after"]:
+    print("notifications: %r" % (d["notices_after"],))
     raise SystemExit(1)
 '
 fi
