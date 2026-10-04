@@ -4393,6 +4393,22 @@ def scenario_relative_local():
 
     data["tilde_problem"] = MODULE.local_path_problem("~/OneDrive")
     data["tilde_space_problem"] = MODULE.local_path_problem(" /data/OneDrive")
+    # The unquoted spelling, which bash does expand in an assignment: the value the
+    # tray reads has to be the directory the wrapper syncs, not the text.
+    tilde_cfg = os.path.join(home, "tilde-config")
+    with open(tilde_cfg, "w", encoding="utf-8") as fh:
+        fh.write('REMOTE="traytest-remote:"\nUNIT_NAME="ztraytest"\n'
+                 'LOCAL=~/OneDrive\nLOG=~/one:~/two\n')
+    real_cfg = MODULE.CONFIG_FILE
+    MODULE.CONFIG_FILE = tilde_cfg
+    try:
+        loaded = MODULE.load_config()
+    finally:
+        MODULE.CONFIG_FILE = real_cfg
+    data["tilde_unquoted"] = loaded.get("LOCAL", "")
+    data["tilde_unquoted_problem"] = MODULE.local_path_problem(data["tilde_unquoted"])
+    data["tilde_words"] = loaded.get("LOG", "")
+    data["tilde_home"] = os.path.expanduser("~")
     here = os.getcwd()
     try:
         os.chdir("/")
@@ -7611,6 +7627,21 @@ if d["tilde_etc"] is not None or d["tilde_folder"] is not None:
     check "and a value with a space at one end is refused too" json_py '
 if not d["tilde_space_problem"]:
     print("local_path_problem accepted \" /data/OneDrive\"")
+    raise SystemExit(1)
+'
+    # The other spelling: an unquoted tilde is expanded by bash in an assignment, so
+    # this config works with onedrive-sync and the tray has to agree with it. The
+    # refusal above is what a *quoted* tilde gets.
+    check "an unquoted tilde in LOCAL is expanded the way the shell expands it" json_py '
+import os
+want = os.path.join(d["tilde_home"], "OneDrive")
+if d["tilde_unquoted"] != want or d["tilde_unquoted_problem"]:
+    print("LOCAL=~/OneDrive read as %r (problem %r), the shell says %r"
+          % (d["tilde_unquoted"], d["tilde_unquoted_problem"], want))
+    raise SystemExit(1)
+want_words = os.path.join(d["tilde_home"], "one") + ":" + os.path.join(d["tilde_home"], "two")
+if d["tilde_words"] != want_words:
+    print("LOG=~/one:~/two read as %r, the shell says %r" % (d["tilde_words"], want_words))
     raise SystemExit(1)
 '
 fi

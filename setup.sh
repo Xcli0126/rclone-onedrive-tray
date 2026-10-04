@@ -350,6 +350,41 @@ fi
 # config already had.
 DEFAULT_BISYNC_ARGS="--resilient --recover --max-lock 2m --conflict-resolve none --conflict-loser num --stats 2s"
 OLD_CONFIG="$(cat "$CONFIG_FILE" 2>/dev/null || true)"
+plain_assignment() {  # plain_assignment <line> -- one assignment and nothing else
+    # True when the line is a single KEY=value whose value ends at the newline, so
+    # the line cannot change how the lines around it are read. `bash -n` on the line
+    # alone is not enough, which is how OPEN_APP_CMD=<<X got through: a here-doc
+    # opener is valid on its own and in the file it swallows every key after it.
+    # The value may be quoted or bare; what it may not hold outside quotes is a
+    # space or a character that starts another command, a redirection or a
+    # substitution.
+    local text="$1" i char quote=""
+    text="${text#*=}"
+    for (( i = 0; i < ${#text}; i++ )); do
+        char="${text:i:1}"
+        if [ "$quote" = "'" ]; then
+            [ "$char" = "'" ] && quote=""
+            continue
+        fi
+        if [ "$quote" = '"' ]; then
+            # Inside double quotes a backslash escapes the next character, so the
+            # one after it cannot be a closing quote.
+            if [ "$char" = "\\" ]; then
+                i=$((i + 1))
+                continue
+            fi
+            [ "$char" = '"' ] && quote=""
+            continue
+        fi
+        case "$char" in
+            "'"|'"') quote="$char" ;;
+            [[:space:]]) return 1 ;;
+            '|'|'&'|';'|'<'|'>'|'('|')'|'`') return 1 ;;
+        esac
+    done
+    [ -z "$quote" ]
+}
+
 carry_assign() {  # carry_assign <KEY> <default> -> the whole assignment, as written
     # The old file's own line for this key, so what it already quoted stays quoted
     # the way it was. Reading the value and writing it back through config_quote()
@@ -370,8 +405,10 @@ carry_assign() {  # carry_assign <KEY> <default> -> the whole assignment, as wri
     # back with the first line alone, bash -n refused the result, and the wizard
     # still printed "Wrote".
     #
-    # Everything that passes is copied exactly as the file has it, including the
-    # parts this writer would have quoted differently. An earlier version accepted
+    # Both checks are needed and they answer different questions: `plain_assignment`
+    # says the value ends at this line, `bash -n` says the line is shell at all
+    # (KEY="one is neither). Everything that passes both is copied exactly as the
+    # file has it, including the parts this writer would have quoted differently. An earlier version accepted
     # only KEY="one string" and a bare word and sent the rest through the value path,
     # which escapes `$`: an unquoted LOG=${XDG_CACHE_HOME:-$HOME/.cache}/x was frozen
     # into a literal path, a value holding \" and $VAR lost the expansion, and a
@@ -383,7 +420,9 @@ carry_assign() {  # carry_assign <KEY> <default> -> the whole assignment, as wri
         # OPEN_APP_CMD=abc\ came back as the next key's text.
         *\\) line="" ;;
     esac
-    if [ -n "$line" ] && ! printf '%s\n' "$line" | bash -n 2>/dev/null; then
+    if [ -n "$line" ] &&
+            { ! plain_assignment "$line" ||
+              ! printf '%s\n' "$line" | bash -n 2>/dev/null; }; then
         line=""
     fi
     # What is carried is carried as it stands, including a line bash reads as a
@@ -422,11 +461,11 @@ carry() {  # carry <KEY> <default> -> the value already in the config, or the de
 if [ "$INTERVAL_GIVEN" -eq 0 ]; then
     INTERVAL="$(carry INTERVAL_MIN 5)"
     # The same rule the flag is held to, applied to the value the file already
-    # holds. These two are written into the config unquoted, so a carried value is
-    # assembled into the file as it stands: a hand-written INTERVAL_MIN of
-    # `5"; touch /tmp/x; "` would be a command in a file the wrapper sources, and
-    # bash -n would call it valid shell and wave it through. Anything that is not a
-    # whole number of minutes, and anything that is zero, is the default.
+    # holds. INTERVAL_MIN and WATCH do not go through carry_assign(), so the template's
+    # own quotes are all that stands around the value: a hand-written INTERVAL_MIN of
+    # `5"; touch /tmp/x; "` closes them and becomes a command in a file the wrapper
+    # sources, and bash -n calls the result valid shell and waves it through. Anything
+    # that is not a whole number of minutes, and anything that is zero, is the default.
     case "$INTERVAL" in
         ''|*[!0-9]*) warn "INTERVAL_MIN=\"$INTERVAL\" is not a whole number of minutes; writing 5"
                      INTERVAL=5 ;;
@@ -438,9 +477,14 @@ if [ "$WATCH_GIVEN" -eq 1 ]; then
     WATCH="$([ "$WATCH" = "yes" ] && echo 1 || echo 0)"
 else
     WATCH="$(carry WATCH 1)"
-    case "$WATCH" in
-        0|1) ;;
-        *) warn "WATCH=\"$WATCH\" is not 0 or 1; writing 1 (realtime sync on)"
+    # The same on/off spellings the tray's truthy() and onedrive-doctor accept, so a
+    # hand-written WATCH="yes" is not rewritten to 1 with a warning about a value that
+    # was already right. Anything else is on, which is the wizard's own default, and
+    # the sentence says so.
+    case "$(printf '%s' "$WATCH" | tr '[:upper:]' '[:lower:]')" in
+        1|true|yes|on|enabled) WATCH=1 ;;
+        0|false|no|off|disabled|'') WATCH=0 ;;
+        *) warn "WATCH=\"$WATCH\" is not a switch; writing 1 (realtime sync on)"
            WATCH=1 ;;
     esac
 fi

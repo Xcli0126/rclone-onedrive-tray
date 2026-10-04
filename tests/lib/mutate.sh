@@ -142,10 +142,13 @@ lint_table() {  # lint_table <table> <root>  -> 0 when every row is usable
         # and was defeated by a numeric address, a leading space, and `/ s/,/^$/`.
         #
         # No shipped row uses a blank-line range; this is a guard for the next one.
-        case "$expr" in
-            s*|' '*) ;;                 # a leading space is not an address either
+        # Leading whitespace is stripped first, because sed tolerates it and the
+        # first version of this rule skipped such a row outright.
+        stripped="${expr#"${expr%%[![:space:]]*}"}"
+        case "$stripped" in
+            s*) ;;
             *)
-                addr="${expr% s*}"
+                addr="${stripped% s*}"
                 addr="${addr//[[:space:]]/}"
                 case "$addr" in
                     *',/^$/'*|*'/^$/,/'*)
@@ -229,13 +232,26 @@ FIXTURE
         > "$LINT_FIX/table"
     lint_out="$(lint_table "$LINT_FIX/table" "$LINT_FIX" 2>&1)"
     lint_rc=$?
-    for want_id in dead-row blank-range missing-file missing-suite bad-expression \
-                   spaced-range numeric-range spaced-start space-before-s; do
+    # The row and the complaint together: a row that is reported for the wrong reason
+    # ("matches nothing" instead of the range) used to count as reported, which is how
+    # the leading-space row passed this self-test while the lint skipped it.
+    while IFS='|' read -r want_id want_text; do
         case "$lint_out" in
-            *"$want_id"*) ;;
-            *) printf 'self-test: the lint said nothing about %s\n' "$want_id" >&2; bad=1 ;;
+            *"$want_id: $want_text"*) ;;
+            *) printf 'self-test: the lint did not report %s for %s\n' \
+                   "$want_id" "$want_text" >&2; bad=1 ;;
         esac
-    done
+    done <<'WANT'
+dead-row|the range is addressed
+blank-range|the range is addressed
+missing-file|no such file
+missing-suite|no such suite
+bad-expression|sed refused the expression
+spaced-range|the range is addressed
+numeric-range|the range is addressed
+spaced-start|the range is addressed
+space-before-s|the range is addressed
+WANT
     case "$lint_out" in
         *live-row*) printf 'self-test: the lint reported a row that is fine\n' >&2; bad=1 ;;
     esac

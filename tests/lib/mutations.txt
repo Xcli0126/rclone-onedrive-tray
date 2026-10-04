@@ -213,6 +213,11 @@ tray-local-root-guard	bin/onedrive-tray	s#^        if os.path.dirname(root) == r
 # resolve "/" with the process in "/" and hand back "/etc".
 tray-local-tilde-refused	bin/onedrive-tray	s|^    if text.startswith("~"):$|    if False:|	tray
 tray-local-space-refused	bin/onedrive-tray	s|^    if raw != text:$|    if False:|	tray
+# The other half of the tilde rule: an unquoted tilde is expanded the way the
+# shell expands it, and a quoted one is refused.
+tray-local-tilde-not-expanded	bin/onedrive-tray	s|^                    value = expand_tilde_words(value)$|                    value = value|	tray
+# The line-level rule that keeps a here-doc opener out of the config.
+setup-carry-not-plain-assignment	setup.sh	s#^            { ! plain_assignment "$line" ||$#            { false ||#	install-flow
 tray-pause-unarmed-leaves-off	bin/onedrive-tray	s#^                self._set_units("enable", "--now")$#                pass#	tray
 # tray-pause-unarmed-silent was dropped: it named the line that called _pause_lost(), and the
 # old pause design that function belonged to is gone.
@@ -393,5 +398,5 @@ setup-carry-assign-keeps-broken-line	setup.sh	s|^        line=""$|        :|	ins
 # a WATCH that is not 0 or 1 and an INTERVAL_MIN holding shell syntax each used
 # to be assembled into a file that either stopped being shell or sourced into a
 # command.
-setup-watch-not-validated	setup.sh	s#^        0|1) ;;$#        *) ;;#	install-flow
+setup-watch-not-validated	setup.sh	s#^        1|true|yes|on|enabled) WATCH=1 ;;$#        *) WATCH=1 ;;#	install-flow
 setup-interval-not-validated	setup.sh	s#^        ''|\*\[!0-9\]\*) warn "INTERVAL_MIN#        '') warn "INTERVAL_MIN#	install-flow

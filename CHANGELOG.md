@@ -45,9 +45,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   release rewrote, and was re-pointed in the same commit that rewrote it; and
   `docs-duplicate-heading` had been dropped with a reason that was false, "SURVIVED,
   so the suite must read a different copy", when the harness had been reporting
-  SKIPPED for it - the heading it renamed had been deleted a few hours earlier, in a
-  repository whose first commit is a day old. All three point at lines that exist now,
-  and the restored one is caught. The lint cannot see
+  SKIPPED for it - the heading it renamed had been deleted a few hours earlier. All
+  three point at lines that exist now, and the restored one is caught. The lint cannot see
   a row that mutates the wrong occurrence of the line it names, or one pointed at a
   suite that does not cover the behaviour; `docs/COMPATIBILITY.md` says so rather
   than leaving the check looking stronger than it is.
@@ -59,9 +58,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   started with the key: a value written over two lines is valid shell, so
   `OPEN_APP_CMD="one` went into the new config on its own, the file stopped being
   shell, and the wizard still printed "Wrote" and exited 0. A line is carried when it
-  is the whole assignment - it ends outside both kinds of quote and is not continued
-  onto the next line - and otherwise the writer falls back to the value the reader can
-  see, which closes the quote or drops the continuation. Everything a whole line says
+  is one `KEY=value` whose value ends at the newline and bash accepts it on its own -
+  two questions, because a here-doc opener is valid on its own and in the file it
+  swallowed every key after it - and otherwise the writer falls back to the value the
+  reader can see, which closes the quote or drops the continuation. Everything a whole
+  line says
   is carried as it stands, including forms this writer would have quoted differently:
   the second version accepted only `KEY=word` and `KEY="one string"` and sent the rest
   through the quoting path, which froze an unquoted `${XDG_CACHE_HOME:-...}` path, lost
@@ -78,20 +79,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   key holds the default, and sourcing it runs nothing the old value contained. When the
   gate does refuse, the message says what is and is not left alone: the config is
   untouched, and the folder list this run wrote is already in place.
-- A `LOCAL` with a tilde in it, or with a space at either end, is refused instead of
-  expanded. `. config` in bash does not expand a tilde inside a value, so
-  `LOCAL="~/OneDrive"` gives `onedrive-sync` an eleven-character relative path and it
-  refuses the run; expanding it made the tray describe a directory nothing syncs. The
-  delete guard is where that mattered: with `LOCAL="~/.."` and the process in `/` it
-  read `~` as an ordinary directory name, landed on the filesystem root, and handed
-  back `/etc` for the folder `etc`, one confirmation dialog away from `shutil.rmtree`
-  - measured on the version before this change, with the tray's own module and cwd `/`:
-  `local_path_problem("~/..") == ""` and `_local_delete_path("etc") == "/etc"`. The
-  first attempt at this expanded the tilde in the guard instead, which closed `/etc`
-  and opened `$HOME`: a folder named like the user came back as the home directory.
-  The value is refused at the source now, so every reader of it - the guard, the
-  settings dialog, the wrapper - is looking at the same path, and the root check inside
-  the guard is back as the net for the next time two resolutions drift apart.
+- `LOCAL` is read the way the shell reads it, and the spellings it cannot use are
+  refused instead of guessed at. Bash expands a tilde in an unquoted assignment and
+  after every `:` in one, so `LOCAL=~/OneDrive` is `/home/you/OneDrive` and the tray
+  expands it the same way now; a tilde inside quotes is the literal relative path
+  `~/OneDrive` to `onedrive-sync`, which refuses the run, and that spelling is refused
+  here with a sentence that names the edit. A space at either end is refused for the
+  same reason: the shell keeps it as part of the path. The delete guard is where the
+  guessing mattered: with `LOCAL="~/.."` and the process in `/` it read `~` as an
+  ordinary directory name, landed on the filesystem root, and handed back `/etc` for the
+  folder `etc`, one confirmation dialog away from `shutil.rmtree` - measured at
+  `ae1fbc6`, where the guard had no refusal: `local_path_problem("~/..") == ""` and
+  `_local_delete_path("etc") == "/etc"`. The first attempt at this expanded the tilde in
+  the guard instead, which closed `/etc` and opened `$HOME`: a folder named like the
+  user came back as the home directory, and the case written for it asserted that this
+  was correct. Every reader of the value now sees the path the wrapper uses - the guard,
+  the settings dialog, `open_path()` - and the root check inside the guard is back as a
+  net for the next time two resolutions drift apart.
 - The tray expands a variable inside the fallback of `${VAR:-fallback}`, and follows
   the braces of one expansion inside another. The shipped
   `LOG="${XDG_CACHE_HOME:-$HOME/.cache}/..."` read as a path with a literal `$HOME` in

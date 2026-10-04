@@ -48,9 +48,13 @@ still open from that review:
   it. `shell_value()` answers `$VAR`, `${VAR}`, `${VAR:-word}`, `${VAR-word}`,
   `${VAR:+word}`, `${VAR:=word}`, a nested expansion inside the word, and the quoting
   of that word; `${VAR:?message}`, `${VAR:offset}` and `${VAR:offset:length}` are
-  printed back as written. Tests pin that, and pin the reason it is safe: the tray
-  parses a config rather than running one, so a `$(command)` in a value stays text and
-  is never executed. Answering those forms would mean a shell, and a shell for a
+  printed back as written, and so are the forms this reader has no answer for at all:
+  `${A#prefix}`, `${A%suffix}`, `${#A}`, a backtick substitution and an unterminated
+  `${`. Tests pin the first three, and pin the reason it is safe: the tray parses a
+  config rather than running one, so a `$(command)` in a value stays text and is never
+  executed. A value nested more than twenty expansions deep is also left as written,
+  which is a limit rather than an answer: without it a file holding thousands of
+  `${A:-` recursed until Python raised. Answering those forms would mean a shell, and a shell for a
   config value the tray only ever reads as a path or a command line is a bigger thing
   than the three forms are worth. Two smaller divergences sit beside it: a backslash
   escape in an unquoted value is kept rather than removed (`x\#y`), which

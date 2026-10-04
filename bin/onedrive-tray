@@ -349,27 +349,40 @@ def _parameter_word(inner: str):
     return None, None
 
 
-def _expand_word(word: str, quoted: bool) -> str:
+def _expand_word(word: str, quoted: bool, depth: int) -> str:
     """The word of a parameter expansion, expanded the way the shell expands it.
 
-    Quoting inside the braces is quoting syntax: `${A:-"x y"}` is `x y` in bash,
-    and `${A:-'x y'}` is `x y` too, since a word in braces is not one of the
-    places a single quote protects an expansion. Anything else is expanded in the
-    context the whole value is in.
+    Quoting inside the braces is quoting syntax, and which quotes those are depends
+    on the context the whole value is in. Outside double quotes `${A:-"x y"}` and
+    `${A:-'x y'}` are both `x y`; inside them only the double quotes are quoting, so
+    `${A:-'x y'}` keeps its single quotes. Measured both ways against bash.
     """
     # A backslash escapes the closing brace so the expansion does not end there,
     # and in that context bash removes it: `${A:-x\}y}` is `x}y`.
     word = word.replace("\\}", "}")
     if len(word) >= 2 and word[0] == word[-1] and word[0] == '"':
-        return expand_shell_text(word[1:-1], True)
+        return expand_shell_text(word[1:-1], True, depth)
     if not quoted and len(word) >= 2 and word[0] == word[-1] and word[0] == "'":
         # Only outside double quotes: inside them a single quote is an ordinary
         # character, which is what bash answers with.
         return word[1:-1]
-    return expand_shell_text(word, quoted)
+    return expand_shell_text(word, quoted, depth)
 
 
-def expand_shell_text(text: str, quoted: bool) -> str:
+def expand_tilde_words(value: str) -> str:
+    """A leading `~` in an unquoted assignment, expanded the way bash expands it.
+
+    Bash expands a tilde at the start of an assignment and after every `:` in one,
+    and only where the word is unquoted: `A=~/x:~/.y` is two home directories and
+    `A="~/x"` is the text. The quoting is already gone here, so it is applied to
+    each `:`-separated part that starts with a tilde, which is what the shell does
+    with the parts it can see.
+    """
+    return ":".join(os.path.expanduser(part) if part.startswith("~") else part
+                    for part in value.split(":"))
+
+
+def expand_shell_text(text: str, quoted: bool, depth: int = 0) -> str:
     """One shell word: `$VAR`, `${VAR}`, `${VAR:-fallback}` and the forms beside it.
 
     The fallback is a shell word of its own and is expanded as one, which is the
@@ -387,7 +400,14 @@ def expand_shell_text(text: str, quoted: bool) -> str:
     silently wrong, and `docs/KNOWN-ISSUES.md` records that. The variable's own
     value is inserted as it stands; bash does not expand the result of an
     expansion either.
+
+    The nesting is bounded: a value holding thousands of `${A:-` would otherwise
+    recurse until Python stops it, and a config file is not a place to find a
+    RecursionError. Past the limit the text is left as it stands, which is what
+    happens to every form this reader does not implement.
     """
+    if depth > 20:
+        return text
     out = []
     index = 0
     while index < len(text):
@@ -419,12 +439,12 @@ def expand_shell_text(text: str, quoted: bool) -> str:
                     continue
                 value = os.environ.get(name, "")
                 if op == ":+":
-                    out.append(_expand_word(word, quoted) if value else "")
+                    out.append(_expand_word(word, quoted, depth + 1) if value else "")
                 else:
                     # `:-` and `:=` take the word for an empty value too, `-` only
                     # for an unset one, which is the difference between the forms.
                     if value == "" and (op != "-" or name not in os.environ):
-                        value = _expand_word(word, quoted)
+                        value = _expand_word(word, quoted, depth + 1)
                     out.append(value)
                 index = close + 1
                 continue
@@ -451,6 +471,13 @@ def load_config() -> dict:
     text after the `=`, so `KEY=#x` keeps its `#` while `KEY=   # x` is empty,
     both as bash has them. What the value itself means is shell_value()'s job,
     and it is the same contract the installers' shared reader keeps.
+
+    A tilde in an unquoted value is expanded, which is the one thing bash does to
+    an assignment that no amount of quoting analysis shows: `LOCAL=~/OneDrive` is
+    `/home/you/OneDrive` to the shell and `LOCAL="~/OneDrive"` is the literal
+    relative path. Both reach shell_value() as the same string, so the quoting is
+    read from the raw text first and a quoted tilde is left for
+    local_path_problem() to refuse.
     """
     cfg: dict[str, str] = {}
     try:
@@ -469,7 +496,10 @@ def load_config() -> dict:
                 if (key.startswith("export")
                         and key[len("export"):len("export") + 1].isspace()):
                     key = key[len("export"):].strip()
-                cfg[key] = shell_value(val)
+                value = shell_value(val)
+                if not val.lstrip().startswith(("\"", "'")):
+                    value = expand_tilde_words(value)
+                cfg[key] = value
     except UnicodeDecodeError as exc:
         # One bad byte used to travel out of main() as a traceback, in a process
         # whose autostart entry has Terminal=false, while the shell half sourced
@@ -520,17 +550,20 @@ def local_path_problem(value) -> str:
         return (f'LOCAL="{raw}" has a space at one end, and the shell that sources '
                 f'the config keeps it as part of the path; write it without one.')
     if text.startswith("~"):
-        # `. config` in bash does not expand a tilde inside a value, so this is the
-        # eleven-character relative path "~/OneDrive" to onedrive-sync, which then
-        # refuses the run ([ ! -d "$LOCAL" ]). Expanding it here instead - which is
-        # what this function used to do, and what the delete guard did until this
-        # release - made the tray resolve a directory nothing syncs: the chip that
-        # offers to delete a deselected folder was one confirmation away from
-        # removing a tree the sync pair has nothing to do with.
-        suggestion = (f'"$HOME{text[1:]}"' if text == "~" or text.startswith("~/")
-                      else "an absolute path")
-        return (f'LOCAL="{text}" starts with a tilde, and the shell that sources the '
-                f'config does not expand one; write {suggestion} instead.')
+        # A tilde that is still here was written inside quotes or escaped, and the
+        # shell that sources the config expands neither: this is the literal relative
+        # path "~/OneDrive" to onedrive-sync, which then refuses the run
+        # ([ ! -d "$LOCAL" ]). Expanding it here instead - which is what this function
+        # used to do, and what the delete guard did for one commit - made the tray
+        # resolve a directory nothing syncs: the chip that offers to delete a
+        # deselected folder was one confirmation away from removing a tree the sync
+        # pair has nothing to do with. The unquoted spelling never reaches this line,
+        # because load_config() expands it the way the shell does.
+        suggestion = (f"LOCAL=~{text[1:]}" if text == "~" or text.startswith("~/")
+                      else "the absolute path")
+        return (f'LOCAL="{text}" has a tilde inside quotes, and the shell that sources '
+                f'the config does not expand one there; write it unquoted '
+                f'({suggestion}) or as "$HOME{text[1:]}".')
     if not os.path.isabs(text):
         return (f'LOCAL="{text}" is not an absolute path; it has to be one, such '
                 f'as "$HOME/OneDrive".')

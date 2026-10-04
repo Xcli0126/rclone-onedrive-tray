@@ -516,6 +516,26 @@ check "and INTERVAL_MIN is a number again" grep -qxF 'INTERVAL_MIN="5"' "$CARRY_
 check "and the file is shell" bash -n "$CARRY_CFG"
 check_absent "and sourcing it runs nothing that was in the old value" \
     "$CARRY_CFG.sourced-marker"
+
+# A line can be valid shell on its own and still change how the rest of the file is
+# read, which is the hole `bash -n` alone leaves: OPEN_APP_CMD=<<X is a here-doc
+# opener, and the heredoc swallowed every key after it. The sharp assertion is that
+# a key written after that line is still set when the config is sourced.
+title "a carried line that would change the rest of the file"
+{ grep -v '^OPEN_APP_CMD=' "$CARRY_CFG"
+  printf '%s\n' 'OPEN_APP_CMD=<<X'
+} > "$CARRY_CFG.new" && mv -f "$CARRY_CFG.new" "$CARRY_CFG"
+run "a re-run over a here-doc opener finishes" 0 "Wrote" wizard_run
+# shellcheck disable=SC2016  # $1 belongs to the inner bash
+check "and that line is not what the new config says" \
+    bash -c '! grep -qxF "OPEN_APP_CMD=<<X" "$1"' _ "$CARRY_CFG"
+check "and the file is still shell" bash -n "$CARRY_CFG"
+# Set, not non-empty: RCLONE is empty by default, so `[ -n ... ]` failed for the
+# right config for the wrong reason.
+# shellcheck disable=SC2016  # the ${...} are the inner bash's own parameters
+check "and every key after that line is still set when it is sourced" \
+    bash -c '. "$1"; [ "${WATCH+set}" = set ] && [ "${RETRIES+set}" = set ] \
+             && [ "${RCLONE+set}" = set ] && [ "${SHOW_ICON+set}" = set ]' _ "$CARRY_CFG"
 rm -f "$CARRY_CFG.sourced-marker"
 
 # ------------------------------------------------- the shipped config and XDG
@@ -3740,12 +3760,14 @@ check "keeps the configuration (documented; --purge removes it)" test -f "$CFG"
 # The hook in /etc belongs to the machine. This sandbox never had one, and the
 # unit name it would name is not the one being removed, so sudo must not run.
 check_absent "never ran sudo" "$WORK/sudo-calls"
-# The one skip left in this suite, and the only environmental state a sandbox
-# cannot manufacture: the file lives in /etc and creating or removing it needs
-# root. The other three conditional skips (systemd-analyze absent, a 0500
-# directory that is still writable, a pid that is already gone) build their own
-# fixture now and pass on any machine, because a skip is not a pass and three of
-# them together ran the suite under its floor.
+# One of the two skips left in this suite, and the only environmental state a
+# sandbox cannot manufacture: the file lives in /etc and creating or removing it
+# needs root. The other is the hook-execution fixture further up, which needs a
+# user namespace; CI asserts that it has one, so that case cannot skip there. The
+# three conditional skips that used to sit beside them (systemd-analyze absent, a
+# 0500 directory that is still writable, a pid that is already gone) build their
+# own fixture now and pass on any machine, because a skip is not a pass and three
+# of them together once ran the suite under its floor.
 HOOK=/etc/NetworkManager/dispatcher.d/90-rclone-onedrive-tray
 if [ -f "$HOOK" ]; then
     # The sentence the HOME-redirect guard prints, not the shared word "Leaving":

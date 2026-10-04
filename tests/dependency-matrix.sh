@@ -578,19 +578,6 @@ if [ "$(env READERS_UNSET= READERS_SET= bash -c '. "$1"; printf "%s" "$SUBSTRING
 else
     bad "bash answered the substring form as this reader does, so the divergence is stale"
 fi
-diverging_py="$(env PYTHONPATH="$SRC_DIR/tests/lib" python3 - "$SRC_DIR/bin/onedrive-tray" <<'PY'
-import sys
-
-from load_module import load
-
-module = load(sys.argv[1])
-module.CONFIG_FILE = sys.argv[2] if len(sys.argv) > 2 else module.CONFIG_FILE
-for key in ("SUBSTRING", "ALTERNATE_MESSAGE", "COMMAND"):
-    print("%s=<%s>" % (key, module.load_config().get(key, "")))
-PY
-)"
-CFGEOF
-
 # The difference is the documented one, not an accident: a variable in a value the
 # installers read comes back as written.
 # shellcheck disable=SC2016  # the ${VAR} is the text being searched for
