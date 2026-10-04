@@ -1369,6 +1369,23 @@ def read_progress(text: str, max_age: int = 30):
 ENABLED_EVERY = 12
 
 
+def failure_identity(failure):
+    """The part of an announced failure that says which failure it is.
+
+    _announce_finish() is handed (when, tag, raw) for a run the wrapper
+    classified, or (when, hint) from a caller that did not tag it. `when` is the
+    failing run's own clock, and comparing it made two runs of the same failure
+    five minutes apart look like news: on a five-minute timer the guard that
+    exists to stop a repeat announced every one of them, one desktop
+    notification per failing run, 2016 a week, each carrying the same sentence.
+    The tag and the raw line are what tell one failure from another; the clock is
+    for the status row, which shows it.
+    """
+    if failure is None or len(failure) < 2:
+        return failure
+    return failure[1:]
+
+
 class Tray:
     """The status icon and the menu that drives one bisync pair.
 
@@ -2901,7 +2918,8 @@ class Tray:
 
         What may not happen either way: a failure that was in the log before
         this process started is not news (the first look only records it), and
-        the same failure is not announced twice.
+        the same failure is not announced twice. "The same failure" is the tag
+        and the raw line, not the run's clock - see failure_identity().
         """
         if self.manual_requested:
             # A manual run can start and finish between two polls, and then there
@@ -2921,7 +2939,8 @@ class Tray:
         ended = self.was_syncing and not syncing
         first_look = not self.log_looked
         self.log_looked = True
-        if failure is not None and failure != self.log_failure:
+        if failure is not None and (
+                failure_identity(failure) != failure_identity(self.log_failure)):
             if ended or not first_look:
                 self.notify(self.t("{app} sync failed", app=APP_NAME),
                             hint or self.t("see the sync log"))

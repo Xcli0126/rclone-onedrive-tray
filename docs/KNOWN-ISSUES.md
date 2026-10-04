@@ -14,27 +14,6 @@ round uses a different model with a different lens, which is how the entries her
 were found in the first place.
 
 ## Open
-### A failing run costs more than it should, three ways
-
-Round eleven's third reviewer ran the tray and the timer as a long-lived pair and
-measured what accumulates. Three things did, all reproduced, none fixed yet.
-
-- The tray announces the same failure again on every run. The guard compares
-  `(when, tag, raw)` against the last one it announced, and `when` is the failing
-  run's own clock, so two runs of the same failure five minutes apart never match
-  and the branch whose own comment says the same failure is not announced twice
-  never fires. Measured against a real notification service on a private session:
-  30 failing runs, 30 toasts; the same 30 with a constant `when`, one toast. A
-  five minute timer makes that 288 a day of the identical message.
-- The watcher unit is the project's only `Restart=always`, and the watcher exits 1
-  on purpose after three permanent `inotifywait` failures. With the documented
-  `WATCH_EXCLUDE="["` the cycle is 3 restarts in 4.0 seconds plus `RestartSec=5`,
-  so roughly 9,600 restarts and 24 MB of journal a day, and systemd's own start
-  limiter (burst 5 in a 10 second window by default) never trips.
-- A failing sync writes about 413 bytes of journal per run and a healthy one
-  writes none, and no file in the project names any journal bound.
-
-
 ### Four parsers for one file format
 
 `install.sh` and `uninstall.sh` read the config with `sed`, the tray parses it in

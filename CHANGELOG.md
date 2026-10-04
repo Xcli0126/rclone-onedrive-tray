@@ -36,6 +36,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A sync that keeps failing was announced on every run. The guard whose comment
+  says the same failure is not announced twice compared the run's own clock along
+  with the tag and the log line, and a run's clock is different every time, so a
+  five minute timer produced one desktop notification per failing run carrying the
+  same sentence: 288 a day for as long as the condition lasted. The identity is
+  the tag and the raw line now, measured against a real notification service, 30
+  failing runs give one notification, and a failure the tray has not seen before
+  is still news.
+- The watcher unit is the project's only `Restart=always`, and the watcher exits 1
+  on purpose after three permanent `inotifywait` failures: with `RestartSec=5`
+  that is a restart every nine seconds, roughly 9,600 a day and 24 MB of journal
+  for one unparseable exclude pattern, and systemd's default start limit (five
+  starts in ten seconds) never tripped. The unit bounds its own restarts now, five
+  starts in five minutes, so a transient failure still gets five tries while a
+  permanent one leaves the unit failed. `onedrive-doctor`'s watcher row tells that
+  state from a plain inactive unit and names the reset, instead of suggesting
+  `enable --now` for a unit systemd has given up on.
 - Seven failures that left no trace are reported now, each in the place its file
   can write to. `install.sh` printed `watcher disabled: WATCH is off in ...` over
   a `disable --now` that systemd had refused, and sent a refused `try-restart` to
@@ -455,6 +472,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `docs/TROUBLESHOOTING.md` says what the journal costs. A sync that succeeds
+  writes nothing and one that fails writes about four lines and 413 bytes per run,
+  which a five minute timer turns into roughly 120 kB a day for as long as the
+  failure lasts; the project bounds no journald setting, because that is a choice
+  about the whole machine, so the page shows both the vacuum command and the
+  drop-in that caps it system-wide. It also explains what a watcher unit reading
+  `failed` means now that the unit bounds its own restarts.
 - The notification setting reads "Tell me when a sync I start succeeds", which
   is what it does: scheduled runs stay quiet, because a five-minute timer
   announcing every success would train people to ignore the notifications that

@@ -509,6 +509,14 @@ case "${WATCH,,}" in
             watch_active="$(timeout 10 systemctl --user is-active "$unit-watch.service" 2>&1 || true)"
             if [ "$watch_active" = active ]; then
                 report ok watch "$unit-watch.service is active"
+            elif [ "$watch_active" = failed ]; then
+                # The unit's own start limit is what stops the loop a permanent
+                # inotifywait failure would otherwise make: the watcher exits 1 on
+                # purpose after three of them, Restart=always starts it again, and
+                # five starts inside five minutes leaves the unit failed. The
+                # recovery is a reset and a start, and the reason the watcher gave
+                # is in the journal.
+                report warn watch "$unit-watch.service failed, so systemd stopped restarting it; its own reason is in: journalctl --user -u $unit-watch.service -n 20 ; then: systemctl --user reset-failed $unit-watch.service && systemctl --user start $unit-watch.service"
             else
                 report warn watch "WATCH is on in the config but $unit-watch.service is ${watch_active:-not reporting a state}; ./install.sh writes the unit, then: systemctl --user enable --now $unit-watch.service"
             fi

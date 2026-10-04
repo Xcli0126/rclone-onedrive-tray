@@ -646,6 +646,27 @@ check "systemd accepts $UNIT.timer" \
 check "systemd accepts $UNIT-watch.service" \
     systemd-analyze --user verify "$UNIT_DIR/$UNIT-watch.service"
 
+# The watcher is the project's only Restart=always, and it exits 1 on purpose
+# after three permanent inotifywait failures. Without a start limit of its own the
+# cycle is the three failures plus RestartSec, about nine seconds, so one
+# unparseable exclude pattern meant thousands of restarts and tens of megabytes of
+# journal a day. systemd's default limit is five starts in ten seconds, which that
+# cycle never trips.
+title "the watcher's restart bound"
+if grep -qE '^StartLimitIntervalSec=([3-9][0-9]{2,}|[0-9]{4,})$' \
+        "$UNIT_DIR/$UNIT-watch.service" &&
+        grep -qE '^StartLimitBurst=[0-9]+$' "$UNIT_DIR/$UNIT-watch.service"; then
+    ok "the watcher unit bounds its own restarts"
+else
+    bad "the watcher unit has no start limit, so a permanent failure restarts it forever: $(grep -c '' "$UNIT_DIR/$UNIT-watch.service") lines"
+fi
+if awk '/^\[Unit\]/{unit=1} /^\[Service\]/{unit=0} unit' \
+        "$UNIT_DIR/$UNIT-watch.service" | grep -q '^StartLimit'; then
+    ok "and the limit is in [Unit], where systemd reads it"
+else
+    bad "the start limit is not in the [Unit] section"
+fi
+
 # ---------------------------------------------------------------- the autostart entry
 # The entry is the tray's "Start tray at login" setting: unticking the box
 # removes the file and the tray reads its presence. install.sh rewrote it on
@@ -3034,6 +3055,17 @@ run "a watcher left running while WATCH is off is a warning naming the command" 
     "systemctl --user disable --now docsync-watch.service" \
     doc_run "$DOC_FX" --quiet --offline
 DOC_WATCH_ENABLED=""; DOC_WATCH_ACTIVE=""
+
+# A watcher whose start limit has tripped: the unit is failed, every restart the
+# unit asks for is refused by systemd, and the reason is in the journal. "inactive"
+# and "failed" read the same to a row that only knows active, and the recovery is
+# different, so the row has to tell them apart.
+doc_fixture watch-failed 'WATCH="1"'
+DOC_WATCH_ACTIVE="failed"
+run "a watcher whose restart loop gave up names the reset command" 0 \
+    "systemctl --user reset-failed docsync-watch.service" \
+    doc_run "$DOC_FX" --quiet --offline
+DOC_WATCH_ACTIVE=""
 
 doc_fixture quiet
 DOCTOR_FULL="$(doc_run "$DOC_FX" --offline 2>&1)"

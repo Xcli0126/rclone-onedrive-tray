@@ -2,6 +2,16 @@
 Description=Watch the sync folder and start a sync on change
 Documentation=https://rclone.org/bisync/
 After=default.target
+# The watcher exits 1 on purpose after three permanent inotifywait failures, and
+# Restart=always brought it straight back: with a five second RestartSec the cycle
+# is nine seconds, so a misconfiguration such as an exclude pattern inotifywait
+# cannot parse meant roughly 9,600 restarts and 24 MB of journal a day, forever.
+# systemd's default start limit never tripped, because that is five starts in ten
+# seconds. Five starts in five minutes is the bound: a transient failure still gets
+# several tries, and a permanent one leaves the unit failed, which is what
+# onedrive-doctor's watcher row reports.
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple

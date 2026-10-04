@@ -281,3 +281,9 @@ setup-listremotes-failure-dropped	setup.sh	s|    die "$RCLONE_BIN listremotes fa
 doctor-icon-empty-ok	bin/onedrive-doctor	s|\[ "$icon_files" -gt 0 \]|true|	install-flow
 tray-config-unreadable-named	bin/onedrive-tray	s|raise ConfigFault(f"cannot read {CONFIG_FILE}: "|raise ConfigFault(f"cannot read "|	tray
 tray-icon-warning-dropped	bin/onedrive-tray	s|^    if failed:$|    if False:|	tray
+# round thirteen: the long-run reviewer's tray and watcher findings.
+# The notification guard keyed on the run clock, and the watcher unit had no
+# restart bound of its own.
+tray-notify-identity-clock	bin/onedrive-tray	s|^    return failure\[1:\]$|    return failure|	tray
+watch-unit-no-start-limit	systemd/onedrive-watch.service.in	s|^StartLimitIntervalSec=300$||	install-flow
+doctor-watch-failed-as-inactive	bin/onedrive-doctor	s|^            elif \[ "\$watch_active" = failed \]; then$|            elif false; then|	install-flow

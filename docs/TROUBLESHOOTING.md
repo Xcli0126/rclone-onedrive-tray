@@ -451,6 +451,34 @@ If `inotify-tools` was installed after this project, the unit was never enabled.
 systemctl --user enable --now onedrive-sync-watch.service
 ```
 
+If the unit reads `failed` instead, it gave up on its own. The watcher stops after three
+permanent `inotifywait` failures, `Restart=always` starts it again, and the unit's start limit
+(five starts in five minutes) is what ends the loop; without it a misconfiguration such as an
+exclude pattern `inotifywait` cannot parse meant a restart every nine seconds, about 9,600 a
+day and 24 MB of journal. The watcher's own sentence is the last line it wrote, and the fix
+depends on what it says:
+
+```bash
+journalctl --user -u onedrive-sync-watch.service -n 20 --no-pager
+systemctl --user reset-failed onedrive-sync-watch.service
+systemctl --user start onedrive-sync-watch.service
+```
+
+### How much journal does this write?
+
+A sync that succeeds writes nothing to the journal. One that fails writes about four lines and
+413 bytes per run, which on a five minute timer is roughly 120 kB a day for as long as the
+failure lasts, and a watcher that is restarting writes its own lines on top. Nothing in this
+project bounds journald, because that is a choice about the whole machine: if you want a cap,
+either vacuum it by hand or set one for every service.
+
+```bash
+journalctl --user --vacuum-size=200M
+sudo mkdir -p /etc/systemd/journald.conf.d
+printf '[Journal]\nSystemMaxUse=500M\n' | sudo tee /etc/systemd/journald.conf.d/90-size.conf
+sudo systemctl restart systemd-journald
+```
+
 ### Does the watcher see changes made on another machine?
 
 No, and it cannot. rclone has no server-side push or notification channel, so a change made

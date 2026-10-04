@@ -2840,6 +2840,70 @@ def scenario_pause_survives_poll():
             "pause_label": tray.item_pause.get_label() or ""}
 
 
+def scenario_notify_repeat():
+    """One failing condition, announced once however often the timer repeats it.
+
+    A sync that keeps failing - an expired sign-in, a remote that cannot be
+    reached - is re-run every five minutes, and each run writes its own
+    ONEDRIVE_RESULT line carrying that run's clock (when=HH:MM). The guard in
+    _announce_finish() is about the failure and not about the run, so the clock
+    belongs to the status row and not to the identity: counting it announced
+    every repeat, one desktop notification per failing run, which is 2016 a week
+    for as long as the condition lasts. A different failure is still news, and
+    so is the same failure once a success has been seen in between.
+    """
+    log = os.path.join(WORK, "notify-repeat", "sync.log")
+    os.makedirs(os.path.dirname(log), exist_ok=True)
+    body = "the sign-in was refused or has expired"
+    with open(log, "w", encoding="utf-8") as fh:
+        fh.write("2026/10/04 13:00:00 INFO  : Bisync successful\n"
+                 "2026/10/04 13:00:00 ONEDRIVE_RESULT v=1 state=synced "
+                 "tag=none when=13:00 msg=sync completed\n")
+    cfg = dict(MODULE.load_config())
+    cfg["LOG"] = log
+    tray = MODULE.Tray(cfg)
+    shown = []
+    real_notify = MODULE.Notify
+    MODULE.Notify = install_fake_notify(shown)
+    try:
+        _, timer_state = tray.unit_states()
+        # The first look at a log only records what it holds: a failure that was
+        # already in it when the tray started is not news. Take that look here,
+        # over a log that ends in a success, so every run below is a repeat of a
+        # failure this tray has already announced.
+        tray._apply_state(False, timer_state)
+
+        def failing_run(when, tag, text):
+            """One finished run, appended the way the wrapper writes it."""
+            with open(log, "a", encoding="utf-8") as fh:
+                fh.write("2026/10/04 %s:00 ERROR : %s\n" % (when, text))
+                fh.write("2026/10/04 %s:00 ONEDRIVE_RESULT v=1 state=error "
+                         "tag=%s when=%s msg=%s\n" % (when, tag, when, text))
+            tray._apply_state(False, timer_state)
+
+        for when in ("14:05", "14:10", "14:15", "14:20", "14:25"):
+            failing_run(when, "auth", body)
+        data = {"runs": 5, "notices": list(shown), "state": tray.state}
+
+        # A different failure is news, so the guard is not simply "quiet after
+        # the first one".
+        failing_run("14:30", "network", "network problem reaching the remote")
+        data["notices_after_other"] = list(shown)
+
+        # And so is the same failure once a run has succeeded in between: the
+        # identity is remembered, not the fact that something once failed.
+        with open(log, "a", encoding="utf-8") as fh:
+            fh.write("2026/10/04 14:35:00 INFO  : Bisync successful\n"
+                     "2026/10/04 14:35:00 ONEDRIVE_RESULT v=1 state=synced "
+                     "tag=none when=14:35 msg=sync completed\n")
+        tray._apply_state(False, timer_state)
+        failing_run("14:40", "auth", body)
+        data["notices_after_success"] = list(shown)
+    finally:
+        MODULE.Notify = real_notify
+    return data
+
+
 def scenario_manual_missed():
     """A manual run the poll never saw does not mark the next scheduled success.
 
@@ -4119,6 +4183,7 @@ SCENARIOS = {
     "notify": scenario_notify,
     "notify-missed": scenario_notify_missed,
     "notify-manual": scenario_notify_manual,
+    "notify-repeat": scenario_notify_repeat,
     "config-reload": scenario_config_reload,
     "config-comments": scenario_config_comments,
     "config-export": scenario_config_export,
@@ -7009,6 +7074,28 @@ if d["timer"] != "enabled":
 if d["cached"] is not None:
     print("the stale answer was cached as %r, so the next tick reuses it"
           % (d["cached"],))
+    raise SystemExit(1)
+'
+fi
+
+title "The same failure is announced once, not once per run"
+if run_driver notify-repeat; then
+    check "five runs of one failure are one notification" json_py '
+if len(d["notices"]) != 1:
+    print("notifications: %d for %d runs: %r"
+          % (len(d["notices"]), d["runs"], d["notices"]))
+    raise SystemExit(1)
+'
+    check "a failure it has not seen before is still announced" json_py '
+if len(d["notices_after_other"]) != 2:
+    print("notifications: %r" % (d["notices_after_other"],))
+    raise SystemExit(1)
+'
+    # The record is of the failure last seen, not of "something failed once":
+    # a success clears it, so the same failure after one is news again.
+    check "and the same failure after a success is news again" json_py '
+if len(d["notices_after_success"]) != 3:
+    print("notifications: %r" % (d["notices_after_success"],))
     raise SystemExit(1)
 '
 fi
