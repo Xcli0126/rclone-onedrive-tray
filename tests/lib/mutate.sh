@@ -81,7 +81,17 @@ ROWS
 fi
 
 [ -n "${RESULTS:-}" ] && : > "$RESULTS"
+
+# A row whose change no suite can notice, and that no suite can notice because the
+# branch is unreachable on this machine rather than because the suites are thin.
+# `check-name-limit` sets the checker's name limit to 99999, and a local filesystem
+# refuses a name past 255 bytes before that limit is consulted, so the row survives
+# by construction and is written down in docs/KNOWN-ISSUES.md as the one branch
+# without a case. Without this list the harness could never exit 0, and every full
+# sweep would be red for a reason that is already recorded.
+KNOWN_SURVIVORS=" check-name-limit "
 survived=0
+known=0
 caught=0
 skipped=0
 unresolved=0
@@ -114,8 +124,14 @@ while IFS=$'\t' read -r id target expr suite; do
     # as a catch: otherwise a broken harness reads as a strong one.
     case "$(classify "$out")" in
         survived)
-            note "$(printf '%-34s SURVIVED %s' "$id" "$out")"
-            survived=$((survived + 1)) ;;
+            case "$KNOWN_SURVIVORS" in
+                *" $id "*)
+                    note "$(printf '%-34s survived (known: the branch is unreachable here) %s' "$id" "$out")"
+                    known=$((known + 1)) ;;
+                *)
+                    note "$(printf '%-34s SURVIVED %s' "$id" "$out")"
+                    survived=$((survived + 1)) ;;
+            esac ;;
         caught)
             note "$(printf '%-34s caught   %s' "$id" "$out")"
             caught=$((caught + 1)) ;;
@@ -127,13 +143,14 @@ done < "$TABLE"
 
 # Naming an id that matches no row verifies nothing, and saying so is the point
 # of running one.
-if [ "${#wanted[@]}" -gt 0 ] && [ "$((caught + survived + skipped + unresolved))" -eq 0 ]; then
+if [ "${#wanted[@]}" -gt 0 ] &&
+        [ "$((caught + survived + known + skipped + unresolved))" -eq 0 ]; then
     echo "no row matched: ${wanted[*]}" >&2
     exit 1
 fi
 
-note "$(printf '\n%d caught, %d survived, %d skipped, %d unresolved' \
-    "$caught" "$survived" "$skipped" "$unresolved")"
+note "$(printf '\n%d caught, %d survived, %d survived-by-design, %d skipped, %d unresolved' \
+    "$caught" "$survived" "$known" "$skipped" "$unresolved")"
 # A row whose expression matches nothing, or a suite that dies, is a broken
 # instrument rather than a clean run, so both fail this script.
 [ "$survived" -eq 0 ] && [ "$skipped" -eq 0 ] && [ "$unresolved" -eq 0 ]

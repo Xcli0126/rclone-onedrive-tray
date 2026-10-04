@@ -2809,13 +2809,28 @@ doc_run() {
     local d="$1"; shift
     local path="$d/bin:$DOC_TOOLS"
     [ -n "$DOC_PATH_OVERRIDE" ] && path="$DOC_PATH_OVERRIDE"
+    # DOC_TIMEOUT is set by doc_run_checked for the one case whose defect is a read
+    # that never returns: without it a reverted fix hangs the suite rather than
+    # failing one case. timeout is in DOC_TOOLS, so it is on the sandbox PATH too.
+    local cmd=("$DOCTOR_BIN" "$@")
+    if [ -n "${DOC_TIMEOUT:-}" ]; then cmd=(timeout "$DOC_TIMEOUT" "${cmd[@]}"); fi
     env HOME="$d/home" XDG_CONFIG_HOME="$d/cfg" XDG_CACHE_HOME="$d/cache" \
         XDG_DATA_HOME="$d/data" XDG_RUNTIME_DIR="$d/run" TMPDIR="$d/tmp" PATH="$path" \
         DOC_TIMER_ENABLED="$DOC_TIMER_ENABLED" DOC_TIMER_ACTIVE="$DOC_TIMER_ACTIVE" \
         DOC_WATCH_ENABLED="${DOC_WATCH_ENABLED:-disabled}" \
         DOC_WATCH_ACTIVE="${DOC_WATCH_ACTIVE:-inactive}" \
         DOC_LSD_RC="${DOC_LSD_RC:-0}" DOC_LSD_ERR="${DOC_LSD_ERR:-}" \
-        "$DOCTOR_BIN" "$@"
+        "${cmd[@]}"
+}
+
+# doc_run_checked <fixture> [arguments...] -- doc_run under a twenty second clock.
+doc_run_checked() {
+    local d="$1"; shift
+    DOC_TIMEOUT=20
+    doc_run "$d" "$@"
+    local rc=$?
+    DOC_TIMEOUT=""
+    return "$rc"
 }
 
 # A healthy fixture: exit 0, every check line carrying a verdict, and a summary
@@ -3008,6 +3023,40 @@ if [ "$DOCTOR_RC" -eq 1 ] && grep -q '^fail paths.*FILTERS_FILE' <<<"$DOCTOR_OUT
     ok "an exported FILTERS_FILE that is missing fails the paths check"
 else
     bad "export FILTERS_FILE: exit $DOCTOR_RC, $(grep -m1 paths <<<"$DOCTOR_OUT")"
+fi
+
+# The third file the paths check reads, and the one the guard for the log and for
+# FILTERS_FILE missed. `-e` and `-r` are both true for a fifo, so the doctor's
+# `grep -c` waited for a writer that never comes and the whole check hung with no
+# line and no exit: this case ran for longer than the twenty seconds below before
+# the fix. onedrive-sync skips a non-regular exclude list, so no folder is excluded
+# either way and the answer is a failure with the right sentence in it.
+doc_fixture exclude-fifo
+mkfifo "$DOC_FX/exclude.fifo"
+printf 'EXCLUDE_FOLDERS_FILE="%s"\n' "$DOC_FX/exclude.fifo" \
+    >> "$DOC_FX/cfg/rclone-onedrive-tray/config"
+DOCTOR_OUT="$(doc_run_checked "$DOC_FX" --quiet --offline 2>&1)"; DOCTOR_RC=$?
+if [ "$DOCTOR_RC" -eq 1 ] && grep -q '^fail paths.*EXCLUDE_FOLDERS_FILE.*not a regular file' \
+        <<<"$DOCTOR_OUT"; then
+    ok "a fifo exclude list is named, not waited on for a writer"
+else
+    bad "fifo EXCLUDE_FOLDERS_FILE: exit $DOCTOR_RC, $(grep -m1 paths <<<"$DOCTOR_OUT")"
+fi
+
+# And the same rule for the row that judges whether the wrapper can open the log.
+# A directory passes -e and -w, stat answers 4096 bytes for it, and the row said
+# "ok logfile ... writable, 4096 of 5242880 bytes" while onedrive-sync refused the
+# same path with "cannot write the log ...: Is a directory" — the summary then read
+# "nothing failed", exit 0. Measured before the fix: 6 ok, 6 warn, nothing failed,
+# exit 0 against a wrapper that stops every run.
+doc_fixture log-is-a-directory
+rm -f "$DOC_FX/cache/sync.log"; mkdir -p "$DOC_FX/cache/sync.log"
+DOCTOR_OUT="$(doc_run "$DOC_FX" --offline 2>&1)"; DOCTOR_RC=$?
+if [ "$DOCTOR_RC" -eq 1 ] && grep -q '^fail logfile.*not a regular file' <<<"$DOCTOR_OUT" &&
+        ! grep -q '^ok logfile' <<<"$DOCTOR_OUT"; then
+    ok "a LOG that is a directory fails the logfile row instead of reading as writable"
+else
+    bad "LOG is a directory: exit $DOCTOR_RC, $(grep -m1 logfile <<<"$DOCTOR_OUT")"
 fi
 
 doc_fixture no-config

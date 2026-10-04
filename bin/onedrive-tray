@@ -1349,7 +1349,20 @@ def remote_folders(remote: str, rclone: str = "rclone"):
 
 
 def read_excluded_folders(path: str):
-    """Folder names listed as not synced. Missing file means none."""
+    """Folder names listed as not synced. Missing file means none.
+
+    Only a regular file is read, for the same reason tail_text() gives about the
+    log: EXCLUDE_FOLDERS_FILE comes from the config, this is called while the
+    menu is being built and from an item's handler, both on the GTK main loop,
+    and open() on a fifo there waits for a writer and freezes the icon with no
+    error. onedrive-sync skips a non-regular exclude list, so nothing is excluded
+    either way.
+    """
+    try:
+        if not stat.S_ISREG(os.stat(path).st_mode):
+            return []
+    except OSError:
+        return []
     try:
         with open(path, encoding="utf-8") as fh:
             return [line.strip() for line in fh

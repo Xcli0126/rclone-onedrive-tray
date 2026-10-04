@@ -36,6 +36,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The guard that keeps a fifo or a directory out of the log reads stopped one file
+  short. `onedrive-doctor` read `EXCLUDE_FOLDERS_FILE` with a bare `grep` and the tray
+  with a bare `open()` on the GTK main loop, so a fifo there hung the whole check
+  with no output and froze the icon, which is the freeze the same guard was written
+  for on `LOG`. Both treat it as a failure with the reason, and `onedrive-sync`
+  already skipped a non-regular exclude list, so no folder is excluded either way.
+- The doctor's `logfile` row called a directory writable: it passes `-e` and `-w`,
+  `stat` answers 4096 bytes for it, and the summary said nothing had failed, while
+  `onedrive-sync` refused the same path with "cannot write the log ...: Is a
+  directory". One path, one verdict: what the wrapper will do is what the row says.
+- `setup.sh` was a fourth reader of the config format with both faults the shared
+  reader had already lost: a carried value was cut at the first inner quote (`LOG`
+  holding an escaped quote came back as everything before it) and at any `#`
+  (`BW_LIMIT=abc#def` came back as `abc`), so a wizard re-run wrote a truncated path
+  where the running install used the whole one. It reads through `lib/config.sh` now,
+  and the pages that counted the readers say four.
 - `INTERVAL_MIN` reached the unit template unvalidated, and systemd's answer to a
   value it cannot parse is a warning in the journal and a dropped directive:
   dropping `OnUnitInactiveSec` leaves `OnActiveSec=2min` as the timer's only

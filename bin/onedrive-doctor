@@ -263,8 +263,15 @@ if grep -qE '^[[:space:]]*(export[[:space:]]+)?FILTERS_FILE=' "$CONFIG_FILE" 2>/
 fi
 
 if [ -n "$EXCLUDE_FOLDERS_FILE" ] && [ -e "$EXCLUDE_FOLDERS_FILE" ]; then
-    if [ -r "$EXCLUDE_FOLDERS_FILE" ]; then
-        paths_msg="$paths_msg; exclude list has $(grep -cvE '^[[:space:]]*(#|$)' "$EXCLUDE_FOLDERS_FILE" || true) entry line(s)"
+    if [ ! -f "$EXCLUDE_FOLDERS_FILE" ]; then
+        # The same guard the log and FILTERS_FILE carry, for the third file this
+        # section reads: -e and -r are both true for a fifo, and the grep below
+        # would wait for a writer that never comes. onedrive-sync skips a
+        # non-regular exclude list, so nothing is excluded either way.
+        paths_msg="$paths_msg; EXCLUDE_FOLDERS_FILE $EXCLUDE_FOLDERS_FILE is not a regular file, so runs exclude nothing from it; point it at a file or empty the key"
+        paths_verdict=fail
+    elif [ -r "$EXCLUDE_FOLDERS_FILE" ]; then
+        paths_msg="$paths_msg; exclude list has $(grep -a -cvE '^[[:space:]]*(#|$)' "$EXCLUDE_FOLDERS_FILE" || true) entry line(s)"
     else
         paths_msg="$paths_msg; EXCLUDE_FOLDERS_FILE $EXCLUDE_FOLDERS_FILE is not readable; fix its permissions"
         paths_verdict=fail
@@ -659,7 +666,15 @@ while [ ! -d "$probe_dir" ] && [ "$probe_dir" != / ] && [ "$probe_dir" != . ]; d
     probe_dir="$(dirname "$probe_dir")"
 done
 if [ -e "$LOG" ]; then
-    if [ ! -w "$LOG" ]; then
+    if [ ! -f "$LOG" ]; then
+        # A directory passes -e and -w, and stat then answers 4096 bytes for it,
+        # so this row said "writable, 4096 of 5242880 bytes" and the summary said
+        # nothing failed while the wrapper refused the same path with "cannot
+        # write the log ...: Is a directory". A fifo passes both too, and the
+        # wrapper blocks writing it. One path, one verdict: what the wrapper will
+        # do is what this row says.
+        report fail logfile "$LOG is not a regular file, so onedrive-sync cannot write it and stops before it syncs; point LOG at a file or remove the path in $CONFIG_FILE"
+    elif [ ! -w "$LOG" ]; then
         report fail logfile "$LOG is not writable, so onedrive-sync stops before it syncs; fix its owner or point LOG somewhere else in $CONFIG_FILE"
     else
         log_size="$(stat -c%s -- "$LOG" 2>/dev/null || echo 0)"

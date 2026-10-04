@@ -4093,35 +4093,6 @@ def scenario_log_forged_marker():
             "tray_state": tray.state, "tray_hint": tray.log_result[3]}
 
 
-def scenario_log_read_failure_not_cached():
-    """A read that did not answer is not remembered as the answer.
-
-    _log_snapshot() stored the signature before knowing the read had worked, so a
-    log that was readable, then not, then readable again with the same size and
-    timestamp stayed "no sync recorded yet" until the next run wrote to it: the
-    file had not changed as far as the tray was concerned, and the cached answer
-    was the empty one.
-    """
-    log = os.path.join(WORK, "readfail", "sync.log")
-    os.makedirs(os.path.dirname(log), exist_ok=True)
-    with open(log, "w", encoding="utf-8") as fh:
-        fh.write("2026/10/04 12:00:00 INFO  : Bisync successful\n")
-        fh.write("2026/10/04 12:00:00 ONEDRIVE_RESULT v=1 state=synced tag=none "
-                 "when=12:00 msg=sync completed\n")
-    cfg = dict(CFG)
-    cfg["LOG"] = log
-    tray = MODULE.Tray(cfg)
-    pump(0.4)
-    data = {"good": tray.log_result[0]}
-    os.chmod(log, 0)
-    tray.poll()
-    data["unreadable"] = tray.log_result[0]
-    os.chmod(log, 0o600)
-    tray.poll()
-    data["again"] = tray.log_result[0]
-    return data
-
-
 def scenario_lock_inode():
     """release_lock() removes only the file it locked, and a second take works.
 
@@ -4408,7 +4379,6 @@ SCENARIOS = {
     "reauth-twice": scenario_reauth_twice,
     "reauth-not-done": scenario_reauth_not_done,
     "log-forged-marker": scenario_log_forged_marker,
-    "log-read-failure": scenario_log_read_failure_not_cached,
     "stale-state": scenario_stale_state,
     "stale-state-cache": scenario_stale_state_cache,
     "relative-local": scenario_relative_local,
@@ -6173,20 +6143,6 @@ if d["tag"] != "auth":
     check "and the icon is not painted green by it" json_py '
 if d["tray_state"] != "error":
     print("state=%r" % (d["tray_state"],))
-    raise SystemExit(1)
-'
-fi
-
-title "A log that was unreadable for a moment"
-# The snapshot stored the signature before knowing the read worked, so the empty
-# answer was cached against a signature that still described the file: the tray
-# kept saying nothing had been recorded for a log it could read again.
-if run_driver log-read-failure; then
-    check "a readable log reads as the run it holds" json_expr "d['good'] == 'synced'"
-    check "and reads that way again once it is readable, with no new write" json_py '
-if d["again"] != "synced":
-    print("good=%r unreadable=%r again=%r"
-          % (d["good"], d["unreadable"], d["again"]))
     raise SystemExit(1)
 '
 fi

@@ -51,39 +51,36 @@ wrapper, the tray and the doctor.
 ### What the loop's own fixes left behind
 
 Round seventeen's meta-review looked for the harm a long series of local fixes does,
-and found it. Four of its findings are the loop's own, and they are listed here
-rather than fixed because each needs its own round: the reviewer's patch covers the
-first three.
+and found it. Most of it is fixed and in the changelog: the fifo and directory guards
+that stopped one file short (`EXCLUDE_FOLDERS_FILE`), the doctor's `logfile` row that
+called a directory writable while the wrapper refused it, `setup.sh` as a fourth
+reader of the config with both faults the shared reader had lost, and a case the loop
+had added that could not fail. Two things are still open, and one correction:
 
-- The fifo and directory guards the log work added stopped one file short. The
-  doctor reads `EXCLUDE_FOLDERS_FILE` with a bare `grep` and the tray with a bare
-  `open()` on the GTK main loop: a fifo there hangs the check with no output and
-  freezes the icon, which is the exact freeze the same commit guarded `LOG` against.
-- The doctor's `logfile` row re-decides `LOG` on its own and calls a directory
-  writable ("4096 of 5242880 bytes", exit 0) while the wrapper refuses that same
-  path with "Is a directory". The user's diagnostic is the one that lies.
-- `setup.sh` is a fourth reader of the config format, and it still has both faults
-  that rounds fourteen and sixteen removed from `lib/config.sh`: a carried value
-  loses everything after an escaped quote (`LOG="/home/me/My \"Sync\" folder"` comes
-  back as `/home/me/My \`) and `BW_LIMIT=abc#def` comes back as `abc`. Two pages
-  claim the count is three, which was wrong when it was written.
-- A case added by the round that fixed the tray's cached log read cannot fail: the
-  cache key is size and mtime, and the chmod the case uses moves only the ctime, so
-  the branch under test is never entered and reverting the fix leaves the suite
-  green. The commit that added it says the signature includes the ctime, which is
-  false. The case needs a failure the stat can see, or the fix needs a case that can
-  reach it.
-- `tests/lib/mutate.sh` cannot exit 0 on the shipped table: the `check-name-limit`
-  row survives (the branch is unreachable on a local filesystem, which the ledger
-  already says) and the harness fails a run with any survivor. Every full sweep has
-  therefore been red for a reason that is known and written down, and the harness's
-  own contract needs to say so.
 - Two guards for one thing: `_local_delete_path` re-checks the filesystem root after
   `local_path_problem` has already refused it, and the case that covers it
-  monkeypatches the first guard away to reach the second. One of the two is dead,
-  and the mutation row pins the dead one.
+  monkeypatches the first guard away to reach the second. One of the two is dead, and
+  the mutation row pins the dead one, so removing it means deciding which guard is
+  the contract.
 - Two tray cases pin source identifiers rather than behaviour: renaming the
-  module-level `STRINGS` fails five cases, one of them unrelated to languages.
+  module-level `STRINGS` fails five cases, one of them unrelated to languages. A
+  rename is a refactor, and a suite that fails on one is a suite that costs more to
+  change than it is worth.
+- The tray's guard for a non-regular `EXCLUDE_FOLDERS_FILE` has no case of its own:
+  the doctor's is covered by a fixture that carries a twenty second clock, and the
+  tray's would need the same clock inside the driver rather than a suite that hangs
+  without it. The code is there for the reason `tail_text()` gives, and the doctor's
+  case is what pins the rule.
+- Correction to an earlier entry: the count of config readers was never three.
+  `onedrive-doctor` sources the file as well, so with `lib/config.sh` shared by the
+  three shell scripts that may not execute it, the readers are four: the tray's
+  parser, the wrapper, the doctor, and the shared sed reader. The pages that said
+  three were wrong when they were written.
+- A wizard re-run still re-escapes a carried `${VAR}` value, so a config holding
+  `LOG="${XDG_CACHE_HOME:-$HOME/.cache}/sync.log"` is written back with the variable
+  frozen into a literal path. It is pre-existing, the reviewer proved it against the
+  old reader as well, and the fix is a decision: write carried values raw, or expand
+  them as the shell would.
 
 ### The panel's state is only in pixels
 

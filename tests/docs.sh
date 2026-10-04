@@ -229,10 +229,21 @@ fi
 title "the run result line"
 check "the wrapper writes it" \
     grep -q 'ONEDRIVE_RESULT v=1 state=' bin/onedrive-sync
+# The format string itself, not the file around it: `tag=` and `when=` also stand
+# in a docstring and in a "{when}" format call, so a search over the whole file
+# reported a renamed field as parsed. Renaming `tag` to `kind` in RESULT_RE left
+# this suite green while the tray stopped matching any marker at all.
+tray_re="$(sed -n '/^RESULT_RE = re.compile($/,/^$/p' bin/onedrive-tray |
+    tr -d ' \\\n')"
 for field in state tag when msg; do
-    check "the tray parses the $field field" grep -q "$field=" bin/onedrive-tray
+    check "the tray parses the $field field" grep -q "$field=" <<<"$tray_re"
 done
 check "the doctor reads the same line" grep -q 'ONEDRIVE_RESULT' bin/onedrive-doctor
+# And requires the same four fields of it, in its own copy of the pattern.
+doctor_re="$(grep 'ONEDRIVE_RESULT v=1 state=' bin/onedrive-doctor)"
+for field in tag when msg; do
+    check "the doctor requires the $field field" grep -q "$field=" <<<"$doctor_re"
+done
 check "and the tray accepts the version the wrapper writes" \
     grep -qF 'ONEDRIVE_RESULT v=\d+' bin/onedrive-tray
 

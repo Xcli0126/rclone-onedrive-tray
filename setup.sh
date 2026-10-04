@@ -131,8 +131,13 @@ ask() {  # ask <prompt> <default>  -> echoes the answer
 # installs would have worked. The key is read here because the config may already
 # exist from an earlier run; on a bare machine there is nothing to read and the
 # plain name is the only honest answer.
-RCLONE_BIN="$(sed -n 's/^[[:space:]]*RCLONE="\{0,1\}\([^"]*\)"\{0,1\}.*/\1/p' \
-    "$CONFIG_DIR/config" 2>/dev/null | tail -1)"
+#
+# Read through the same reader the installers use, so this key and the copy
+# carry() writes back cannot disagree about the file: this one stripped at the
+# first `"`, and would hand rclone a path the running install did not use.
+# shellcheck source=lib/config.sh
+. "$SRC_DIR/lib/config.sh"
+RCLONE_BIN="$(config_value_from "$(cat "$CONFIG_DIR/config" 2>/dev/null || true)" RCLONE)"
 RCLONE_BIN="${RCLONE_BIN:-rclone}"
 
 command -v "$RCLONE_BIN" >/dev/null 2>&1 ||
@@ -333,7 +338,11 @@ fi
 #
 # The file is read into a variable first because the redirection on the heredoc
 # below truncates it before any command substitution inside the body runs, so a
-# carry() that read the path would find an empty file.
+# carry() that read the path would find an empty file. That snapshot goes through
+# config_value_from(), the same reader install.sh and uninstall.sh use, so a value
+# the tray escaped is read back the way the wrapper reads it: the copy that used to
+# live here stripped at the first `"` and at any `#`, and a re-run of the wizard
+# wrote the truncated path into the config.
 #
 # The flag string below is the same one bin/onedrive-sync ships as its default, and
 # tests/docs.sh compares this constant with that one and with config.example. It is
@@ -342,23 +351,16 @@ fi
 DEFAULT_BISYNC_ARGS="--resilient --recover --max-lock 2m --conflict-resolve none --conflict-loser num --stats 2s"
 OLD_CONFIG="$(cat "$CONFIG_FILE" 2>/dev/null || true)"
 carry() {  # carry <KEY> <default> -> the value already in the config, or the default
-    local key="$1" default="$2" line
-    line="$(printf '%s\n' "$OLD_CONFIG" |
-        grep -E "^[[:space:]]*$key=" | tail -1 || true)"
-    case "$line" in
-        '')
-            printf '%s' "$default" ;;
-        *=*)
-            # The value, with the quotes removed when it has them. An empty quoted
-            # value is a value, so only a key that is not in the file at all falls
-            # back to the default.
-            line="${line#*=}"
-            case "$line" in
-                \"*) line="${line#\"}"; printf '%s' "${line%%\"*}" ;;
-                \'*) line="${line#\'}"; printf '%s' "${line%%\'*}" ;;
-                *)   printf '%s' "${line%%[[:space:]#]*}" ;;
-            esac ;;
-    esac
+    local key="$1" default="$2"
+    # An empty quoted value is a value, so only a key the file does not set at all
+    # falls back to the default; the reader answers "" for both, which is why the
+    # presence of the key is asked about first.
+    if printf '%s\n' "$OLD_CONFIG" |
+            grep -qE "^[[:space:]]*(export[[:space:]]+)?$key="; then
+        config_value_from "$OLD_CONFIG" "$key"
+    else
+        printf '%s' "$default"
+    fi
 }
 
 # The interval and the realtime switch are carried over by the same rule as the

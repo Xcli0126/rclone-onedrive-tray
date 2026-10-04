@@ -319,3 +319,7 @@ install-interval-not-validated	install.sh	s|^case "\$INTERVAL_MIN" in$|case "" i
 install-dropin-one-spelling	install.sh	s|if \[ -n "$dropin_interval" \] \&\& \[ "$dropin_interval" != "${INTERVAL_MIN}min" \]; then|if false; then|	install-flow
 hook-no-timer-gate	extras/networkmanager-dispatcher.sh	s|systemctl --user is-enabled --quiet "\$TIMER" \|\| continue|true|	install-flow
 unit-no-stop-timeout	systemd/onedrive-sync.service.in	s|^TimeoutStopSec=300$||	install-flow
+# round nineteen: the guards the log work added stopped one file short, and the
+# logfile row judged a directory writable while the wrapper refused it.
+doctor-exclude-fifo-guard	bin/onedrive-doctor	s|    if \[ ! -f "$EXCLUDE_FOLDERS_FILE" \]; then|    if false; then|	install-flow
+doctor-log-dir-not-a-file	bin/onedrive-doctor	s|    if \[ ! -f "$LOG" \]; then|    if false; then|	install-flow
