@@ -53,7 +53,11 @@ rows_for() {  # rows_for <suite> -- how many rows the table has for it
     awk -F'\t' -v s="$1" '!/^#/ && NF==4 && $4==s' "$TABLE" | wc -l
 }
 verdicts_in() {  # verdicts_in <file> -- how many verdict lines it holds
-    grep -cvE '^#|^$' "$1" 2>/dev/null || true
+    # A results file also holds tallies ("8 caught, 0 survived, ...") and, after a
+    # resume, "already measured" lines. Only a verdict counts: a line that names a row
+    # (so its first field is not a number) and says one of the four verdict words.
+    awk '!/^#/ && NF && $1 !~ /^[0-9]+$/ && /caught|SURVIVED|SKIPPED|NO RESULT/' \
+        "$1" 2>/dev/null | wc -l
 }
 problems_in() {  # problems_in <file> -- verdicts that are not a clean catch
     grep -E 'SURVIVED|SKIPPED|NO RESULT' "$1" 2>/dev/null || true
@@ -118,12 +122,19 @@ for suite in "${suites[@]}"; do
         fi
         continue
     fi
+    torn=0
     if [ "$have" -gt 0 ] && [ "$complete" = 0 ]; then
-        printf '%-18s torn at %s/%s rows, starting it again\n' "$suite" "$have" "$rows"
+        # Torn: keep the file and let mutate.sh skip the rows already in it, so the
+        # hours already spent on that suite are not spent again. The header goes with
+        # the file, which is what RESUME=1 keeps.
+        torn=1
+        printf '%-18s torn at %s/%s rows, resuming\n' "$suite" "$have" "$rows"
     fi
     echo "== $suite ($rows rows) -> $file"
-    if ! RESULTS="$file" "$MUTATE" --suite "$suite" | tail -3; then
-        status=1
+    if [ "$torn" = 1 ]; then
+        RESULTS="$file" RESUME=1 "$MUTATE" --suite "$suite" | tail -3 || status=1
+    else
+        RESULTS="$file" "$MUTATE" --suite "$suite" | tail -3 || status=1
     fi
     if [ "$(verdicts_in "$file")" -lt "$rows" ]; then
         echo "$suite: the run wrote fewer verdicts than rows, so it is torn" >&2

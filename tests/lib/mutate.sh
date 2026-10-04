@@ -8,6 +8,7 @@
 #   tests/lib/mutate.sh --lint             check the table itself, without a suite
 #   tests/lib/mutate.sh --self-test        check the verdict classifier on its own
 #   RESULTS=mutations.txt tests/lib/mutate.sh     also write the table to a file
+#   RESUME=1 RESULTS=mutations.txt ...            skip the rows that file already has
 #
 # A full pass is hours: 113 of the rows run install-flow (measured here: 1m53s each)
 # and 89 run the tray suite (2m33s each), which together is about 7.3 hours.
@@ -305,7 +306,21 @@ covered_rows() {  # how many rows this run is for
         END { print n + 0 }' "$TABLE"
 }
 
-if [ -n "${RESULTS:-}" ]; then
+# RESUME=1: the results file is kept rather than rewritten, and the rows already in it
+# are skipped. A sweep that takes hours can then be resumed a row at a time instead of
+# from the top of the suite: the verdict lines name the rows they are for.
+resume=0
+[ "${RESUME:-0}" = 1 ] && resume=1
+done_ids=""
+if [ "$resume" = 1 ] && [ -s "${RESULTS:-}" ]; then
+    done_ids="$(awk '!/^#/ && NF { print $1 }' "$RESULTS" | tr '\n' ' ')"
+fi
+already_done() {  # already_done <id>
+    case " $done_ids " in *" $1 "*) return 0 ;; esac
+    return 1
+}
+
+if [ -n "${RESULTS:-}" ] && [ "$resume" = 0 ]; then
     {
         printf '# %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
         printf '# commit %s%s\n' \
@@ -324,6 +339,10 @@ unresolved=0
 while IFS=$'\t' read -r id target expr suite; do
     case "$id" in ''|'#'*) continue ;; esac
     if [ -n "$suite_only" ] && [ "$suite" != "$suite_only" ]; then
+        continue
+    fi
+    if already_done "$id"; then
+        note "$(printf '%-34s already measured, left alone' "$id")"
         continue
     fi
     if [ "${#wanted[@]}" -gt 0 ]; then
