@@ -42,41 +42,20 @@ still open from that review:
   defect, and it is written down here rather than fixed because a `HOME` default
   would change what every one of the three resolves on the machines that do set it.
 
-### Two test-side items from the meta-reviews
-
-The other half of that review's list is done: the wizard's frozen carried value is
-fixed in the changelog, and `_local_delete_path()` no longer keeps a second look at
-the filesystem root that only a monkeypatched case could reach. What is left is the
-first item, and it is narrower than it read.
-
-- Two tray cases pin source identifiers rather than behaviour. Measured on the fixed
-  tree by renaming the module's `STRINGS` table to `STRINGS_X` throughout
-  `bin/onedrive-tray`: three cases go red - `the tray could not be driven for
-  'excluded-name'`, `the refused names left the rest of LOCAL where it was`, and
-  `every literal string passed to t() has a Chinese entry`. The first two read
-  `MODULE.STRINGS["zh"]` for the sentence they expect instead of asking the tray for
-  it, and the third looks the table up by name. A rename is a refactor, and a suite
-  that fails on one costs more to change than the cases are worth; the fix is a case
-  that asks the tray for the translation and a lookup that finds the table the way the
-  tray does. The earlier count of five is three.
-
-### The hook's cases pin its text, not its behaviour
-
-`tests/install-flow.sh` installs `extras/networkmanager-dispatcher.sh` and then reads
-the installed file: the `is-enabled --quiet` gate, the unit it asks about, and that
-the gate comes before the start. Measured: of the twenty-five places the suite names
-the hook, none runs it - they print it, grep it, or stat it. Neutering the gate while
-keeping that text and its position (`: runuser ... || continue`) leaves the whole
-suite green, so a hook that asks nothing and starts the service anyway passes every
-case. The fixture that would measure it has to run the file, and the file dispatches
-through `for runtime in /run/user/*`, which an unprivileged test cannot populate: it
-needs a mount namespace over `/run` with stubbed `id`, `getent`, `runuser` and
-`systemctl`. Measured on the development machine: `unshare -rm` with a `tmpfs` on
-`/run` works even with `kernel.apparmor_restrict_unprivileged_userns=1`, so the
-fixture is writable. Whether both CI runners permit the same is untested, which is
-why it is written down rather than assumed.
-
 ## Accepted, with the reason
+
+- A parameter form this reader does not implement is left exactly as the file wrote
+  it. `shell_value()` answers `$VAR`, `${VAR}`, `${VAR:-word}`, `${VAR-word}`,
+  `${VAR:+word}`, `${VAR:=word}`, a nested expansion inside the word, and the quoting
+  of that word; `${VAR:?message}`, `${VAR:offset}` and `${VAR:offset:length}` are
+  printed back as written. Tests pin that, and pin the reason it is safe: the tray
+  parses a config rather than running one, so a `$(command)` in a value stays text and
+  is never executed. Answering those forms would mean a shell, and a shell for a
+  config value the tray only ever reads as a path or a command line is a bigger thing
+  than the three forms are worth. Two smaller divergences sit beside it: a backslash
+  escape in an unquoted value is kept rather than removed (`x\#y`), which
+  `strip_inline_comment()` explains, and a variable's own value is inserted as it
+  stands, as bash inserts it.
 
 - `Tray` stays one class. The audit that suggested splitting it into a menu class
   and a status class was right that it is 900 lines, and wrong that the size is the

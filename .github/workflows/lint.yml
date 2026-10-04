@@ -87,6 +87,16 @@ jobs:
           echo "python3: $(python3 --version)"
           echo "rclone:  $(rclone version | head -1)"
 
+      - name: The sandbox can build the fixture the hook cases need
+        run: |
+          # tests/install-flow.sh executes the NetworkManager dispatcher hook
+          # inside `unshare -rm` with a tmpfs over /run, because an unprivileged
+          # test cannot create /run/user/<uid>. A runner that forbids user
+          # namespaces would skip those cases, and a skip is not a pass, so the
+          # contract is checked here where the reason is visible rather than
+          # hidden in a lowered floor.
+          unshare -rm true
+
       # One run per suite, with the count checked against tests/floors.txt.
       # A suite that skips everything still exits 0, so without this a runner
       # missing broadwayd would report "0 passed, 12 skipped" and stay green.

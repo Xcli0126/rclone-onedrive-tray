@@ -447,6 +447,11 @@ SINGLE='${HOME}/literal'
 ESCAPED="\$HOME/cost"
 FALLBACK="${READERS_UNSET:-fallback}/x"
 NESTED="${READERS_UNSET:-$HOME}/nested"
+NESTED_BRACES="${READERS_UNSET:-${READERS_ALSO_UNSET:-deep}}"
+DASH_FORM="${READERS_UNSET-dashed}"
+PLUS_FORM="${HOME:+alternate}"
+PLUS_FORM_UNSET="${READERS_UNSET:+alternate}"
+QUOTED_WORD="${READERS_UNSET:-"two words"}"
 EMPTY=""
 UNQUOTED=simple
 HASH=abc#def
@@ -456,7 +461,7 @@ INTERVAL_MIN=7
 SHOW_ICON="1"
 SHOW_ICON="0"
 CFGEOF
-READER_KEYS="REMOTE LOCAL CHECK_FILENAME SINGLE ESCAPED FALLBACK NESTED EMPTY UNQUOTED HASH SPACED UNIT_NAME INTERVAL_MIN SHOW_ICON"
+READER_KEYS="REMOTE LOCAL CHECK_FILENAME SINGLE ESCAPED FALLBACK NESTED NESTED_BRACES DASH_FORM PLUS_FORM PLUS_FORM_UNSET QUOTED_WORD EMPTY UNQUOTED HASH SPACED UNIT_NAME INTERVAL_MIN SHOW_ICON"
 
 # The shared sed reader, which answers values as written: it does not expand
 # `${VAR}` because the keys it is asked for are a binary name, a unit name, a
@@ -499,8 +504,8 @@ else
 fi
 # The installers' reader is deliberately narrower: no expansion, and a value it is
 # not asked for cannot drift. Compared on the shapes it is asked for.
-sed_narrow="$(printf '%s\n' "$sed_dump" | grep -vE '^(LOCAL|SINGLE|ESCAPED|FALLBACK|NESTED)=')"
-src_narrow="$(printf '%s\n' "$src_dump" | grep -vE '^(LOCAL|SINGLE|ESCAPED|FALLBACK|NESTED)=')"
+sed_narrow="$(printf '%s\n' "$sed_dump" | grep -vE '^(LOCAL|SINGLE|ESCAPED|FALLBACK|NESTED|NESTED_BRACES|DASH_FORM|PLUS_FORM|PLUS_FORM_UNSET|QUOTED_WORD)=')"
+src_narrow="$(printf '%s\n' "$src_dump" | grep -vE '^(LOCAL|SINGLE|ESCAPED|FALLBACK|NESTED|NESTED_BRACES|DASH_FORM|PLUS_FORM|PLUS_FORM_UNSET|QUOTED_WORD)=')"
 if [ "$sed_narrow" = "$src_narrow" ]; then
     ok "and the installers' shared reader agrees on the values it is asked for"
 else
@@ -514,6 +519,77 @@ fi
 # shape that made them differ before expand_shell_text() recursed.
 check "and a variable inside a \${VAR:-fallback} expands the way bash expands it" \
     grep -qxF "NESTED=<$READERS/home/nested>" <<<"$py_dump"
+check "and a fallback holding another expansion is expanded too" \
+    grep -qxF "NESTED_BRACES=<deep>" <<<"$py_dump"
+check "and \${VAR-word} is answered rather than passed through" \
+    grep -qxF "DASH_FORM=<dashed>" <<<"$py_dump"
+check "and \${VAR:+word} answers the word only when the variable is set" \
+    grep -qxF "PLUS_FORM=<alternate>" <<<"$py_dump"
+check "and the same form on an unset variable is empty" \
+    grep -qxF "PLUS_FORM_UNSET=<>" <<<"$py_dump"
+check "and a quoted word inside the expansion loses its quotes" \
+    grep -qxF "QUOTED_WORD=<two words>" <<<"$py_dump"
+
+# The forms this reader does not implement, and the one thing it must never do.
+# They are left exactly as the file wrote them, which is visible in a path rather
+# than silently wrong, and the marker is the safety half: the tray parses a config,
+# it does not run one, so a command substitution in a value stays text.
+# The forms this reader does not implement, and the one thing it must never do.
+# They are left exactly as the file wrote them, which is visible in a path rather
+# than silently wrong, and the marker is the safety half: the tray parses a config,
+# it does not run one, so a command substitution in a value stays text.
+title "the parameter forms this reader leaves as written"
+DIVERGE="$WORK/diverging"
+rm -rf "$DIVERGE"; mkdir -p "$DIVERGE"
+cat > "$DIVERGE/config" <<CFGEOF
+SUBSTRING="\${READERS_UNSET:2}"
+MESSAGE="\${READERS_SET:?whoops}"
+COMMAND="\$(touch $DIVERGE/RAN)"
+CFGEOF
+diverging_py="$(env PYTHONPATH="$SRC_DIR/tests/lib" python3 - "$SRC_DIR/bin/onedrive-tray" \
+    "$DIVERGE/config" <<'PY'
+import sys
+
+from load_module import load
+
+module = load(sys.argv[1])
+module.CONFIG_FILE = sys.argv[2]
+cfg = module.load_config()
+for key in ("SUBSTRING", "MESSAGE", "COMMAND"):
+    print("%s=<%s>" % (key, cfg.get(key, "")))
+PY
+)"
+# shellcheck disable=SC2016  # every ${...} below is the text under test
+check "a substring form is left as the file wrote it" \
+    grep -qxF 'SUBSTRING=<${READERS_UNSET:2}>' <<<"$diverging_py"
+# shellcheck disable=SC2016  # the ${...} is the text under test here too
+check "and so is a :? message" \
+    grep -qxF 'MESSAGE=<${READERS_SET:?whoops}>' <<<"$diverging_py"
+check "and a command substitution stays text" \
+    grep -qxF "COMMAND=<\$(touch $DIVERGE/RAN)>" <<<"$diverging_py"
+check_absent "and reading the config did not run it" "$DIVERGE/RAN"
+# bash itself answers two of these differently, and that is the divergence written
+# down here rather than left to be rediscovered: an unset variable's substring is
+# empty to bash, and `:?` stops the shell outright.
+# shellcheck disable=SC2016  # the inner bash prints its own $SUBSTRING
+if [ "$(env READERS_UNSET= READERS_SET= bash -c '. "$1"; printf "%s" "$SUBSTRING"' \
+        _ "$DIVERGE/config" 2>/dev/null)" = "" ]; then
+    ok "and bash really does answer the substring form, so the difference is real"
+else
+    bad "bash answered the substring form as this reader does, so the divergence is stale"
+fi
+diverging_py="$(env PYTHONPATH="$SRC_DIR/tests/lib" python3 - "$SRC_DIR/bin/onedrive-tray" <<'PY'
+import sys
+
+from load_module import load
+
+module = load(sys.argv[1])
+module.CONFIG_FILE = sys.argv[2] if len(sys.argv) > 2 else module.CONFIG_FILE
+for key in ("SUBSTRING", "ALTERNATE_MESSAGE", "COMMAND"):
+    print("%s=<%s>" % (key, module.load_config().get(key, "")))
+PY
+)"
+CFGEOF
 
 # The difference is the documented one, not an accident: a variable in a value the
 # installers read comes back as written.

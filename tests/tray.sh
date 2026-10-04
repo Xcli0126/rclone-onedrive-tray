@@ -1736,12 +1736,18 @@ def scenario_excluded_name():
         }
         # These sentences reach t() through a variable, so the static check that
         # every t() key has a Chinese entry cannot see them. They are the whole
-        # message a user gets when a click is refused, so they are checked here.
+        # message a user gets when a click is refused, so they are checked here,
+        # through the translator the tray itself builds: this used to read the
+        # module's table by name, which made the case fail on a rename of that
+        # table rather than on a missing sentence. make_translator() answers the
+        # sentence unchanged when the table has no entry for it, which is the
+        # question being asked.
         refusals = [MODULE.exclusion_problem(name)
                     for name in ("", " ", " a", "#notes", "a\nb")]
         refusals.append("Could not save the folder list")
+        to_chinese = MODULE.make_translator("zh")
         data["refusals_translated"] = all(
-            MODULE.STRINGS["zh"].get(text) for text in refusals)
+            to_chinese(text) != text for text in refusals)
         data["refusals"] = refusals
         # The offer has to refuse on its own as well: the dialog it puts up
         # promises the folder stays in OneDrive, and that promise is only true
@@ -1894,33 +1900,43 @@ def scenario_config_reload():
     data["switched"] = wait_for(
         lambda: any("\u4e00" <= c <= "\u9fff"
                     for c in "".join(visible_labels(tray.menu))), 8.0)
-    data["visible_after"] = bool(tray.icon_visible)
-    data["status_after"] = int(tray.ind.get_status())
-    data["labels_after"] = visible_labels(tray.menu)
 
     # A key that belongs to the next sync, not to the running tray. The widget is
     # remembered by identity: _build_menu() always makes new items, so the same
     # object is proof that the menu was not rebuilt for a key nothing live uses.
     item = tray.item_status
-    # The status row is written by the poll, and this case compares it before and
-    # after a write: a poll landing between the two captures changed the text for a
-    # reason that has nothing to do with the key under test, which is how this case
-    # failed about one run in four under load. Waiting for the row to stop changing
-    # first makes both captures describe the same settled state.
-    settled = None
-    for _ in range(40):
-        now = tray.item_status.get_label() or ""
-        if now == settled:
-            break
-        settled = now
-        pump(0.25)
-    status_text = tray.item_status.get_label() or ""
+
+    def settled_status():
+        """The status row's text once the poll has stopped changing it.
+
+        The row is written by the poll, so it is the one thing in the menu that
+        moves on its own. Waiting for it to hold still before each capture is what
+        keeps "the menu was not rebuilt" from being answered by a poll that landed
+        between two reads: that is how this case failed about one run in four under
+        load, and it recurred once after a partial settle with the label captured,
+        under two suites at once.
+        """
+        seen = None
+        for _ in range(40):
+            now = tray.item_status.get_label() or ""
+            if now == seen:
+                return now
+            seen = now
+            pump(0.25)
+        return tray.item_status.get_label() or ""
+
+    status_text = settled_status()
+    # Everything the case compares is captured after that settle, so both sides of
+    # each comparison describe a state the poll has stopped moving.
+    data["visible_after"] = bool(tray.icon_visible)
+    data["status_after"] = int(tray.ind.get_status())
+    data["labels_after"] = visible_labels(tray.menu)
     MODULE.update_config_file(MODULE.CONFIG_FILE, {"INTERVAL_MIN": "15"})
-    pump(1.0)
+    pump(0.5)
     data["unrelated_kept_item"] = tray.item_status is item
+    data["unrelated_status_text"] = settled_status()
     data["unrelated_labels"] = visible_labels(tray.menu)
     data["unrelated_visible"] = bool(tray.icon_visible)
-    data["unrelated_status_text"] = tray.item_status.get_label() or ""
     data["status_text_before"] = status_text
     data["config_text"] = read_text(MODULE.CONFIG_FILE)
 
@@ -4364,29 +4380,27 @@ def scenario_relative_local():
 
     data["root_guard_refused"] = MODULE.Tray._local_delete_path(RootBare(), "etc")
 
-    # The one spelling where the two resolutions of LOCAL came apart, and the
-    # reason the root check inside the guard is still there. local_path_problem()
-    # expands "~" and the guard did not, so with LOCAL="~/.." and the process in
-    # "/" the first accepted the value (the home directory's parent) while the
-    # guard resolved "~" as an ordinary directory name, landed on the filesystem
-    # root, and handed back "/etc" for the folder "etc" - outside the root the
-    # config names. It is also the case that shows the fix, because the guard has
-    # to resolve the value the way the rest of the tray does and a folder that
-    # really is inside the expanded root still has to come back.
+    # A tilde in LOCAL, which is the spelling that made the guard resolve a
+    # directory nothing syncs. `. config` in bash does not expand a tilde inside a
+    # value, so onedrive-sync gets the relative path "~/OneDrive" and refuses the
+    # run, while the tray used to expand it: with LOCAL="~/.." and the process in
+    # "/" the guard read "~" as an ordinary directory name, landed on the
+    # filesystem root, and handed back "/etc" for the folder "etc". The rule is to
+    # refuse the value rather than to guess what the user meant, and this is the
+    # case that says so.
     class TildeBare:
         local = "~/.."
 
-    expanded = os.path.dirname(os.path.realpath(os.path.expanduser("~/..")))
+    data["tilde_problem"] = MODULE.local_path_problem("~/OneDrive")
+    data["tilde_space_problem"] = MODULE.local_path_problem(" /data/OneDrive")
     here = os.getcwd()
     try:
         os.chdir("/")
         data["tilde_etc"] = MODULE.Tray._local_delete_path(TildeBare(), "etc")
-        data["tilde_inside"] = MODULE.Tray._local_delete_path(
-            TildeBare(), os.path.basename(os.path.realpath(os.path.expanduser("~"))))
+        data["tilde_folder"] = MODULE.Tray._local_delete_path(
+            type("T", (), {"local": "~/OneDrive"})(), "Photos")
     finally:
         os.chdir(here)
-    data["tilde_inside_expected"] = os.path.realpath(os.path.expanduser("~"))
-    data["tilde_prefix"] = expanded
 
     # And the real main(), which has to refuse before it builds a window.
     env = dict(os.environ)
@@ -6445,10 +6459,25 @@ for node in ast.walk(tree):
             and isinstance(node.args[0], ast.Constant)
             and isinstance(node.args[0].value, str)):
         keys.add(node.args[0].value)
+# The table is found by its shape rather than by its name: a module-level dict of
+# dicts holding "zh". Naming it made this check fail on a rename, which is a
+# refactor rather than a defect, and the two cases that did that cost more to
+# change than the check is worth.
 zh = set()
 for node in tree.body:
-    if getattr(node, "targets", None) and getattr(node.targets[0], "id", "") == "STRINGS":
-        zh = set(ast.literal_eval(node.value)["zh"])
+    if not isinstance(node, ast.Assign):
+        continue
+    try:
+        value = ast.literal_eval(node.value)
+    except (ValueError, SyntaxError):
+        continue
+    if (isinstance(value, dict) and "zh" in value
+            and all(isinstance(entry, dict) for entry in value.values())):
+        zh = set(value["zh"])
+        break
+if not zh:
+    print("no module-level translation table with a \"zh\" entry was found")
+    raise SystemExit(1)
 raw = re.compile(r"^[a-z][a-z0-9]*(_[a-z0-9]+)+$")
 missing = sorted(k for k in keys if k not in zh)
 snake = sorted(k for k in keys if raw.match(k))
@@ -6457,7 +6486,7 @@ for problem in (missing, snake):
         print("problem strings: %r" % problem)
 if missing or snake:
     raise SystemExit(1)
-print("checked %d strings" % len(keys))
+print("checked %d strings against %d Chinese entries" % (len(keys), len(zh)))
 PY
 
 # ---------------------------------------------------------- the settings window
@@ -7564,17 +7593,24 @@ if d["root_guard_refused"] is not None:
           "resolved against the filesystem root" % (d["root_guard_refused"],))
     raise SystemExit(1)
 '
-    # The tilde shape, measured by the review that found the guard had been
-    # removed for being unreachable: the two resolutions of LOCAL come apart and
-    # the guard's root becomes "/", whose separator-anchored prefix is "/" itself.
-    check "a tilde in LOCAL is resolved the way the rest of the tray resolves it" json_py '
-if d["tilde_etc"] is not None:
-    print("LOCAL=\"~/..\" with the process in / made the guard return %r, which is "
-          "outside the root the config names (%r)" % (d["tilde_etc"], d["tilde_prefix"]))
+    # A tilde is refused rather than expanded, because expanding it is what put the
+    # guard outside the tree onedrive-sync uses: it is a relative path to the
+    # wrapper, and the tray's answer has to be about the wrapper's tree.
+    check "a LOCAL with a tilde in it is refused, not expanded" json_py '
+# The sentence, not just a refusal: a tilde value that fell through to the
+# "not an absolute path" rule would still be refused, and would leave the reason
+# for it unsaid. That is the difference this check is for.
+if "tilde" not in d["tilde_problem"]:
+    print("the refusal does not name the tilde: %r" % (d["tilde_problem"],))
     raise SystemExit(1)
-if d["tilde_inside"] != d["tilde_inside_expected"]:
-    print("a folder inside the expanded root came back as %r, expected %r"
-          % (d["tilde_inside"], d["tilde_inside_expected"]))
+if d["tilde_etc"] is not None or d["tilde_folder"] is not None:
+    print("the guard returned %r and %r for tilde LOCALs, so it resolved a tree "
+          "onedrive-sync does not sync" % (d["tilde_etc"], d["tilde_folder"]))
+    raise SystemExit(1)
+'
+    check "and a value with a space at one end is refused too" json_py '
+if not d["tilde_space_problem"]:
+    print("local_path_problem accepted \" /data/OneDrive\"")
     raise SystemExit(1)
 '
 fi

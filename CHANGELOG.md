@@ -38,15 +38,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exists, `sed` accepts its expression, the expression still changes that file, and
   no range is addressed by an empty line. CI runs it beside `--self-test`. A row
   whose expression quietly stopped matching mutates nothing, so the sweep can only
-  report it as skipped hours later. Three rows were in that state for different
-  reasons: the one for the invalidation inside `_set_units()` stopped matching when
-  a docstring gained a blank line, because a sed range ending on `^$` stops at the
-  first blank line of the block it aims at; `setup-access-check-carry` was left
-  behind by this release's own rewrite of the `setup.sh` line it named; and
-  `docs-duplicate-heading` had been dropped for a year with a reason that was false,
-  "SURVIVED, so the suite must read a different copy", when the harness had been
-  reporting SKIPPED - the heading it renamed had been deleted long before. All three
-  point at lines that exist now, and the restored one is caught. The lint cannot see
+  report it as skipped hours later. Three rows were in that state: the one for the
+  invalidation inside `_set_units()` stopped matching when a docstring gained a
+  blank line, because a sed range ending on `^$` stops at the first blank line of the
+  block it aims at; `setup-access-check-carry` named a `setup.sh` line that this
+  release rewrote, and was re-pointed in the same commit that rewrote it; and
+  `docs-duplicate-heading` had been dropped with a reason that was false, "SURVIVED,
+  so the suite must read a different copy", when the harness had been reporting
+  SKIPPED for it - the heading it renamed had been deleted a few hours earlier, in a
+  repository whose first commit is a day old. All three point at lines that exist now,
+  and the restored one is caught. The lint cannot see
   a row that mutates the wrong occurrence of the line it names, or one pointed at a
   suite that does not cover the behaviour; `docs/COMPATIBILITY.md` says so rather
   than leaving the check looking stronger than it is.
@@ -57,22 +58,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   own line fixed the frozen `$` above, and the first version took any line that
   started with the key: a value written over two lines is valid shell, so
   `OPEN_APP_CMD="one` went into the new config on its own, the file stopped being
-  shell, and the wizard still printed "Wrote" and exited 0. A line is carried only
-  when it is the whole assignment (`KEY=word` or `KEY="one quoted string"`), the rest
-  falls back to the value the reader can see, and the config is now written to a side
-  file and checked with `bash -n` before it replaces the one on disk: an unterminated
-  quote or a trailing backslash in the old file leaves the old file alone instead of
-  producing a config nothing can source.
-- The tray's delete guard resolves `LOCAL` the way `local_path_problem()` does, `~`
-  included, and joins the folder onto the resolved root. Those two resolutions came
-  apart: with `LOCAL="~/.."` and the process in `/`, the first expanded the tilde and
-  accepted the value while the guard read `~` as an ordinary directory name, landed
-  on the filesystem root, and handed back `/etc` for the folder `etc` - outside the
-  root the config names, one confirmation dialog away from `shutil.rmtree`. Measured
-  before the fix: `local_path_problem("~/..") == ""` and
-  `_local_delete_path("etc") == "/etc"`. The root check inside the guard came back
-  with it, as the net that would have caught the drift; it was removed earlier in
-  this release for being unreachable, which was true only while the two agreed.
+  shell, and the wizard still printed "Wrote" and exited 0. A line is carried when it
+  is the whole assignment - it ends outside both kinds of quote and is not continued
+  onto the next line - and otherwise the writer falls back to the value the reader can
+  see, which closes the quote or drops the continuation. Everything a whole line says
+  is carried as it stands, including forms this writer would have quoted differently:
+  the second version accepted only `KEY=word` and `KEY="one string"` and sent the rest
+  through the quoting path, which froze an unquoted `${XDG_CACHE_HOME:-...}` path, lost
+  the expansion in a value holding both a quote and a `$VAR`, and truncated a
+  single-quoted value at its first space.
+- The config the wizard writes is checked with `bash -n` in a side file before it
+  replaces the one on disk, and the two values it writes unquoted are validated rather
+  than carried blind: `WATCH` has to be a 0 or a 1 and `INTERVAL_MIN` a whole number
+  of minutes, or the wizard writes the default and says so. A hand-written `WATCH='a"b'`
+  used to be assembled into a file that no longer sourced, and an `INTERVAL_MIN`
+  holding shell syntax was assembled into a file `bash -n` calls valid: that is a
+  command in a file the wrapper runs with `.`, so the check is on the value rather than
+  on the file. Measured over both shapes: the wizard finishes, the file is shell, the
+  key holds the default, and sourcing it runs nothing the old value contained. When the
+  gate does refuse, the message says what is and is not left alone: the config is
+  untouched, and the folder list this run wrote is already in place.
+- A `LOCAL` with a tilde in it, or with a space at either end, is refused instead of
+  expanded. `. config` in bash does not expand a tilde inside a value, so
+  `LOCAL="~/OneDrive"` gives `onedrive-sync` an eleven-character relative path and it
+  refuses the run; expanding it made the tray describe a directory nothing syncs. The
+  delete guard is where that mattered: with `LOCAL="~/.."` and the process in `/` it
+  read `~` as an ordinary directory name, landed on the filesystem root, and handed
+  back `/etc` for the folder `etc`, one confirmation dialog away from `shutil.rmtree`
+  - measured on the version before this change, with the tray's own module and cwd `/`:
+  `local_path_problem("~/..") == ""` and `_local_delete_path("etc") == "/etc"`. The
+  first attempt at this expanded the tilde in the guard instead, which closed `/etc`
+  and opened `$HOME`: a folder named like the user came back as the home directory.
+  The value is refused at the source now, so every reader of it - the guard, the
+  settings dialog, the wrapper - is looking at the same path, and the root check inside
+  the guard is back as the net for the next time two resolutions drift apart.
+- The tray expands a variable inside the fallback of `${VAR:-fallback}`, and follows
+  the braces of one expansion inside another. The shipped
+  `LOG="${XDG_CACHE_HOME:-$HOME/.cache}/..."` read as a path with a literal `$HOME` in
+  it whenever `XDG_CACHE_HOME` was unset, which is the default on a stock desktop, so
+  the tray named a log file the wrapper never wrote. `${VAR-word}` and `${VAR:+word}`
+  are answered too; `${VAR:?message}`, `${VAR:offset}` and `${VAR:offset:length}` are
+  left exactly as the file wrote them, which is visible rather than silently wrong and
+  is recorded in `docs/KNOWN-ISSUES.md` with the reason.
+- The NetworkManager hook's cases run the hook. They read its lines before - the
+  `is-enabled --quiet` gate, the unit name, and that the gate comes before the start -
+  and neutering the gate while keeping its text and position left all of them green, so
+  a hook that asked nothing and started the service anyway passed every case. The new
+  fixture executes the installed hook under `unshare -rm` with a tmpfs on `/run` and
+  `id`, `getent`, `runuser` and `systemctl` stubbed to answer for one user: with the
+  timer enabled the gate asks and then starts the service, with it disabled the hook
+  asks and starts nothing, and a user with no unit file gets no call at all. CI asserts
+  that a user namespace can be created, so the fixture cannot turn into a silent skip.
+- Two tray cases and one static check stopped pinning source identifiers. The refused
+  -name case asked the module's translation table by name for the sentence it expected,
+  and the check that every `t()` key has a Chinese entry looked the table up by
+  identifier; renaming that table turned three cases red for a refactor. The first two
+  ask the tray's own translator now and the third finds the table by its shape.
+- The tray suite's reload case compares the status row on a settled state on both
+  sides. The row is written by the poll, so a poll landing between the two captures
+  failed the case for a reason that had nothing to do with the key under test: it was
+  the one intermittent failure left in the suite, about one run in four under load,
+  and it recurred once more with two suites running at the same time.
 - A stamp holding a NUL byte is the pause the shells read. Bash's command
   substitution drops NUL bytes with a warning and reads the rest, so
   `9999999999\0` is `9999999999` to `onedrive-sync` and `onedrive-doctor` - a pause

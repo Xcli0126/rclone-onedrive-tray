@@ -438,6 +438,86 @@ check "and it wrote that value quoted rather than bare" \
     grep -qxF 'MAX_DELETE="1(x"' "$CARRY_CFG"
 check "and the file is still shell" bash -n "$CARRY_CFG"
 
+# A carried line that is shell syntax rather than one quoted string is copied as it
+# stands. The first version of carry_assign accepted only KEY="one string" and a
+# bare word, and sent everything else through the value path, which escapes `$`:
+# measured on that version, these three lines came back as a frozen literal, a
+# frozen $HOME, and a value truncated at the space.
+title "the lines a carried value is allowed to be"
+carry_line() {  # carry_line <line> -> the wizard's result for it, on stdout
+    { grep -v '^LOG=' "$CARRY_CFG"
+      printf '%s\n' "$1"
+    } > "$CARRY_CFG.new" && mv -f "$CARRY_CFG.new" "$CARRY_CFG"
+    wizard_run --interval 9 >/dev/null 2>&1
+    grep -m1 '^LOG=' "$CARRY_CFG"
+}
+# shellcheck disable=SC2016  # the ${VAR} is the text under test, not this shell's
+check "an unquoted \${VAR} path is carried as the file wrote it" \
+    grep -qxF 'LOG=${XDG_CACHE_HOME:-$HOME/.cache}/sync.log' \
+    <(carry_line 'LOG=${XDG_CACHE_HOME:-$HOME/.cache}/sync.log')
+# shellcheck disable=SC2016  # $LOG is the sourcing shell's, not this one's
+check "and sourcing that still expands it to the cache directory" \
+    grep -qxF "LOG=$CARRY_HOME/.cache/sync.log" \
+    <(env HOME="$CARRY_HOME" XDG_CACHE_HOME="$CARRY_HOME/.cache" bash -c \
+        '. "$1"; echo "LOG=$LOG"' _ "$CARRY_CFG")
+check "and the config is shell" bash -n "$CARRY_CFG"
+
+# An escaped quote and a variable in the same value: both have to survive.
+# Written with printf rather than sed: a backslash in a sed replacement is dropped
+# before the quote, so the file would have held an unescaped quote and this case
+# would have been about a different value.
+{ grep -v '^OPEN_APP_CMD=' "$CARRY_CFG"
+  # shellcheck disable=SC2016  # $HOME is the text the config holds, not this shell's
+  printf '%s\n' 'OPEN_APP_CMD="obsidian \"$HOME/Notes\""'
+} > "$CARRY_CFG.new" && mv -f "$CARRY_CFG.new" "$CARRY_CFG"
+run "a re-run over a value with an escaped quote and a variable finishes" 0 "Wrote" \
+    wizard_run --interval 9
+# shellcheck disable=SC2016  # same: the $HOME is inside the value under test
+check "and that line is written as the file had it" \
+    grep -qxF 'OPEN_APP_CMD="obsidian \"$HOME/Notes\""' "$CARRY_CFG"
+# shellcheck disable=SC2016  # $HOME belongs to the sourcing shell
+check "and sourcing it expands the variable inside the quoted value" \
+    grep -qxF "OPEN_APP_CMD=obsidian \"$CARRY_HOME/Notes\"" \
+    <(env HOME="$CARRY_HOME" bash -c '. "$1"; echo "OPEN_APP_CMD=$OPEN_APP_CMD"' _ "$CARRY_CFG")
+
+# A single-quoted value with a space in it. The reader stops an unquoted value at
+# the first space, so the fallback used to write "'single" and the value was gone.
+sed -i "s|^OPEN_APP_NAME=.*|OPEN_APP_NAME='single quoted'|" "$CARRY_CFG"
+run "a re-run over a single-quoted value with a space finishes" 0 "Wrote" \
+    wizard_run --interval 9
+check "and the whole value is still there, quotes and all" \
+    grep -qxF "OPEN_APP_NAME='single quoted'" "$CARRY_CFG"
+check "and it still reads as one value" \
+    grep -qxF "OPEN_APP_NAME=single quoted" \
+    <(bash -c '. "$1"; echo "OPEN_APP_NAME=$OPEN_APP_NAME"' _ "$CARRY_CFG")
+
+# The two scalars the wizard writes unquoted are validated rather than carried
+# blind: a hand-written WATCH is not a 0 or a 1, and an INTERVAL_MIN holding shell
+# syntax would otherwise be assembled into a file the wrapper sources. The marker
+# is the sharp end of it: if the wizard wrote that value through, sourcing the
+# config runs the command in it.
+title "the values the wizard writes unquoted"
+rm -f "$CARRY_CFG.sourced-marker"
+sed -i "s|^WATCH=.*|WATCH='a\"b'|" "$CARRY_CFG"
+run "a re-run over a WATCH that is not 0 or 1 finishes" 0 "Wrote" \
+    wizard_run --interval 9
+check "and it says what it did with it" \
+    grep -qF 'WATCH=' "$CARRY_CFG"
+check "and the file is shell" bash -n "$CARRY_CFG"
+check "and WATCH is a switch again" grep -qxF 'WATCH="1"' "$CARRY_CFG"
+{ grep -v '^INTERVAL_MIN=' "$CARRY_CFG"
+  printf "INTERVAL_MIN='5\"; touch %s; \"'\n" "$CARRY_CFG.sourced-marker"
+} > "$CARRY_CFG.new" && mv -f "$CARRY_CFG.new" "$CARRY_CFG"
+# No --interval here: the flag owns the value when it is given, and the point of
+# this case is the value the file already holds.
+run "a re-run over an INTERVAL_MIN holding shell syntax finishes" 0 "Wrote" \
+    wizard_run
+check "and INTERVAL_MIN is a number again" grep -qxF 'INTERVAL_MIN="5"' "$CARRY_CFG"
+check "and the file is shell" bash -n "$CARRY_CFG"
+check_absent "and sourcing it runs nothing that was in the old value" \
+    "$CARRY_CFG.sourced-marker"
+rm -f "$CARRY_CFG.sourced-marker"
+
 # ------------------------------------------------- the shipped config and XDG
 # install.sh copies config/config.example verbatim when no config exists, and the
 # example hardcoded $HOME/.config and $HOME/.cache while every script resolves
@@ -3831,6 +3911,91 @@ fi
 # machine-wide and starts a unit outside the default prefix.
 check "and a prefix outside ~/.local is called out as machine-wide" \
     grep -qF "this hook is machine-wide and will start $NM_UNIT.timer" <<<"$NM_OUT"
+
+# Every case above reads the hook. This one runs it, because what the hook does is
+# what matters: it is the dispatch that catches a machine up when an interface comes
+# up, and the timer gate in it is the only thing that stops that happening during a
+# pause or with automatic sync switched off. Commenting the gate out while keeping
+# its text and its position leaves all of the cases above green, which is why this
+# fixture exists.
+#
+# It needs a directory under /run/user, and an unprivileged test cannot create one.
+# `unshare -rm` with a tmpfs over /run can, and then `id`, `getent`, `runuser` and
+# `systemctl` are stubs that answer for one user and record what they were asked. A
+# machine where that namespace cannot be created skips this rather than passing it.
+NM_EXEC="$WORK/nm-exec"
+rm -rf "$NM_EXEC"; mkdir -p "$NM_EXEC/stubs" "$NM_HOME/.config/systemd/user"
+cat > "$NM_EXEC/stubs/id" <<'STUB'
+#!/bin/bash
+[ "$1" = -nu ] && { echo probeuser; exit 0; }
+exec /usr/bin/id "$@"
+STUB
+cat > "$NM_EXEC/stubs/getent" <<STUB
+#!/bin/bash
+[ "\$1" = passwd ] && { echo "probeuser:x:4242:4242::$NM_HOME:/bin/sh"; exit 0; }
+exec /usr/bin/getent "\$@"
+STUB
+cat > "$NM_EXEC/stubs/runuser" <<'STUB'
+#!/bin/bash
+# runuser -u USER -- env XDG_RUNTIME_DIR=... systemctl --user ...
+shift; shift
+[ "$1" = -- ] && shift
+[ "$1" = env ] && shift
+while [ $# -gt 0 ] && [ "${1#*=}" != "$1" ]; do shift; done
+exec "$@"
+STUB
+cat > "$NM_EXEC/stubs/systemctl" <<'STUB'
+#!/bin/bash
+printf '%s\n' "$*" >> "$NM_EXEC_CALLS"
+[ "$1" = --user ] && shift
+if [ "$1" = is-enabled ]; then
+    [ -f "$NM_EXEC_TIMER_ON" ] && exit 0 || exit 1
+fi
+exit 0
+STUB
+chmod +x "$NM_EXEC"/stubs/*
+: > "$NM_HOME/.config/systemd/user/$NM_UNIT.service"
+
+# The unit file and the timer marker are the caller's to set up: the whole point of
+# the third run below is a user whose unit is not there.
+nm_exec() {  # nm_exec <calls-file> <timer-marker-or-empty>
+    local calls="$1" marker="$2"
+    rm -f "$calls"
+    if [ -n "$marker" ]; then : > "$marker"; else marker="$NM_EXEC/no-such-marker"; fi
+    local helper="$NM_EXEC/run.sh"
+    cat > "$helper" <<EOF
+mount -t tmpfs t /run || exit 1
+mkdir -p /run/user/4242
+export PATH="$NM_EXEC/stubs:/usr/bin:/bin"
+export NM_EXEC_CALLS="$calls" NM_EXEC_TIMER_ON="$marker"
+HOME="$NM_HOME" sh "$NM_HOOK" wlan0 up
+EOF
+    unshare -rm sh "$helper"
+}
+
+if unshare -rm true 2>/dev/null; then
+    nm_exec "$NM_EXEC/calls-on" "$NM_EXEC/timer-on"
+    check "an interface coming up with the timer enabled starts the sync service" \
+        grep -qxF -- "--user start --no-block $NM_UNIT.service" "$NM_EXEC/calls-on"
+    check "and it asks the timer first" \
+        grep -qxF -- "--user is-enabled --quiet $NM_UNIT.timer" "$NM_EXEC/calls-on"
+    # The gate: the same hook, the same interface, a timer that is not enabled,
+    # which is what a pause and a switched-off automatic sync both look like.
+    nm_exec "$NM_EXEC/calls-off" ""
+    # shellcheck disable=SC2016  # $1 belongs to the inner bash
+    check "and with the timer off it asks and starts nothing" \
+        bash -c '! grep -q start "$1"' _ "$NM_EXEC/calls-off"
+    check "and it did ask, so the silence is the gate and not a hook that never ran" \
+        grep -qxF -- "--user is-enabled --quiet $NM_UNIT.timer" "$NM_EXEC/calls-off"
+    # A user the hook cannot find a unit for is a user it must not touch.
+    rm -f "$NM_HOME/.config/systemd/user/$NM_UNIT.service"
+    nm_exec "$NM_EXEC/calls-nounit" "$NM_EXEC/timer-on"
+    check_absent "and a user with no unit of that name gets no systemctl call at all" \
+        "$NM_EXEC/calls-nounit"
+    : > "$NM_HOME/.config/systemd/user/$NM_UNIT.service"
+else
+    skip "the hook cannot be executed here: unshare -rm cannot make a /run/user entry"
+fi
 
 # The machine may have no dispatcher directory at all -- NetworkManager is not
 # installed, or it keeps them elsewhere. The run has to skip the hook and say so.

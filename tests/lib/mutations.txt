@@ -207,8 +207,12 @@ tray-local-root-refused	bin/onedrive-tray	s#^    if os.path.dirname(root) == roo
 # root became the filesystem root and its prefix "/" let "/etc" through. The row
 # stays, and the tilde case in tests/tray.sh pins the resolution it depends on.
 tray-local-root-guard	bin/onedrive-tray	s#^        if os.path.dirname(root) == root:$#        if False:#	tray
-# The resolution itself, which is the half that was wrong.
-tray-local-root-expanduser	bin/onedrive-tray	s|root = os.path.realpath(os.path.expanduser(self.local))|root = os.path.realpath(self.local)|	tray
+# The two refusals that keep the guard inside the tree onedrive-sync uses: a tilde,
+# which bash does not expand in a sourced value, and a space at either end, which
+# bash keeps as part of the path. Expanding the tilde instead is what let the guard
+# resolve "/" with the process in "/" and hand back "/etc".
+tray-local-tilde-refused	bin/onedrive-tray	s|^    if text.startswith("~"):$|    if False:|	tray
+tray-local-space-refused	bin/onedrive-tray	s|^    if raw != text:$|    if False:|	tray
 tray-pause-unarmed-leaves-off	bin/onedrive-tray	s#^                self._set_units("enable", "--now")$#                pass#	tray
 # tray-pause-unarmed-silent was dropped: it named the line that called _pause_lost(), and the
 # old pause design that function belonged to is gone.
@@ -380,6 +384,14 @@ tray-resume-ignores-watch	bin/onedrive-tray	s|        watched = truthy(self.cfg.
 setup-carry-assign-fallback	setup.sh	s|^    if \[ -n "$line" \]; then|    if [ -z "$line" ]; then|	install-flow
 # The fallback itself: with a multi-line value carried as its first line, the
 # config this writes is not shell, which is what the bash -n gate in setup.sh
-# now refuses. The gate has no row of its own: no input reaches it while the
-# grammar above holds, and the grammar's row is this one.
+# refuses. The gate has no row of its own and needs none: every line it sees is
+# either written by this template or has passed `bash -n` on its own, and the two
+# scalars written unquoted are validated above, so no input reaches it. Its row is
+# this one, and the WATCH and INTERVAL_MIN rows below the other two.
 setup-carry-assign-keeps-broken-line	setup.sh	s|^        line=""$|        :|	install-flow
+# The two scalars the wizard writes unquoted, validated rather than carried:
+# a WATCH that is not 0 or 1 and an INTERVAL_MIN holding shell syntax each used
+# to be assembled into a file that either stopped being shell or sourced into a
+# command.
+setup-watch-not-validated	setup.sh	s#^        0|1) ;;$#        *) ;;#	install-flow
+setup-interval-not-validated	setup.sh	s#^        ''|\*\[!0-9\]\*) warn "INTERVAL_MIN#        '') warn "INTERVAL_MIN#	install-flow

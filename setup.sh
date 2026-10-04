@@ -361,20 +361,34 @@ carry_assign() {  # carry_assign <KEY> <default> -> the whole assignment, as wri
     line="$(printf '%s\n' "$OLD_CONFIG" |
         grep -E "^[[:space:]]*(export[[:space:]]+)?$key=" | tail -1 |
         sed -e 's/^[[:space:]]*//' -e 's/^export[[:space:]]\{1,\}//')"
-    # Only a line that is the whole assignment is carried: the key, then either one
-    # double-quoted string with no quote or backslash inside it, or a bare word of
-    # characters a value plausibly uses. Anything else falls back to the value the
-    # reader can see, which is what the writer did before. A value written over two
-    # lines is valid shell, and copying only its first line produced a config that
-    # was not: measured on the version that took any matching line,
-    # OPEN_APP_CMD="one<newline>two" came back with the first line alone, bash -n
-    # refused the result, and the wizard still printed "Wrote". A trailing comment,
-    # a continuation, a CR and an unterminated quote are excluded the same way, and
-    # bash -n below is the net for anything this pattern still lets through.
-    if ! printf '%s' "$line" |
-            grep -qE "^${key}=(\"([^\"\\\\]*)\"|[A-Za-z0-9_@%+=:,./-]*)$"; then
+    # Only a line that is a complete statement of its own is carried, and bash is
+    # what decides: the line is fed to `bash -n` on its own. A line that is not -
+    # the first half of a value written over two lines, an unterminated quote, a
+    # continuation, a stray bracket - cannot be reproduced by copying it, and
+    # copying its first line alone produced a config that was not shell: measured on
+    # the version that took any matching line, OPEN_APP_CMD="one<newline>two" came
+    # back with the first line alone, bash -n refused the result, and the wizard
+    # still printed "Wrote".
+    #
+    # Everything that passes is copied exactly as the file has it, including the
+    # parts this writer would have quoted differently. An earlier version accepted
+    # only KEY="one string" and a bare word and sent the rest through the value path,
+    # which escapes `$`: an unquoted LOG=${XDG_CACHE_HOME:-$HOME/.cache}/x was frozen
+    # into a literal path, a value holding \" and $VAR lost the expansion, and a
+    # single-quoted value with a space in it was truncated at the space. Asking bash
+    # has none of those cases and no second grammar to keep in step.
+    case "$line" in
+        # A continuation is not a statement of its own even though bash accepts it
+        # on its own: in the file it would swallow the line after it, which is how
+        # OPEN_APP_CMD=abc\ came back as the next key's text.
+        *\\) line="" ;;
+    esac
+    if [ -n "$line" ] && ! printf '%s\n' "$line" | bash -n 2>/dev/null; then
         line=""
     fi
+    # What is carried is carried as it stands, including a line bash reads as a
+    # command (`KEY=a b` sets KEY and runs `b`): the old file did that too, and
+    # rewriting it here would change a value rather than record one.
     if [ -n "$line" ]; then
         printf '%s' "$line"
     else
@@ -407,11 +421,28 @@ carry() {  # carry <KEY> <default> -> the value already in the config, or the de
 # INTERVAL_MIN="15" and WATCH="0" became "5" and "1".
 if [ "$INTERVAL_GIVEN" -eq 0 ]; then
     INTERVAL="$(carry INTERVAL_MIN 5)"
+    # The same rule the flag is held to, applied to the value the file already
+    # holds. These two are written into the config unquoted, so a carried value is
+    # assembled into the file as it stands: a hand-written INTERVAL_MIN of
+    # `5"; touch /tmp/x; "` would be a command in a file the wrapper sources, and
+    # bash -n would call it valid shell and wave it through. Anything that is not a
+    # whole number of minutes, and anything that is zero, is the default.
+    case "$INTERVAL" in
+        ''|*[!0-9]*) warn "INTERVAL_MIN=\"$INTERVAL\" is not a whole number of minutes; writing 5"
+                     INTERVAL=5 ;;
+    esac
+    [ -n "${INTERVAL//0/}" ] ||
+        { warn "INTERVAL_MIN=\"$INTERVAL\" is zero minutes; writing 5"; INTERVAL=5; }
 fi
 if [ "$WATCH_GIVEN" -eq 1 ]; then
     WATCH="$([ "$WATCH" = "yes" ] && echo 1 || echo 0)"
 else
     WATCH="$(carry WATCH 1)"
+    case "$WATCH" in
+        0|1) ;;
+        *) warn "WATCH=\"$WATCH\" is not 0 or 1; writing 1 (realtime sync on)"
+           WATCH=1 ;;
+    esac
 fi
 
 # Written to a side file and moved into place only once bash agrees it is shell.
@@ -458,7 +489,7 @@ EOF
 if ! bash -n "$CONFIG_NEW" 2>"$CONFIG_FILE.syntax"; then
     printf '%s\n' "$(sed -n '1,3p' "$CONFIG_FILE.syntax")" >&2
     rm -f "$CONFIG_NEW" "$CONFIG_FILE.syntax"
-    die "refusing to replace $CONFIG_FILE: the config this run would write is not shell (the line above is bash's complaint). The file on disk is unchanged."
+    die "refusing to replace $CONFIG_FILE: the config this run would write is not shell (the line above is bash's complaint). The config on disk is unchanged; the folder list and the exclude list this run wrote are already in place."
 fi
 rm -f "$CONFIG_FILE.syntax"
 chmod 0644 "$CONFIG_NEW" "$FILTERS_FILE"

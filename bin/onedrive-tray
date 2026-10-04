@@ -310,16 +310,83 @@ def shell_value(raw: str) -> str:
     return expand_shell_text(text, quoted)
 
 
+def _matching_brace(text: str, start: int):
+    """The index of the `}` closing the `${` whose name ends at `start`, or None.
+
+    Counted rather than searched for: a fallback may hold another expansion, so
+    `${A:-${B:-c}}` has two closing braces and the first one is not the end.
+    """
+    depth = 1
+    index = start
+    while index < len(text):
+        if text.startswith("${", index):
+            depth += 1
+            index += 2
+            continue
+        if text[index] == "\\":
+            # An escaped brace does not count: `${A:-x\}y}` ends after the `y`.
+            index += 2
+            continue
+        if text[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return index
+        index += 1
+    return None
+
+
+def _parameter_word(inner: str):
+    """`${VAR<inner>}` split into its operator and its word, or (None, None).
+
+    The forms this reader answers are the ones a config value uses: `:-` and `-`
+    for a default, `:+` for "something else when it is set", and `:=` for the word
+    a shell would also assign. Anything else (`:?`, `:offset`, `:offset:length`) is
+    left for the caller to keep as the file wrote it.
+    """
+    for prefix, op in ((":-", ":-"), (":+", ":+"), (":=", ":="), ("-", "-")):
+        if inner.startswith(prefix):
+            return inner[len(prefix):], op
+    return None, None
+
+
+def _expand_word(word: str, quoted: bool) -> str:
+    """The word of a parameter expansion, expanded the way the shell expands it.
+
+    Quoting inside the braces is quoting syntax: `${A:-"x y"}` is `x y` in bash,
+    and `${A:-'x y'}` is `x y` too, since a word in braces is not one of the
+    places a single quote protects an expansion. Anything else is expanded in the
+    context the whole value is in.
+    """
+    # A backslash escapes the closing brace so the expansion does not end there,
+    # and in that context bash removes it: `${A:-x\}y}` is `x}y`.
+    word = word.replace("\\}", "}")
+    if len(word) >= 2 and word[0] == word[-1] and word[0] == '"':
+        return expand_shell_text(word[1:-1], True)
+    if not quoted and len(word) >= 2 and word[0] == word[-1] and word[0] == "'":
+        # Only outside double quotes: inside them a single quote is an ordinary
+        # character, which is what bash answers with.
+        return word[1:-1]
+    return expand_shell_text(word, quoted)
+
+
 def expand_shell_text(text: str, quoted: bool) -> str:
-    """One shell word: `$VAR`, `${VAR}`, `${VAR:-fallback}`.
+    """One shell word: `$VAR`, `${VAR}`, `${VAR:-fallback}` and the forms beside it.
 
     The fallback is a shell word of its own and is expanded as one, which is the
-    half that was missing. `LOG="${XDG_CACHE_HOME:-$HOME/.cache}/sync.log"` is the
+    half that was missing: `LOG="${XDG_CACHE_HOME:-$HOME/.cache}/sync.log"` is the
     value this project ships, and with `XDG_CACHE_HOME` unset bash answers
     `/home/you/.cache/sync.log` while this reader answered a path with a literal
-    `$HOME` in it - a different log file for the tray and for the wrapper that
-    writes it. The variable's own value is inserted as it stands; bash does not
-    expand the result of an expansion either.
+    `$HOME` in it, a log file the tray named and the wrapper never wrote, or the
+    other way round.
+
+    The braces are matched rather than read to the first `}`, so a fallback holding
+    another expansion is expanded too, and `${VAR:+word}`, `${VAR-word}` and
+    `${VAR:=word}` are answered as a shell answers them. `${VAR:?message}`,
+    `${VAR:offset}` and `${VAR:offset:length}` are not implemented: the text is
+    left exactly as the file wrote it, which is visible in the tray rather than
+    silently wrong, and `docs/KNOWN-ISSUES.md` records that. The variable's own
+    value is inserted as it stands; bash does not expand the result of an
+    expansion either.
     """
     out = []
     index = 0
@@ -329,23 +396,43 @@ def expand_shell_text(text: str, quoted: bool) -> str:
             out.append(text[index + 1])
             index += 2
             continue
-        if char == "$":
-            match = re.match(r"\$\{(\w+)(:-?)([^}]*)\}", text[index:])
-            if match:
-                name, op, fallback = match.group(1), match.group(2), match.group(3)
+        if char == "$" and text.startswith("${", index):
+            named = re.match(r"\$\{(\w+)", text[index:])
+            if named:
+                name = named.group(1)
+                close = _matching_brace(text, index + 2 + len(name))
+                if close is None:
+                    out.append(char)
+                    index += 1
+                    continue
+                inner = text[index + 2 + len(name):close]
+                if inner == "":
+                    out.append(os.environ.get(name, ""))
+                    index = close + 1
+                    continue
+                word, op = _parameter_word(inner)
+                if op is None:
+                    # Kept as written: a form this reader does not implement is
+                    # better left visible than answered as if it were `:-`.
+                    out.append(text[index:close + 1])
+                    index = close + 1
+                    continue
                 value = os.environ.get(name, "")
-                # `:-` takes the fallback for an empty value too, `-` only for an
-                # unset one, which is the difference between the two forms.
-                if value == "" and (op == ":-" or name not in os.environ):
-                    value = expand_shell_text(fallback, quoted)
-                out.append(value)
-                index += match.end()
+                if op == ":+":
+                    out.append(_expand_word(word, quoted) if value else "")
+                else:
+                    # `:-` and `:=` take the word for an empty value too, `-` only
+                    # for an unset one, which is the difference between the forms.
+                    if value == "" and (op != "-" or name not in os.environ):
+                        value = _expand_word(word, quoted)
+                    out.append(value)
+                index = close + 1
                 continue
-            match = re.match(r"\$\{(\w+)\}|\$(\w+)", text[index:])
-            if match:
-                name = match.group(1) or match.group(2)
-                out.append(os.environ.get(name, ""))
-                index += match.end()
+        if char == "$":
+            plain = re.match(r"\$\{(\w+)\}|\$(\w+)", text[index:])
+            if plain:
+                out.append(os.environ.get(plain.group(1) or plain.group(2), ""))
+                index += plain.end()
                 continue
         out.append(char)
         index += 1
@@ -421,14 +508,33 @@ def local_path_problem(value) -> str:
     realpath and the prefix check then all pass against a tree rclone never syncs.
     The sentence names the key and the value, so the edit to make is in the text.
     """
-    text = str(value or "").strip()
+    raw = str(value or "")
+    text = raw.strip()
     if not text:
         return ('LOCAL is not set; it has to be an absolute path, such as '
                 '"$HOME/OneDrive".')
-    if not os.path.isabs(os.path.expanduser(text)):
+    if raw != text:
+        # The value is used as it stands by onedrive-sync, which sources the file,
+        # so a space around it is part of the path there. Trimming it here made the
+        # tray describe a directory the wrapper refuses.
+        return (f'LOCAL="{raw}" has a space at one end, and the shell that sources '
+                f'the config keeps it as part of the path; write it without one.')
+    if text.startswith("~"):
+        # `. config` in bash does not expand a tilde inside a value, so this is the
+        # eleven-character relative path "~/OneDrive" to onedrive-sync, which then
+        # refuses the run ([ ! -d "$LOCAL" ]). Expanding it here instead - which is
+        # what this function used to do, and what the delete guard did until this
+        # release - made the tray resolve a directory nothing syncs: the chip that
+        # offers to delete a deselected folder was one confirmation away from
+        # removing a tree the sync pair has nothing to do with.
+        suggestion = (f'"$HOME{text[1:]}"' if text == "~" or text.startswith("~/")
+                      else "an absolute path")
+        return (f'LOCAL="{text}" starts with a tilde, and the shell that sources the '
+                f'config does not expand one; write {suggestion} instead.')
+    if not os.path.isabs(text):
         return (f'LOCAL="{text}" is not an absolute path; it has to be one, such '
                 f'as "$HOME/OneDrive".')
-    root = os.path.realpath(os.path.expanduser(text))
+    root = os.path.realpath(text)
     if os.path.dirname(root) == root:
         # The filesystem root passes the two checks above and is the one absolute
         # value they cannot describe. It matters because _local_delete_path()
@@ -2088,27 +2194,29 @@ class Tray:
         syncs, and all of them would pass. The sentence that says so is
         local_path_problem()'s, the one main() prints.
 
-        The root is resolved here exactly as that function resolves it, `~`
-        included, and the join below is made from the resolved root rather than
-        from the raw value. Those two resolutions came apart once: with
-        LOCAL="~/.." and the process in "/", local_path_problem() expanded the
-        tilde to the home directory and accepted the value, while this method
-        resolved "~" as an ordinary directory name, landed on "/", and handed
-        back "/etc" for the folder "etc", because the separator-anchored prefix
-        for that root is "/" itself. Measured on the commit that removed the
-        root check below, with the tray's own module and cwd "/":
-        local_path_problem("~/..") == "" and _local_delete_path("etc") == "/etc".
-        The check stayed, and it is the thing that would have caught that drift.
+        What the root is comes from `local_path_problem()` above, which refuses
+        every value this method must not resolve: a relative one, one with a space
+        at either end, and one starting with a tilde, which the shell that sources
+        the config does not expand. The value it accepts is therefore absolute and
+        byte-for-byte what onedrive-sync uses, so `realpath` here is the same path
+        the wrapper resolves. A tilde used to get through, and where it landed
+        depended on the process's own directory: with LOCAL="~/.." and the process
+        in "/", this method read "~" as an ordinary directory name, landed on the
+        filesystem root, and handed back "/etc" for the folder "etc", because the
+        separator-anchored prefix for that root is "/" itself. Measured on the
+        commit that removed the root check below, with the tray's own module and
+        cwd "/": local_path_problem("~/..") == "" and
+        _local_delete_path("etc") == "/etc".
         """
         if local_path_problem(self.local):
             return None
         if not name or name in (".", "..") or os.path.basename(name) != name:
             return None
-        root = os.path.realpath(os.path.expanduser(self.local))
-        # Unreachable while the line above uses the same expansion as
-        # local_path_problem(), and kept for the case where the two drift apart
-        # again: a root with no parent is never a sync root, and the prefix check
-        # below cannot see that, because for "/" the prefix is "/".
+        root = os.path.realpath(self.local)
+        # Unreachable while the first line refuses everything whose root has no
+        # parent, and kept because that is a rule about a value this method does
+        # not own: a root with no parent is never a sync root, and the prefix check
+        # below cannot see it, because for "/" the prefix is "/".
         if os.path.dirname(root) == root:
             return None
         target = os.path.realpath(os.path.join(root, name))

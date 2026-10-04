@@ -8,16 +8,17 @@
 # Raise a number when the suite gains cases. Lowering one is a decision that
 # belongs in the commit message.
 #
-# install-flow's floor is one below what it reports on this machine, because its
-# last case skips on a runner without the NetworkManager dispatcher directory and a
-# skip is not a pass: measured on both CI runners, 444 passed and 1 skipped against
-# 445 passed where the hook can be installed. Raising this to the local count turns
-# both runners red, which is how the 438 -> 445 bump in this commit first landed. That is the only skip left in the suite: the other
+# install-flow's floor is one below what it reports on this machine, because one of
+# its cases skips on a runner without /etc/NetworkManager/dispatcher.d and a skip is
+# not a pass: measured on both CI runners at the previous commit, 444 passed and 1
+# skipped against 445 passed where the hook directory exists, and the floors below
+# are that relation kept up to date as the suite grows. Raising one to the local
+# count turns both runners red, which is how 445 first landed. That is the only skip left in the suite: the other
 # three environmental branches (systemd-analyze absent, a directory whose mode bits
 # do not bind, a pid that is already gone) are now created in the sandbox instead,
 # so they pass everywhere. Every other case must pass everywhere.
-dependency-matrix.sh 72
-install-flow.sh 453
+dependency-matrix.sh 82
+install-flow.sh 475
 filters.sh 50
 docs.sh 107
-tray.sh 303
+tray.sh 304

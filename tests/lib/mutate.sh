@@ -117,10 +117,11 @@ lint_table() {  # lint_table <table> <root>  -> 0 when every row is usable
             printf 'lint: %s: no such suite: tests/%s.sh\n' "$id" "$suite" >&2
             problems=$((problems + 1)); continue
         fi
-        # An expression sed refuses is not a mutation. It exits non-zero, and the
-        # comparison below then reads empty output as "matches nothing" or, with a
-        # partial write, as a change: a row holding `s|zzz` passed this lint while
-        # sed was saying "unterminated `s' command". Status and content both count.
+        # An expression sed refuses is not a mutation. The comparison below would
+        # read its empty output as "matches nothing", which is a different verdict,
+        # and a row whose sed writes part of its output and then fails would read as
+        # a change. Measured on the lint that only compared content: a row holding
+        # `q1` passed with sed exiting 1. Status and content both count.
         if ! sed "$expr" "$root/$target" >"$WORK/lint.out" 2>"$WORK/lint.err"; then
             printf 'lint: %s: sed refused the expression: %s\n' "$id" \
                 "$(head -1 "$WORK/lint.err")" >&2
@@ -132,12 +133,19 @@ lint_table() {  # lint_table <table> <root>  -> 0 when every row is usable
         fi
         # The range rule, applied to the address and not to the whole expression: a
         # replacement can hold the same three characters, and a substring test called
-        # those rows broken. Everything before the command is the address, and the
-        # whitespace around a range comma is not part of it, so `/, /^$/ s|...|` is
-        # the same row as `/,/^$/ s|...|` for this check.
+        # those rows broken. The address is everything before the command, and the
+        # command starts at the last whitespace-preceded `s` (a replacement may hold
+        # " s" too); an expression with none is cut at its first `s`, which is inside
+        # a regex only in rows this cannot judge. Whitespace is not part of an
+        # address, so `1,/^$/ s|...|` and `1,/^$/s|...|` are both refused - the
+        # first version of this rule looked only at expressions starting with `/`
+        # and was defeated by a numeric address, a leading space, and `/ s/,/^$/`.
+        #
+        # No shipped row uses a blank-line range; this is a guard for the next one.
         case "$expr" in
-            /*)
-                addr="${expr%% s*}"
+            s*|' '*) ;;                 # a leading space is not an address either
+            *)
+                addr="${expr% s*}"
                 addr="${addr//[[:space:]]/}"
                 case "$addr" in
                     *',/^$/'*|*'/^$/,/'*)
@@ -215,11 +223,14 @@ FIXTURE
         "spaced-range\ttarget.sh\t/^g() {/, /^$/ s/^    y=1$/    y=2/\tprobe" \
         "plain-range\ttarget.sh\t/^f() {/,/^}/ s/^    x=1$/    x=2/\tprobe" \
         "range-text-in-replacement\ttarget.sh\ts|^    y=1$|    y=1 ,/^$/,|\tprobe" \
+        "numeric-range\ttarget.sh\t1,/^$/ s/^    x=1$/    x=2/\tprobe" \
+        "spaced-start\ttarget.sh\t /^f() {/,/^$/ s/^    x=1$/    x=2/\tprobe" \
+        "space-before-s\ttarget.sh\t/ s/,/^$/ s/^    x=1$/    x=2/\tprobe" \
         > "$LINT_FIX/table"
     lint_out="$(lint_table "$LINT_FIX/table" "$LINT_FIX" 2>&1)"
     lint_rc=$?
     for want_id in dead-row blank-range missing-file missing-suite bad-expression \
-                   spaced-range; do
+                   spaced-range numeric-range spaced-start space-before-s; do
         case "$lint_out" in
             *"$want_id"*) ;;
             *) printf 'self-test: the lint said nothing about %s\n' "$want_id" >&2; bad=1 ;;
@@ -233,14 +244,15 @@ FIXTURE
         bad=1
     fi
     grep -v -e dead-row -e blank-range -e missing-file -e missing-suite \
-        -e bad-expression -e spaced-range "$LINT_FIX/table" > "$LINT_FIX/table-good"
+        -e bad-expression -e spaced-range -e numeric-range -e spaced-start \
+        -e space-before-s "$LINT_FIX/table" > "$LINT_FIX/table-good"
     if ! lint_table "$LINT_FIX/table-good" "$LINT_FIX" >/dev/null 2>&1; then
         printf 'self-test: the lint reported a table of good rows\n' >&2
         bad=1
     fi
 
     if [ "$bad" -eq 0 ]; then
-        echo "self-test: the classifier reads all six lines, and the lint names six bad rows and no good one"
+        echo "self-test: the classifier reads all six lines, and the lint names nine bad rows and no good one"
     fi
     exit "$bad"
 fi
