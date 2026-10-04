@@ -36,6 +36,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `onedrive-doctor` had no idea a pause existed, so a paused install read exactly
+  like a healthy one: every run is turned away by the wrapper, the log is quiet, the
+  timer is active, and the summary said nothing failed. It reports the pause and the
+  time it ends, warns about a stamp that holds no time and about one that has run out
+  but is still there, and does it where the tray and the wrapper already did.
+- The stamp had two grammars. The tray's `int()` accepted a sign, an underscore and
+  non-ASCII digits, all of which the wrapper rejects, so a stamp the tray showed as
+  a pause was one the wrapper deleted and synced through; and a value long enough to
+  overflow the shell's comparison made the wrapper print bash's error, read the
+  stamp as expired, delete it and sync. Both readers take digits only now, and a
+  value longer than a clock can hold is a pause rather than an expiry, decided by
+  length so that no value can overflow the test.
+- "Sync now" during a pause was a silent no-op: the service started, the wrapper
+  turned the run away and wrote no result line, and the menu said nothing. It now
+  answers with the pause and the time it ends, and queues nothing.
+- The stamp was written with a truncating `open(..., "w")` while `write_atomic()`
+  sits two hundred lines above it in the same file, so a wrapper reading the file
+  mid-write saw an empty stamp, which is "not a time": it deleted the pause and
+  synced. And the wrapper's pause check ran before the log rotation, so an install
+  that spends its life paused never rotated its log.
 - The migration that repairs a pause left by the older design did not repair the
   state it exists for. When that pause's time had passed, the stamp was dropped with
   the units still disabled and nothing else was done, so the machine was left

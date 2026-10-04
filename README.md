@@ -342,12 +342,13 @@ trap (edits in it go nowhere), the tray then offers to delete the local copy. Ti
 downloads it back. Dot-directories sit below the separator, since `.rag` and friends are worth
 excluding too.
 
-A timed pause stops both the timer and the watcher, then hands the restart to a transient
-systemd timer, so the pause ends on its own while that session lasts. A transient unit does not
-survive a reboot or a logout, so the tray checks at its next start whether the timer it promised is
-really there: it re-arms it when it is not, and if that fails it ends the pause and says so rather
-than leaving the menu counting down to a resume that will never come. The menu label shows when it
-comes back.
+A timed pause is one file: the tray writes the time it ends into `~/.cache/rclone-onedrive-tray`,
+and `onedrive-sync` reads it and exits without syncing while that time is in the future. Nothing
+stops the timer or the watcher, so nothing has to bring them back, the pause ends by itself when the
+time passes, and it survives a reboot or a logout the way the file does. The menu label shows when it
+comes back, and `Resume now` deletes the file. A pause left by an older version, which disabled the
+units and armed a transient timer, is repaired at the tray's next start: its units go back on and its
+pause continues from the file.
 
 ### Settings
 

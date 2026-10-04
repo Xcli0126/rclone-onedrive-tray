@@ -22,23 +22,10 @@ units are still disabled), that "Resume now" announced a resume it had not done
 (fixed), and that the pause commit wrote four corrupted lines into
 `tests/lib/mutations.txt` (removed). What is left:
 
-- `onedrive-doctor` has no pause awareness at all. A paused install is reported as
-  `ok log last write 0s ago; no failure hint in it` and `ok systemd enabled/active`,
-  exit 0, which reads as a healthy machine rather than one that is deliberately not
-  syncing; before the redesign the disabled timer made it a warning. The tray shows
-  the pause, the wrapper says it in the log, and the third reader says nothing.
-  Which row and which verdict is a product call, so it is not guessed at here.
-- The stamp has two grammars. The wrapper's shell rejects `" 1791117608 "`,
-  `"+1791117608"`, `"1_791117288"` and Arabic-Indic digits, and a value of more than
-  nineteen digits makes `[ -gt ]` print an error and read as "the pause ran out", so
-  the stamp is deleted and the run syncs with bash's complaint on stderr; the tray's
-  `int()` accepts the underscores and raises `OverflowError` on the long value, which
-  nothing catches. One grammar, written once, is the fix.
-- Three pages and a stub still describe the old design: `README.md`'s settings table,
-  `README.zh-CN.md` in two places, `docs/FEATURE-PARITY.md`,
-  `docs/COMPATIBILITY.md`, `docs/DEPENDENCIES.md`, the comment above
-  `recover_pause()` in the tray, and the `systemd-run` markers in `tests/tray.sh`
-  that no code reads any more.
+- The dead `systemd-run` stubs and markers in `tests/tray.sh` are still there: no
+  code reads them since the pause stopped arming a transient timer, and a fixture
+  that nothing reads is a place the next reader looks for behaviour that is gone.
+  `docs/DEPENDENCIES.md` also still lists the transient timer in its systemd row.
 - The mutation row `tray-setunits-invalidate` survives now: `_auto_state` reads the
   stamp before it reads `timer_state`, so the `_units_changed()` inside `_set_units`
   is no longer load-bearing and nothing notices its removal. A full sweep is red for

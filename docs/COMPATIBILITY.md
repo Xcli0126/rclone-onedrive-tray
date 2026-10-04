@@ -205,9 +205,9 @@ treat it as unknown rather than supported.
   through cairo, which is where a difference would show up first.
 - macOS, Windows and WSL. The scripts assume systemd user units and POSIX
   `flock`.
-- systemd older than 250. The units use `OnUnitInactiveSec` and a transient
-  `systemd-run` timer for the timed pause, both long-standing features, but the
-  versions in older long-term releases have not been tried.
+- systemd older than 250. The units use `OnUnitInactiveSec` for the interval and
+  `StartLimitIntervalSec` for the watcher's restart bound, both long-standing
+  features, but the versions in older long-term releases have not been tried.
 - Non-systemd init systems. Without a user session there is no timer, and the
   scripts will say so rather than pretend.
 - rclone below 1.66. Only the warning path is tested; a sync with such a build

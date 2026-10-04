@@ -23,7 +23,7 @@ complexity budget on.
 | Tray or menu bar icon with a clear state | Overlay states for online-only, available, shared, blocked, error, paused, syncing, signed out | yes: five states, drawn with cairo (synced, syncing, error, paused, unknown) |
 | Failure notification with a plain-language reason | Activity center plus toasts | yes: one line per failure, tagged `[lock]`, `[maxdelete]`, `[network]`, `[resync]`, `[auth]`, `[oldrclone]` or `[other]` |
 | Pause and resume, with the paused state visible | 2, 8 or 24 hours | yes: 30 minutes, 2 hours or 8 hours, and the icon changes |
-| A pause that survives closing the UI | Resume when the timer expires | yes: a transient `systemd-run --user --on-active` timer, not the tray process |
+| A pause that survives closing the UI | Resume when the timer expires | yes: a time in `~/.cache/rclone-onedrive-tray/paused-until` that `onedrive-sync` honours before every run |
 | Storage quota on screen | Warning icon near the limit, dashboard in the account | yes: `rclone about`, refreshed every 30 minutes |
 | Conflicts keep both files | Microsoft documents no winner rule, only advice to rename | yes: `--conflict-resolve none --conflict-loser num`, and the log says which copy was renamed |
 | A deletion cap | Notification above 200 deleted files, admin policy for confirmation | yes: `MAX_DELETE` aborts the run and reports `[maxdelete]` |

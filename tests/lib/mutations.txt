@@ -342,3 +342,7 @@ doctor-device-log-not-a-file	bin/onedrive-doctor	s|    if \[ ! -f "$LOG" \] && \
 # round twenty-one, the migration half: an expired pause left by the version that
 # disabled the units has to put them back, or nothing syncs again.
 tray-migration-leaves-units-off	bin/onedrive-tray	s|^        if disabled:$|        if False:|	tray
+# round twenty-two: one grammar for the pause stamp, and the third reader that now
+# says a pause is in force.
+sync-pause-long-value	bin/onedrive-sync	s|\[ "${#pause_due}" -gt 10 \]|[ "${#pause_due}" -gt 999 ]|	install-flow
+doctor-pause-row	bin/onedrive-doctor	s|^if \[ -f "$pause_stamp" \]; then$|if false; then|	install-flow

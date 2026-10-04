@@ -182,31 +182,6 @@ if [ ! -d "$LOCAL" ]; then
     refuse "$LOCAL does not exist. Create it first:  mkdir -p \"$LOCAL\"  (or point LOCAL at the right directory in $CONFIG_FILE)"
 fi
 
-# ---------------------------------------------------------------- the pause
-# The tray's Pause entry writes an absolute time into this file, and a pause is
-# that file and nothing else: the units are never touched, so the timer keeps
-# ticking and the watcher keeps watching, and every run they start lands here.
-# Reading it here rather than stopping systemd is what makes a pause survive a
-# reboot, need no tray to keep it, and end by itself when the time passes. The
-# stamp goes when it has expired, so the next run syncs and nothing is left
-# claiming a pause.
-PAUSE_STAMP="$CACHE_DIR/paused-until"
-if [ -f "$PAUSE_STAMP" ]; then
-    pause_due="$(cat "$PAUSE_STAMP" 2>/dev/null || true)"
-    case "$pause_due" in
-        ''|*[!0-9]*)
-            log_line "WARNING: $PAUSE_STAMP does not hold a time, so it was ignored"
-            rm -f "$PAUSE_STAMP" ;;
-        *)
-            if [ "$pause_due" -gt "$(date +%s)" ]; then
-                log_line "NOTICE: automatic sync is paused until $(date -d "@$pause_due" '+%Y/%m/%d %H:%M' 2>/dev/null || echo "$pause_due"), so this run did nothing"
-                exit 0
-            fi
-            rm -f "$PAUSE_STAMP"
-            log_line "NOTICE: the pause ran out, so this run synced" ;;
-    esac
-fi
-
 # ---------------------------------------------------------------- mutual exclusion
 # A manual run racing the systemd timer corrupts bisync's .lst listings.
 exec 9>"$LOCK_FILE" ||
@@ -252,6 +227,39 @@ if [ -f "$LOG" ]; then
     else
         log_line "WARNING: cannot read the size of $LOG, so it was not rotated"
     fi
+fi
+
+# ---------------------------------------------------------------- the pause
+# The tray's Pause entry writes an absolute time into this file, and a pause is
+# that file and nothing else: the units are never touched, so the timer keeps
+# ticking and the watcher keeps watching, and every run they start lands here.
+# Reading it here rather than stopping systemd is what makes a pause survive a
+# reboot, need no tray to keep it, and end by itself when the time passes. The
+# stamp goes when it has expired, so the next run syncs and nothing is left
+# claiming a pause.
+#
+# The grammar is digits and nothing else, and it is the same grammar the tray and
+# the doctor use: a sign, an underscore, a space around it or a non-ASCII digit is
+# not a time this project wrote, and reading one as a time made the shell delete a
+# pause the tray was still showing. A value longer than ten digits is later than
+# any clock this will meet, and it is compared by length rather than by arithmetic
+# so that no value can overflow the test and be read as "the pause ran out".
+PAUSE_STAMP="$CACHE_DIR/paused-until"
+if [ -f "$PAUSE_STAMP" ]; then
+    pause_due="$(cat "$PAUSE_STAMP" 2>/dev/null || true)"
+    case "$pause_due" in
+        ''|*[!0-9]*)
+            log_line "WARNING: $PAUSE_STAMP does not hold a time, so it was ignored"
+            rm -f "$PAUSE_STAMP" ;;
+        *)
+            if [ "${#pause_due}" -gt 10 ] ||
+                    [ "$pause_due" -gt "$(date +%s)" ]; then
+                log_line "NOTICE: automatic sync is paused until $(date -d "@$pause_due" '+%Y/%m/%d %H:%M' 2>/dev/null || echo "$pause_due"), so this run did nothing"
+                exit 0
+            fi
+            rm -f "$PAUSE_STAMP"
+            log_line "NOTICE: the pause ran out, so this run synced" ;;
+    esac
 fi
 
 # ---------------------------------------------------------------- delete cap

@@ -819,6 +819,7 @@ STRINGS = {
         "Paused for {n}": "已暂停 {n}",
         "Could not pause automatic sync: {why}": "无法暂停自动同步：{why}",
         "Could not resume automatic sync: the pause stamp is still there": "无法恢复自动同步：暂停标记仍未被删除",
+        "Automatic sync is paused until {when}, so this did nothing; choose Resume now first": "自动同步已暂停至 {when}，本次没有执行；请先选择「立即恢复」",
         "Could not change the login setting": "无法修改开机自启动设置",
         "Could not start {app}": "无法启动 {app}",
         "Folders to sync": "同步的文件夹",
@@ -1649,9 +1650,9 @@ class Tray:
 
         GLib.timeout_add_seconds(3, self.poll)
         self.poll()
-        # A pause is only as long-lived as the transient timer that ends it, so
-        # what the stamp claims is checked against systemd before the menu is
-        # allowed to promise a resume.
+        # The stamp is the pause, so there is nothing to rearm. What this repairs
+        # is a pause left by the version that disabled the units and armed a
+        # transient resume timer, and it drops a stamp whose time has passed.
         self.recover_pause()
         GLib.timeout_add_seconds(1800, self.refresh_quota)
         self.refresh_quota()
@@ -2633,6 +2634,17 @@ class Tray:
     def on_sync_now(self, *_):
         if self.busy:
             return
+        due = self._pause_due()
+        if due is not None and due > time.time():
+            # The wrapper turns every run away while the stamp is in the future,
+            # so starting the service here would queue a run that does nothing and
+            # report it as a sync. Under the old design the units were stopped, so
+            # the request really did start something; say what will happen instead.
+            when = time.strftime("%H:%M", time.localtime(min(due, 2 ** 31 - 1)))
+            self.notify(APP_NAME, self.t(
+                "Automatic sync is paused until {when}, so this did nothing; "
+                "choose Resume now first", when=when))
+            return
         self.busy = True
         self.manual_requested = True
         self.manual_seen_syncing = False
@@ -2747,8 +2759,11 @@ class Tray:
             due = int(time.time()) + minutes * 60
             try:
                 os.makedirs(CACHE_DIR, exist_ok=True)
-                with open(PAUSE_STAMP, "w", encoding="utf-8") as fh:
-                    fh.write(str(due))
+                # write_atomic, like the four other files this class writes: a
+                # truncating open leaves an empty stamp for the wrapper to read,
+                # and an empty stamp is "not a time", which deletes the pause and
+                # syncs.
+                write_atomic(PAUSE_STAMP, str(due))
             except OSError as exc:
                 GLib.idle_add(self._pause_failed, exc)
                 return
@@ -2804,12 +2819,23 @@ class Tray:
         return False
 
     def _pause_due(self):
-        """The time the pause stamp says the resume is due, or None."""
+        """The time the pause stamp says the resume is due, or None.
+
+        The grammar is digits and nothing else, and it is the wrapper's and the
+        doctor's too: `int()` alone accepts a sign, an underscore and non-ASCII
+        digits, which the shell rejects, so a stamp the tray showed as a pause was
+        one the wrapper deleted and synced through. A value longer than ten digits
+        is later than any clock this will meet, and it is answered by length rather
+        than by arithmetic because `time.localtime()` raises on one.
+        """
         try:
             with open(PAUSE_STAMP, encoding="utf-8") as fh:
-                return int(fh.read().strip())
-        except (OSError, ValueError):
+                text = fh.read().strip()
+        except OSError:
             return None
+        if not re.fullmatch(r"[0-9]{1,19}", text):
+            return None
+        return int(text[:10]) * 10 ** (len(text) - 10)
 
     def recover_pause(self):
         """Tidy up a pause the way the units were left, and drop an expired one.

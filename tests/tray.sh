@@ -4081,6 +4081,40 @@ def scenario_log_forged_marker():
             "tray_state": tray.state, "tray_hint": tray.log_result[3]}
 
 
+def scenario_pause_sync_now():
+    """Sync now during a pause says so instead of queueing a run that does nothing.
+
+    The wrapper turns every run away while the stamp is in the future, so the menu
+    item would start a service whose run exits without syncing and writes no result
+    line: no announcement, no error, nothing. Under the old design the units were
+    stopped, so the request really started something.
+    """
+    stamp = MODULE.PAUSE_STAMP
+    os.makedirs(os.path.dirname(stamp), exist_ok=True)
+    with open(stamp, "w", encoding="utf-8") as fh:
+        fh.write(str(int(time.time()) + 900))
+    tray = build()
+    pump(0.5)
+    shown = []
+    real_notify = MODULE.Notify
+    MODULE.Notify = install_fake_notify(shown)
+    clear_calls()
+    try:
+        find_at(tray.menu, "Sync now").activate()
+        said = wait_for(lambda: bool(shown), 8.0)
+        pump(0.3)
+        data = {"said": said, "notices": list(shown),
+                "starts": [x for x in call_lines() if " start " in x],
+                "busy": bool(getattr(tray, "busy", False))}
+    finally:
+        MODULE.Notify = real_notify
+        try:
+            os.remove(stamp)
+        except OSError:
+            pass
+    return data
+
+
 def scenario_lock_inode():
     """release_lock() removes only the file it locked, and a second take works.
 
@@ -4367,6 +4401,7 @@ SCENARIOS = {
     "reauth-twice": scenario_reauth_twice,
     "reauth-not-done": scenario_reauth_not_done,
     "log-forged-marker": scenario_log_forged_marker,
+    "pause-sync-now": scenario_pause_sync_now,
     "stale-state": scenario_stale_state,
     "stale-state-cache": scenario_stale_state_cache,
     "relative-local": scenario_relative_local,
@@ -6086,6 +6121,26 @@ if not d["busy_while_busy"] or not d["insensitive_while_busy"]:
 if not d["finished"] or d["busy_after"] or not d["sensitive_after"]:
     print("finished=%r busy_after=%r sensitive_after=%r"
           % (d["finished"], d["busy_after"], d["sensitive_after"]))
+    raise SystemExit(1)
+'
+fi
+
+title "Sync now while a pause is in force"
+if run_driver pause-sync-now; then
+    check "the request is answered with the pause and its end" json_py '
+if not d["said"]:
+    print("Sync now during a pause said nothing at all")
+    raise SystemExit(1)
+if not any("paused until" in body for body in d["notices"]):
+    print("the notice does not name the pause: %r" % (d["notices"],))
+    raise SystemExit(1)
+'
+    check "and nothing is started, because the run would do nothing" json_py '
+if d["starts"]:
+    print("a service start was queued anyway: %r" % (d["starts"],))
+    raise SystemExit(1)
+if d["busy"]:
+    print("the tray is waiting on a run that was never queued")
     raise SystemExit(1)
 '
 fi

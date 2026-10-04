@@ -658,6 +658,30 @@ else
     report warn tray "no tray process and no $icons_dir; start it with onedrive-tray once a graphical session is there"
 fi
 
+# ---- 9b. the pause ---------------------------------------------------------
+# A pause is one file in the cache directory, and onedrive-sync turns every run away
+# while the time in it is in the future. Nothing else in this report knows that, so
+# a paused install read exactly like a healthy one: `ok log last write 0h ago; no
+# failure hint in it` and `ok systemd enabled/active`, exit 0. The redesign made the
+# pause visible to anything that can read the file; this is the reader that says so.
+# The path is computed the way the tray's CACHE_DIR is, because LOG may point
+# anywhere and the stamp does not live beside it.
+pause_dir="${XDG_CACHE_HOME:-$HOME/.cache}/rclone-onedrive-tray"
+pause_stamp="$pause_dir/paused-until"
+if [ -f "$pause_stamp" ]; then
+    pause_due="$(cat "$pause_stamp" 2>/dev/null || true)"
+    case "$pause_due" in
+        ''|*[!0-9]*)
+            report warn pause "$pause_stamp does not hold a time, so onedrive-sync ignores it and every run syncs; remove it or set a pause from the tray" ;;
+        *)
+            if [ "${#pause_due}" -gt 10 ] || [ "$pause_due" -gt "$(date +%s)" ]; then
+                report ok pause "automatic sync is paused until $(date -d "@$pause_due" '+%Y/%m/%d %H:%M' 2>/dev/null || echo "$pause_due"), so onedrive-sync exits without syncing until then; the tray's Resume now clears it"
+            else
+                report warn pause "a pause ran out at $(date -d "@$pause_due" '+%Y/%m/%d %H:%M' 2>/dev/null || echo "$pause_due") and its stamp is still there; onedrive-sync removes it on the next run"
+            fi ;;
+    esac
+fi
+
 # ---- 10. the log file -----------------------------------------------------
 # The wrapper stops before syncing when its log cannot be opened, so that is a
 # failure; a log over MAX_LOG_BYTES is only the next run's rotation.

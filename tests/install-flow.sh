@@ -1367,6 +1367,7 @@ else
     bad "the resync ran with no checker and said nothing: $(tail -1 "$CHK/cache/sync.log")"
 fi
 
+
 # ------------------------------------------------------------ the pause
 # A pause is the tray's stamp and nothing else: the units are never touched, so
 # the timer keeps ticking and every run it starts lands here and has to be turned
@@ -1412,6 +1413,17 @@ if grep -qF 'automatic sync is paused until' "$PAUSED/cache/sync.log"; then
     ok "and says so in the log, with the time it resumes"
 else
     bad "the paused run said nothing: $(tail -1 "$PAUSED/cache/sync.log")"
+fi
+# A value longer than ten digits is later than any clock this will meet, and the
+# wrapper has to read it as a pause rather than let the comparison error out and
+# treat it as an expired one (which deletes the stamp and syncs).
+printf '%s' "9999999999999999999" > "$STAMP"
+: > "$PAUSED/called"
+paused_run >/dev/null 2>&1
+if grep -q 'bisync pausefake:Vault' "$PAUSED/called"; then
+    bad "a long stamp was read as expired and the run synced"
+else
+    ok "a stamp of more digits than a clock has is a pause, not an expiry"
 fi
 printf '%s' "$(( $(date +%s) - 60 ))" > "$STAMP"
 : > "$PAUSED/called"
@@ -3123,6 +3135,25 @@ fi
 # same path with "cannot write the log ...: Is a directory" — the summary then read
 # "nothing failed", exit 0. Measured before the fix: 6 ok, 6 warn, nothing failed,
 # exit 0 against a wrapper that stops every run.
+# The doctor has to know about a pause, or a paused install reads as a healthy one:
+# every run is turned away by the wrapper, the log is quiet, the timer is active and
+# the summary says nothing failed. The stamp lives in the cache directory the tray
+# uses, whatever LOG says.
+doc_fixture paused-install
+mkdir -p "$DOC_FX/cache/rclone-onedrive-tray"
+printf '%s' "$(( $(date +%s) + 900 ))" > "$DOC_FX/cache/rclone-onedrive-tray/paused-until"
+# Not --quiet: a pause is a healthy state, so its row is an ok line and quiet hides
+# exactly the line this case is about.
+run "a pause in force is reported, with the time it ends" 0 \
+    "automatic sync is paused until" doc_run "$DOC_FX" --offline
+printf 'not-a-time' > "$DOC_FX/cache/rclone-onedrive-tray/paused-until"
+run "and a stamp that holds no time is a warning, not a silence" 0 \
+    "does not hold a time" doc_run "$DOC_FX" --quiet --offline
+printf '%s' "$(( $(date +%s) - 900 ))" > "$DOC_FX/cache/rclone-onedrive-tray/paused-until"
+run "and a pause that ran out is a warning until the next run clears it" 0 \
+    "ran out at" doc_run "$DOC_FX" --quiet --offline
+rm -f "$DOC_FX/cache/rclone-onedrive-tray/paused-until"
+
 doc_fixture log-is-a-directory
 rm -f "$DOC_FX/cache/sync.log"; mkdir -p "$DOC_FX/cache/sync.log"
 DOCTOR_OUT="$(doc_run "$DOC_FX" --offline 2>&1)"; DOCTOR_RC=$?
