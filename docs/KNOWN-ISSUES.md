@@ -14,39 +14,41 @@ round uses a different model with a different lens, which is how the entries her
 were found in the first place.
 
 ## Open
-### The pause is still the write-then-hope kind
+### What the last meta-review found in the newest commits
 
-Round sixteen's systemd reviewer read the units, the interval drop-in, the transient
-pause timer and the NetworkManager hook against systemd 259. Four of the ten
-findings are fixed and in the changelog: `INTERVAL_MIN` is validated, the drop-in is
-compared as a whole value, the hook asks the timer before it starts a sync, and the
-sync service's stop timeout is explicit. What is left is the one that can leave a
-machine doing nothing at all:
+Round nineteen's meta-review audited the two commits before it, and found eleven
+things, three of them the newest work's own. Its patch covers most of them and is
+not applied yet; they are listed here so the next round starts from the list rather
+than from a re-reading.
 
-- A pause is "the units are disabled" plus a transient `systemd-run` timer that
-  re-enables them. Transient units do not survive a reboot, so a reboot during a
-  pause leaves the units disabled with nothing to bring them back, and the only
-  repair is `recover_pause()`, which runs from the tray's constructor. No tray (the
-  autostart box unticked, no GTK, a headless machine) therefore means nothing syncs
-  again, forever, and a disabled timer looks exactly like a deliberate off. The
-  stamp the tray writes is the only record of which it was, and the poll deletes it
-  when `is-enabled` answers something the code does not know.
-- `install.sh` enables both units on every run, so `git pull && ./install.sh` ends a
-  pause without saying so.
-- Pause and resume re-enable the watcher without reading `WATCH`, so a user who had
-  realtime sync off gets it back after any pause.
-- The resume timer is recognised by matching the English `Running timer` in
-  `systemd-run`'s stderr, which is the locale-dependent match this project removed
-  from the log readers.
-
-The shape the fix should take, and the reason it is a round of its own: a pause does
-not need the units touched at all. The tray already writes an absolute expiry to
-`paused-until`; if `onedrive-sync` honoured that stamp by exiting without syncing,
-then a pause would survive a reboot, need no tray to end, be visible to the doctor,
-and the transient timer, the `is-enabled` probe, the `Running timer` match and the
-watcher question would all disappear rather than being patched one by one. It is a
-change to what a pause means, so it wants its own failing-first cases for the
-wrapper, the tray and the doctor.
+- `install.sh` refuses `INTERVAL_MIN="0"` but not `"00"` or `"000"`: the unit then
+  ships `OnUnitInactiveSec=00min`, which systemd reads as zero, which is the sync
+  loop the validation was written to close. The changelog's "or is zero" is false.
+- `write_atomic()` opens the config path with a blocking `O_WRONLY`, so the write
+  side of the guard added for the read side stopped one file short: an
+  `EXCLUDE_FOLDERS_FILE` fifo freezes the tray from a GTK `toggled` handler. The
+  fix is `O_NONBLOCK` on that open, which raises `ENXIO` at once on a fifo.
+- The new "`LOG` is not a regular file" failure hits `LOG=/dev/null`, which the
+  wrapper handles perfectly well, so a working install is now called broken; the
+  same program's older log row already treats a device as a warning.
+- Three user-facing pages still carry the systemd premise that was corrected in the
+  unit and in the wrapper's header this round.
+- Two comments the same commit wrote are false: `lib/config.sh` says the shell
+  scripts read no path key with a variable in it, and `setup.sh` now reads `LOG`
+  through it; and "both treat it as a failure with the reason" is true of the
+  doctor and not of the tray, which returns an empty list silently.
+- One page still says three readers of the config, and the changelog claims the
+  pages say four.
+- The three NetworkManager hook cases pin the hook's text rather than its
+  behaviour: commenting the gate out - its text and its position kept, which is
+  exactly the old behaviour - leaves the whole of install-flow green. The hook is
+  not executed by any suite, so it wants a fixture with a stub `systemctl`.
+- `install-flow.sh` has a conjunct that can never match: `report()` pads its verdict
+  with `%-4s`, so the line reads `ok   logfile` and `^ok logfile` never does.
+- `KNOWN_SURVIVORS` excuses a row by id with nothing checking that the id exists or
+  that its reason still holds.
+- The drop-in's trailing-comment and trailing-whitespace strip has no case of its
+  own; the only fixture is a bare value.
 
 ### What the loop's own fixes left behind
 

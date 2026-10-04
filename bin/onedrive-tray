@@ -146,9 +146,9 @@ LOCK_DIR = (os.environ.get("XDG_RUNTIME_DIR") or os.environ.get("TMPDIR")
             or "/tmp")
 LOCK_FILE = os.path.join(LOCK_DIR, "rclone-onedrive-tray.lock")
 
-# A timed pause creates a transient systemd timer under this name. It is what
-# brings the timer and the watcher back, so a pause survives the tray exiting.
-PAUSE_UNIT = f"{APP_ID}-resume"
+# Where a pause is recorded. The stamp is the whole of it: onedrive-sync reads it
+# and exits without syncing while the time in it is in the future, so the pause
+# survives the tray exiting and needs nothing else to end it.
 PAUSE_STAMP = os.path.join(CACHE_DIR, "paused-until")
 
 # What the re-authorise terminal leaves behind: the reconnect's exit status, and
@@ -809,9 +809,7 @@ STRINGS = {
         "Resume now": "立即恢复",
         "Paused until {when}": "已暂停，{when} 自动恢复",
         "Paused for {n}": "已暂停 {n}",
-        "Could not schedule the resume: {why}": "无法安排自动恢复：{why}",
-        "Could not restore the resume timer, so automatic sync is on again":
-            "无法恢复暂停的定时器，已重新开启自动同步",
+        "Could not pause automatic sync: {why}": "无法暂停自动同步：{why}",
         "Could not change the login setting": "无法修改开机自启动设置",
         "Could not start {app}": "无法启动 {app}",
         "Folders to sync": "同步的文件夹",
@@ -2722,55 +2720,42 @@ class Tray:
         self._units_changed()
 
     def pause_for(self, minutes: int):
-        """Stop syncing for a while and let systemd bring it back by itself.
+        """Stop syncing for a while. The stamp is the whole of the pause.
 
-        Both units are stopped, not just the timer: leaving the watcher running
-        would let a local edit start a sync during the pause. Every systemctl
-        call happens in a worker: a slow user manager used to freeze the tray
-        for the whole pause.
-
-        The resume timer is the only thing that ends the pause, so when arming it
-        fails the pause cannot be kept. That repair happens here, in the worker
-        and before the notification, because it is a systemctl call: the units go
-        back on, which is the same repair _recover_pause_worker() runs when the
-        same call fails at startup. Leaving them off wrote no stamp and left the
-        menu saying automatic sync was off, with a manual Resume now as the only
-        way back.
+        A pause used to be "the units are stopped and disabled" plus a transient
+        `systemd-run` timer that turned them back on: the timer lives and dies with
+        the running user manager, so a reboot or a logout during a pause left both
+        units disabled with nothing to bring them back, and only a function this
+        class runs at startup could repair it. No tray therefore meant nothing
+        synced again, forever, and a disabled timer looks exactly like a deliberate
+        off. Nothing about that is needed: `onedrive-sync` reads the stamp below
+        and exits without syncing while it is in the future, so a pause survives a
+        reboot, ends by itself, needs no tray to end it, and is visible to anything
+        that can read the file. The units are never touched, so the timer keeps
+        ticking and the watcher keeps watching; every run it starts costs one exit.
         """
         def worker():
-            self._set_units("stop")
-            self._sc("disable", self.timer, self.watch)
-            sh(f"systemctl --user stop {PAUSE_UNIT}.timer {PAUSE_UNIT}.service "
-               f"2>/dev/null", timeout=30)
-            _, _, err = sh(
-                f"systemd-run --user --on-active={minutes}min --unit={PAUSE_UNIT} "
-                f"systemctl --user enable --now "
-                f"{shlex.quote(self.timer)} {shlex.quote(self.watch)}",
-                timeout=30)
-            if err and "Running timer" not in err:
-                self._set_units("enable", "--now")
-            GLib.idle_add(self._after_pause, minutes, err)
+            due = int(time.time()) + minutes * 60
+            try:
+                os.makedirs(CACHE_DIR, exist_ok=True)
+                with open(PAUSE_STAMP, "w", encoding="utf-8") as fh:
+                    fh.write(str(due))
+            except OSError as exc:
+                GLib.idle_add(self._pause_failed, exc)
+                return
+            GLib.idle_add(self._after_pause, minutes)
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _after_pause(self, minutes, err):
-        if err and "Running timer" not in err:
-            # One fault, one outcome: this is the sentence the startup recovery
-            # uses for the same failure, and the units are already back on by the
-            # time it is shown. The reason is still reported beside it.
-            # The colon is part of the sentence, not glued on beside it: the zh
-            # table writes "：" and an ASCII ":" after a Chinese clause is the
-            # tell that the two halves were assembled rather than translated.
-            self.notify(APP_NAME,
-                        self.t("Could not schedule the resume: {why}",
-                               why=err[:70]))
-            return self._pause_lost()
-        try:
-            os.makedirs(CACHE_DIR, exist_ok=True)
-            with open(PAUSE_STAMP, "w", encoding="utf-8") as fh:
-                fh.write(str(int(time.time()) + minutes * 60))
-        except OSError:
-            pass
+    def _pause_failed(self, exc):
+        # The only thing that can fail now is the write, and a pause that is not
+        # written is not a pause: say so instead of showing one.
+        self.notify(APP_NAME, self.t("Could not pause automatic sync: {why}",
+                                     why=str(exc)[:70]))
+        self._refresh_checks()
+        return False
+
+    def _after_pause(self, minutes):
         key = PAUSE_LABELS.get(minutes, f"{minutes} min")
         self.notify(APP_NAME, self.t("Paused for {n}", n=self.t(key)))
         self.auto_seen = "paused"
@@ -2779,15 +2764,6 @@ class Tray:
         return False
 
     def resume_now(self):
-        def worker():
-            sh(f"systemctl --user stop {PAUSE_UNIT}.timer {PAUSE_UNIT}.service "
-               f"2>/dev/null", timeout=30)
-            self._set_units("enable", "--now")
-            GLib.idle_add(self._after_resume)
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _after_resume(self):
         self._clear_stamp()
         self.auto_seen = "on"
         self._units_changed()
@@ -2804,15 +2780,15 @@ class Tray:
             return None
 
     def recover_pause(self):
-        """Make the pause stamp and the resume timer agree, at startup.
+        """Tidy up a pause the way the units were left, and drop an expired one.
 
-        The timer that ends a pause is a transient systemd unit, so it lives and
-        dies with the running user manager: a reboot or a logout during the pause
-        leaves both units disabled and no timer behind, while the stamp in
-        ~/.cache still holds the old due time. Reading only the stamp made the
-        menu promise a resume that could never come, so the stamp is checked
-        against systemd itself, off the main loop because systemctl can take
-        seconds to answer.
+        The stamp is the pause now, so a restart has nothing to rearm. What it can
+        find is a pause written by a version that disabled the units and armed a
+        transient timer: that timer is gone, the units are still disabled, and the
+        stamp still holds a due time. Re-enabling them and keeping the stamp
+        continues the pause on the new footing; if the due time has passed, the
+        stamp goes and the units come back with everything else. A stamp with the
+        units already enabled is the new shape and needs nothing.
         """
         threading.Thread(target=self._recover_pause_worker, daemon=True).start()
 
@@ -2821,27 +2797,17 @@ class Tray:
         if due is None:
             return
         if due <= time.time():
-            # The pause is over and the stamp is all that is left of it. The
-            # units are the next poll's business, and its answer is the truth.
+            # The pause is over and the stamp is all that is left of it.
             GLib.idle_add(self._pause_over)
             return
-        _, out, _ = self._sc("is-active", f"{PAUSE_UNIT}.timer")
-        answer = out.splitlines()[0].strip() if out.strip() else ""
-        if answer == "active":
-            return
-        _, _, err = sh(
-            f"systemd-run --user --on-active={max(1, int(due - time.time()))}s "
-            f"--unit={PAUSE_UNIT} systemctl --user enable --now "
-            f"{shlex.quote(self.timer)} {shlex.quote(self.watch)}",
-            timeout=30)
-        if err and "Running timer" not in err:
-            # The pause cannot be kept, so it ends here instead of being left as
-            # a promise nothing will keep: the units go back on now, and the
-            # notification says so rather than letting the menu claim a resume.
-            self._set_units("enable", "--now")
-            GLib.idle_add(self._pause_lost)
-        else:
+        _, out, _ = self._sc("is-enabled", self.timer)
+        if out.splitlines()[0].strip() == "enabled":
+            # The new shape: the units were never touched, so there is nothing to
+            # repair. The stamp alone keeps the pause.
             GLib.idle_add(self._pause_rearmed)
+            return
+        self._set_units("enable", "--now")
+        GLib.idle_add(self._pause_rearmed)
 
     def _pause_over(self):
         """The stamp has expired: drop it, so nothing claims a pause."""
@@ -2851,17 +2817,8 @@ class Tray:
         return False
 
     def _pause_rearmed(self):
-        """The resume timer is back, so the stamp is true again."""
+        """The pause is in force and the units are on, so the stamp is true."""
         self.auto_seen = "paused"
-        self._refresh_checks()
-        return False
-
-    def _pause_lost(self):
-        """The resume could not be restored: end the pause, and say so."""
-        self._clear_stamp()
-        self.auto_seen = None
-        self.notify(APP_NAME, self.t(
-            "Could not restore the resume timer, so automatic sync is on again"))
         self._refresh_checks()
         return False
 
@@ -3059,19 +3016,24 @@ class Tray:
         """"on", "off", "paused" or "unknown", from systemctl's own answer.
 
         "off" is an answer (automatic sync was turned off); "unknown" is the
-        absence of one. Only a stamp from pause_for() means the tray paused the
-        units itself, and the stamp goes when the timer brings them back.
+        absence of one. A pause is the stamp and nothing else, so it answers
+        "paused" while it is in the future, and the stamp is dropped here when it
+        runs out, because nothing else is watching for that.
         """
+        due = self._pause_due()
+        if due is not None and due <= time.time():
+            # The pause has run out. Nothing ends it but this: no timer is armed,
+            # and onedrive-sync treats an expired stamp as no stamp at all, so the
+            # file goes rather than sitting there claiming a pause nothing keeps.
+            self._clear_stamp()
+        elif due is not None:
+            return "paused"
         if timer_state == "enabled":
             auto = "on"
         elif timer_state == "unknown":
             auto = "unknown"
-        elif self._paused_until():
-            auto = "paused"
         else:
             auto = "off"
-        if auto != "paused" and os.path.exists(PAUSE_STAMP):
-            self._clear_stamp()
         return auto
 
     def _hint(self, tag, raw) -> str:

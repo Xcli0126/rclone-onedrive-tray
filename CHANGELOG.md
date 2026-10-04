@@ -36,6 +36,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A pause could outlive the tray and leave a machine doing nothing, and the shape of
+  the feature is what made that possible: a pause was "the units are stopped and
+  disabled" plus a transient `systemd-run` timer that turned them back on, and a
+  transient timer does not survive a reboot or a logout. A reboot during a pause
+  therefore left both units disabled with nothing to end it, and the only repair was
+  a function the tray runs at startup, so no tray meant nothing synced again and a
+  disabled timer looked exactly like a deliberate off. A pause is now the stamp the
+  tray already wrote: `onedrive-sync` reads `paused-until`, exits without syncing
+  while the time in it is in the future, and deletes it when it has passed. Nothing
+  touches the units, so the pause survives a reboot, ends by itself, needs no tray to
+  end it, and is visible to anything that can read the file; `install.sh` no longer
+  silently ends one by re-enabling the units; and the transient timer, the
+  `is-enabled` probe, the `Running timer` stderr match and the pause/resume watcher
+  question are gone rather than patched. A pause written by the old version (units
+  disabled, stamp in the future) is repaired at startup by re-enabling them while
+  keeping the pause, which is the one thing `recover_pause()` does now.
 - The guard that keeps a fifo or a directory out of the log reads stopped one file
   short. `onedrive-doctor` read `EXCLUDE_FOLDERS_FILE` with a bare `grep` and the tray
   with a bare `open()` on the GTK main loop, so a fifo there hung the whole check

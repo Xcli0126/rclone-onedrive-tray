@@ -323,3 +323,14 @@ unit-no-stop-timeout	systemd/onedrive-sync.service.in	s|^TimeoutStopSec=300$||	i
 # logfile row judged a directory writable while the wrapper refused it.
 doctor-exclude-fifo-guard	bin/onedrive-doctor	s|    if \[ ! -f "$EXCLUDE_FOLDERS_FILE" \]; then|    if false; then|	install-flow
 doctor-log-dir-not-a-file	bin/onedrive-doctor	s|    if \[ ! -f "$LOG" \]; then|    if false; then|	install-flow
+# round twenty: a pause is the stamp and nothing else. The wrapper turns a run
+# away while it is in force, and the tray touches no unit to write it.
+sync-pause-ignored	bin/onedrive-sync	s|            if \[ "$pause_due" -gt "$(date +%s)" \]; then|            if false; then|	install-flow
+                with open(PAUSE_STAMP, "w", encoding="utf-8") as fh:|	tray
+            due = int(time.time()) + minutes \* 60|        def worker():
+            self._set_units("stop")
+            due = int(time.time()) + minutes * 60|	tray
+# The tray half of the pause has no row: the mutation that reintroduces a unit
+# call has to insert a line, and the harness's sed could not express it. The
+# rewritten pause scenarios assert the calls directly, and the old code fails
+# them, which is the check the row would have made.

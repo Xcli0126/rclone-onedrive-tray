@@ -1348,6 +1348,61 @@ else
     bad "the resync ran with no checker and said nothing: $(tail -1 "$CHK/cache/sync.log")"
 fi
 
+# ------------------------------------------------------------ the pause
+# A pause is the tray's stamp and nothing else: the units are never touched, so
+# the timer keeps ticking and every run it starts lands here and has to be turned
+# away. That is what makes a pause survive a reboot and need no tray to end it,
+# and what this checks: a run while the stamp is in the future does not invoke
+# rclone, says why in the log, and a stamp that has run out is gone by the time the
+# run it allowed has finished.
+title "a wrapper run during a pause"
+PAUSED="$WORK/paused"
+rm -rf "$PAUSED"
+mkdir -p "$PAUSED/bin" "$PAUSED/cfg/rclone-onedrive-tray" \
+         "$PAUSED/cache/rclone-onedrive-tray" "$PAUSED/local"
+cp "$SRC_DIR/bin/onedrive-sync" "$PAUSED/bin/"
+printf '#!/bin/bash\nprintf "%%s\\n" "$*" >> "%s/called"\nexit 0\n' "$PAUSED" \
+    > "$PAUSED/rclone"
+chmod +x "$PAUSED/rclone"
+cat > "$PAUSED/cfg/rclone-onedrive-tray/config" <<EOF
+REMOTE="pausefake:Vault"
+LOCAL="$PAUSED/local"
+LOG="$PAUSED/cache/sync.log"
+RCLONE="rclone"
+MAX_DELETE="0"
+RETRIES="1"
+EOF
+paused_run() {
+    env PATH="$PAUSED:/usr/bin:/bin" XDG_CONFIG_HOME="$PAUSED/cfg" \
+        XDG_CACHE_HOME="$PAUSED/cache" "$PAUSED/bin/onedrive-sync"
+}
+# The wrapper's cache directory is $XDG_CACHE_HOME/rclone-onedrive-tray, which is
+# the tray's as well: the stamp has to be written where the tray would write it.
+STAMP="$PAUSED/cache/rclone-onedrive-tray/paused-until"
+printf '%s' "$(( $(date +%s) + 600 ))" > "$STAMP"
+: > "$PAUSED/called"
+paused_run >"$WORK/paused-out.txt" 2>&1
+# The capability probe asks rclone `bisync --help` before anything else, so what a
+# pause has to stop is the sync itself, not every call to the binary.
+if grep -q 'bisync' "$PAUSED/called"; then
+    bad "a paused run invoked rclone: $(head -1 "$PAUSED/called")"
+else
+    ok "a run while the pause is in force does not sync"
+fi
+if grep -qF 'automatic sync is paused until' "$PAUSED/cache/sync.log"; then
+    ok "and says so in the log, with the time it resumes"
+else
+    bad "the paused run said nothing: $(tail -1 "$PAUSED/cache/sync.log")"
+fi
+printf '%s' "$(( $(date +%s) - 60 ))" > "$STAMP"
+: > "$PAUSED/called"
+paused_run >/dev/null 2>&1
+if grep -q 'bisync pausefake:Vault' "$PAUSED/called" && [ ! -e "$STAMP" ]; then
+    ok "a pause that has run out is dropped, and the run syncs"
+else
+    bad "an expired pause: rclone called=$([ -s "$PAUSED/called" ] && echo yes || echo no), stamp left=$([ -e "$STAMP" ] && echo yes || echo no)"
+fi
+
 # ------------------------------------------------------------ the log cap
 # The cap is only a cap while the rotation happens, and the size used to be read
 # with `stat -c%s` and its failure turned into a zero by the `|| echo 0` beside

@@ -15,7 +15,7 @@
 # do not bind, a pid that is already gone) are now created in the sandbox instead,
 # so they pass everywhere. Every other case must pass everywhere.
 dependency-matrix.sh 71
-install-flow.sh 428
+install-flow.sh 431
 filters.sh 50
 docs.sh 107
-tray.sh 297
+tray.sh 289

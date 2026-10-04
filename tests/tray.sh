@@ -497,22 +497,44 @@ def scenario_sync():
 
 
 def scenario_pause_durations():
-    """Each pause duration schedules the resume timer systemd-run should get."""
+    """Each pause duration writes its own due time, and touches no unit.
+
+    A pause is the stamp and nothing else: it used to stop and disable both units
+    and arm a transient systemd-run timer to bring them back, which does not
+    survive a reboot and needs the tray to repair it. The due time is what the
+    wrapper reads, so what each duration has to get right is the number in the
+    file, and no unit may be touched.
+    """
     tray = build()
     clear_calls()
     data = {}
     for minutes, label in ((30, "30 minutes"), (120, "2 hours"),
                            (480, "8 hours")):
+        before = int(time.time())
         find_at(tray.menu, label).activate()
-        data["pause_%d" % minutes] = wait_for(
-            lambda m=minutes: any("systemd-run --user --on-active=%dmin" % m
-                                  in line for line in call_lines()), 8.0)
+        due_holder = {}
+
+        def stamped(m=minutes, t0=before, holder=due_holder):
+            due = tray._pause_due()
+            if due is None:
+                return False
+            holder["due"] = due
+            return abs(due - (t0 + m * 60)) <= 5
+
+        data["pause_%d" % minutes] = wait_for(stamped, 8.0)
+        data["due_%d" % minutes] = due_holder.get("due")
     data["stamp_was_written"] = os.path.exists(MODULE.PAUSE_STAMP)
+    data["unit_calls_before_resume"] = [
+        x for x in call_lines()
+        if any(w in x for w in (" disable ", " stop ", "systemd-run"))]
     find_at(tray.menu, "Resume now").activate()
     data["resumed"] = wait_for(
-        lambda: any("enable --now" in line for line in call_lines()), 8.0)
+        lambda: not os.path.exists(MODULE.PAUSE_STAMP), 8.0)
     pump(0.5)
     data["stamp_cleared"] = not os.path.exists(MODULE.PAUSE_STAMP)
+    data["unit_calls_after_resume"] = [
+        x for x in call_lines()
+        if any(w in x for w in (" disable ", " stop ", "systemd-run"))]
     data.update(labels_from(tray.menu))
     data["pause_label"] = tray.item_pause.get_label() or ""
     data["calls"] = call_lines()
@@ -905,7 +927,7 @@ def scenario_lang_spellings():
             # ":" glued after it is the tell that the two halves were assembled
             # rather than translated, and the table writes "：".
             "resume_zh": MODULE.make_translator("zh")(
-                "Could not schedule the resume: {why}", why="systemd-run failed")}
+                "Could not pause automatic sync: {why}", why="the stamp failed")}
 
 
 def scenario_config_duplicate_key():
@@ -1737,28 +1759,26 @@ def scenario_excluded_name():
 def scenario_pause_recovery():
     """What the tray does at startup with a pause stamp in ~/.cache.
 
-    A transient systemd unit lives only in the running user manager, so a reboot
-    or a logout during a pause leaves both units disabled with no timer behind
-    it while the stamp still holds a future time. Reading the stamp alone made
-    the menu promise a resume that could never come.
+    The stamp is the pause now, so a restart has nothing to rearm. What it can
+    find is a pause left by a version that disabled the units and armed a
+    transient timer: the timer is gone, the units are still disabled, and the
+    stamp still holds a due time. `old` is that shape, `new` is a pause written
+    the way this version writes one, and `expired` is a pause that has run out.
     """
-    case = os.environ.get("TRAY_PAUSE_CASE", "gone")
+    case = os.environ.get("TRAY_PAUSE_CASE", "new")
     stamp = MODULE.PAUSE_STAMP
     os.makedirs(os.path.dirname(stamp), exist_ok=True)
     due = int(time.time()) + (-60 if case == "expired" else 900)
     with open(stamp, "w", encoding="utf-8") as fh:
         fh.write(str(due))
 
-    # A paused pair is one whose timer is disabled, which is also what makes the
-    # tray read the stamp at all.
-    with open(os.path.join(os.environ["TRAY_CALLS"], "timer-disabled"), "w"):
-        pass
-    active = os.path.join(os.environ["TRAY_CALLS"], "pause-timer-active")
-    if case == "alive":
-        with open(active, "w"):
-            pass
-    elif os.path.exists(active):
-        os.remove(active)
+    # The stub answers `is-enabled` for the timer from this marker, and a pair
+    # paused by the old version is one whose timer is disabled.
+    marker = os.path.join(os.environ["TRAY_CALLS"], "timer-disabled")
+    if case == "old":
+        open(marker, "w").close()
+    elif os.path.exists(marker):
+        os.remove(marker)
 
     shown = []
     real_notify = MODULE.Notify
@@ -1766,89 +1786,57 @@ def scenario_pause_recovery():
     clear_calls()
     try:
         tray = MODULE.Tray(CFG)
-        if case in ("gone", "alive"):
-            wait_for(lambda: any("is-active rclone-onedrive-tray-resume.timer" in x
-                                 for x in call_lines()), 8.0)
-        else:
+        if case == "expired":
             wait_for(lambda: not os.path.exists(stamp) or shown, 8.0)
+        else:
+            wait_for(lambda: getattr(tray, "auto_seen", None) == "paused", 8.0)
         pump(0.5)
         data = {
             "case": case,
             "stamp_left": os.path.exists(stamp),
             "due_in_future": due > time.time(),
-            "rearmed": [x for x in call_lines() if x.startswith("systemd-run")],
-            "enabled_after": [x for x in call_lines() if "enable --now" in x],
+            "enabled": [x for x in call_lines() if "enable --now" in x],
+            "disabled": [x for x in call_lines() if " disable " in x],
+            "scheduled": [x for x in call_lines() if x.startswith("systemd-run")],
             "pause_label": tray.item_pause.get_label() or "",
             "notices": list(shown),
             "auto_seen": getattr(tray, "auto_seen", None),
         }
-        if case == "fail":
-            # The recovery re-enabled the units through _set_units, and the poll
-            # that follows has to ask systemctl again rather than reuse the
-            # "disabled" it cached while the pair was paused. The cached answer
-            # describes the units as they were before, and the menu then says
-            # automatic sync is off for up to half a minute.
-            data["settled"] = wait_for(
-                lambda: getattr(tray, "auto_seen", None) in ("on", "off"), 12.0)
-            pump(0.3)
-            data["auto_seen_after"] = getattr(tray, "auto_seen", None)
-            data["pause_label_after"] = tray.item_pause.get_label() or ""
     finally:
         MODULE.Notify = real_notify
     return data
 
 
-def scenario_pause_arm_failed():
-    """A fresh pause whose resume timer cannot be armed is not a pause.
+def scenario_pause_write_failed():
+    """A pause that cannot be written is not a pause, and says so.
 
-    pause_for() stopped and disabled the units and only then asked systemd-run to
-    arm the resume, so when that call failed nothing was turned back on: sync was
-    off, no stamp was written, and the menu said "Automatic sync is off" with only
-    a manual Resume now to undo it. The recovery path already treats the same
-    systemd-run failure as a reason to end the pause, so this is the same repair
-    asked of the fresh case.
+    The stamp is the whole of the pause, so the only way to fail is to fail to
+    write it. The menu must not claim a pause that nothing will end, and the
+    notification is the only channel the tray has.
     """
     stamp = MODULE.PAUSE_STAMP
+    os.makedirs(os.path.dirname(stamp), exist_ok=True)
     try:
         os.remove(stamp)
     except OSError:
         pass
-    calls = os.environ["TRAY_CALLS"]
-    marker = os.path.join(calls, "timer-disabled")
-    try:
-        os.remove(marker)
-    except OSError:
-        pass
-
     tray = build()
-    wait_for(lambda: getattr(tray, "auto_seen", None) == "on", 8.0)
-    # What pause_for() leaves behind until the resume is armed: the units
-    # disabled, which the stub answers from this marker.
-    with open(marker, "w"):
-        pass
+    pump(0.4)
     shown = []
     real_notify = MODULE.Notify
     MODULE.Notify = install_fake_notify(shown)
-    clear_calls()
+    cache = os.path.dirname(stamp)
+    mode = os.stat(cache).st_mode
+    os.chmod(cache, 0o500)
     try:
-        tray.pause_for(30)
-        data = {"said_something": wait_for(lambda: bool(shown), 8.0)}
-        data["settled"] = wait_for(
-            lambda: getattr(tray, "auto_seen", None) in ("on", "off"), 12.0)
-        pump(0.5)
-        data.update({
-            "notices": list(shown),
-            # Only the direct systemctl calls: the systemd-run argument list
-            # carries "enable --now ztraytest.timer" too, so a filter that did not
-            # separate them would read the failed arming as the repair.
-            "enable_after": [x for x in call_lines()
-                             if x.startswith("systemctl")
-                             and "enable --now" in x],
-            "pause_label": tray.item_pause.get_label() or "",
-            "stamp": os.path.exists(stamp),
-            "auto_seen": getattr(tray, "auto_seen", None),
-        })
+        find_at(tray.menu, "30 minutes").activate()
+        said = wait_for(lambda: bool(shown), 8.0)
+        pump(0.6)
+        data = {"said": said, "notices": list(shown),
+                "stamp_left": os.path.exists(stamp),
+                "pause_label": tray.item_pause.get_label() or ""}
     finally:
+        os.chmod(cache, mode)
         MODULE.Notify = real_notify
     return data
 
@@ -4368,7 +4356,7 @@ SCENARIOS = {
     "excluded-name": scenario_excluded_name,
     "folder-delete": scenario_folder_delete,
     "pause-recovery": scenario_pause_recovery,
-    "pause-arm-failed": scenario_pause_arm_failed,
+    "pause-write-failed": scenario_pause_write_failed,
     "openapp": scenario_openapp,
     "open-path-tool-missing": scenario_open_path_tool_missing,
     "lock-hold": scenario_lock_hold,
@@ -4731,66 +4719,76 @@ fi
 
 title "Pausing for a while"
 if run_driver pause-durations; then
-    check "30 minutes schedules a 30min resume" \
-        json_expr "d['pause_30'] and any('systemd-run --user --on-active=30min --unit=rclone-onedrive-tray-resume systemctl --user enable --now ztraytest.timer ztraytest-watch.service' in x for x in d['calls'])"
-    check "2 hours schedules a 120min resume" \
-        json_expr "d['pause_120'] and any('--on-active=120min' in x for x in d['calls'])"
-    check "8 hours schedules a 480min resume" \
-        json_expr "d['pause_480'] and any('--on-active=480min' in x for x in d['calls'])"
-    check "pausing stops the timer and the watcher" \
-        json_expr "any('disable ztraytest.timer ztraytest-watch.service' in x for x in d['calls'])"
-    check "pausing writes the resume stamp" \
-        json_expr "d['stamp_was_written']"
-    check "Resume now stops the transient unit" \
-        json_expr "d['resumed'] and any('stop rclone-onedrive-tray-resume.timer rclone-onedrive-tray-resume.service' in x for x in d['calls'])"
-    check "Resume now enables the timer and the watcher" \
-        json_expr "any(x == 'systemctl --user enable --now ztraytest.timer' for x in d['calls']) and any(x == 'systemctl --user enable --now ztraytest-watch.service' for x in d['calls'])"
-    check "Resume now clears the stamp" \
-        json_expr "d['stamp_cleared']"
-    check "the resume menu entry is the one that was activated" \
-        json_expr "'Resume now' in d['menu_labels']"
+    check "30 minutes is written as 30 minutes from now" json_py '
+due = d["due_30"]
+if not d["pause_30"] or due is None:
+    print("pause_30=%r due=%r" % (d["pause_30"], due))
+    raise SystemExit(1)
+'
+    check "2 hours and 8 hours are written as their own times" json_py '
+for minutes in (120, 480):
+    if not d["pause_%d" % minutes]:
+        print("pause_%d did not land: due=%r"
+              % (minutes, d["due_%d" % minutes]))
+        raise SystemExit(1)
+    if not d["due_120"] < d["due_480"]:
+        print("2 hours is due after 8 hours: %r then %r"
+              % (d["due_120"], d["due_480"]))
+        raise SystemExit(1)
+'
+    check "the stamp is what a pause is, and no unit is touched" json_py '
+if not d["stamp_was_written"]:
+    print("no stamp was written")
+    raise SystemExit(1)
+if d["unit_calls_before_resume"]:
+    print("pausing touched systemd: %r" % (d["unit_calls_before_resume"],))
+    raise SystemExit(1)
+'
+    check "Resume now clears the stamp and touches no unit either" json_py '
+if not d["stamp_cleared"] or not d["resumed"]:
+    print("stamp_cleared=%r resumed=%r" % (d["stamp_cleared"], d["resumed"]))
+    raise SystemExit(1)
+if d["unit_calls_after_resume"]:
+    print("resuming touched systemd: %r" % (d["unit_calls_after_resume"],))
+    raise SystemExit(1)
+'
+    check "the resume menu entry is the one that was activated"         json_expr "'Resume now' in d['menu_labels']"
 fi
 
-title "A pause whose resume timer did not survive"
-# The timer that ends a pause is a transient systemd unit, so it lives only in
-# the running user manager: a reboot during the pause leaves both units disabled
-# with nothing to bring them back, while the stamp in the cache still holds a
-# future time. The stamp alone is not proof of anything, so each case here asks
-# what the tray does about it.
-if run_driver pause-recovery TRAY_PAUSE_CASE=gone; then
-    check "a stamp with no timer behind it is re-armed" json_py '
-armed = [x for x in d["rearmed"]
-         if "rclone-onedrive-tray-resume" in x and "enable --now" in x]
-if not armed:
-    print("nothing was scheduled for a pause still in the future: %r"
-          % (d["rearmed"],))
+title "A pause stamp found at startup"
+# The stamp is the pause now, so a restart has nothing to rearm. What it can find
+# is a pause left by a version that disabled the units and armed a transient
+# timer: the timer is gone, the units are still disabled, and the stamp still
+# holds a due time. That is the shape to repair, and it is repaired by putting the
+# units back rather than by scheduling anything.
+if run_driver pause-recovery TRAY_PAUSE_CASE=old; then
+    check "a pause left by an older version gets its units back" json_py '
+if not any("enable --now ztraytest.timer" in x for x in d["enabled"]):
+    print("the units stayed disabled with nothing to end the pause: %r"
+          % (d["enabled"],))
+    raise SystemExit(1)
+if d["scheduled"]:
+    print("a resume timer was scheduled, which the new pause never does: %r"
+          % (d["scheduled"],))
     raise SystemExit(1)
 '
-    check "the re-armed timer covers what is left of the pause" json_py '
-import re
-armed = [x for x in d["rearmed"] if "rclone-onedrive-tray-resume" in x]
-left = [int(m.group(1))
-        for m in (re.search(r"--on-active=(\d+)s", x) for x in armed) if m]
-if not left or not all(0 < n <= 900 for n in left):
-    print("scheduled %r seconds for a pause with 900 left" % (left,))
-    raise SystemExit(1)
-'
-    check "and the pause the stamp claims is kept, not dropped" json_py '
-if not d["stamp_left"] or not d["due_in_future"]:
-    print("stamp_left=%r due_in_future=%r label=%r"
-          % (d["stamp_left"], d["due_in_future"], d["pause_label"]))
+    check "and the pause it claims is kept, stamp and all" json_py '
+if not d["stamp_left"] or not d["due_in_future"] or d["auto_seen"] != "paused":
+    print("stamp_left=%r due_in_future=%r auto_seen=%r label=%r"
+          % (d["stamp_left"], d["due_in_future"], d["auto_seen"],
+             d["pause_label"]))
     raise SystemExit(1)
 '
 fi
 
-if run_driver pause-recovery TRAY_PAUSE_CASE=alive; then
-    check "a stamp whose timer is still loaded is left alone" json_py '
-if d["rearmed"]:
-    print("a second resume timer was scheduled over a live one: %r"
-          % (d["rearmed"],))
+if run_driver pause-recovery TRAY_PAUSE_CASE=new; then
+    check "a pause written by this version needs nothing done to it" json_py '
+if d["enabled"] or d["disabled"] or d["scheduled"]:
+    print("the units were touched for a pause that never touched them: %r"
+          % (d["enabled"] + d["disabled"] + d["scheduled"],))
     raise SystemExit(1)
-if not d["stamp_left"]:
-    print("the stamp went away although its timer is loaded")
+if not d["stamp_left"] or d["auto_seen"] != "paused":
+    print("stamp_left=%r auto_seen=%r" % (d["stamp_left"], d["auto_seen"]))
     raise SystemExit(1)
 '
 fi
@@ -4806,70 +4804,21 @@ if "paused" in d["pause_label"].lower():
 '
 fi
 
-: > "$WORK/calls/systemd-run-fail"
-if run_driver pause-recovery TRAY_PAUSE_CASE=fail; then
-    check "a resume that cannot be restored ends the pause and says so" json_py '
-if d["stamp_left"]:
-    print("the stamp survived a pause that cannot be kept")
+if run_driver pause-write-failed; then
+    check "a pause that cannot be written is reported, not shown" json_py '
+if not d["said"]:
+    print("nothing was said about a pause that failed")
     raise SystemExit(1)
-if not any("enable --now ztraytest.timer" in x for x in d["enabled_after"]):
-    print("the units were left disabled with nothing to end the pause: %r"
-          % (d["enabled_after"],))
-    raise SystemExit(1)
-if not any("resume" in body for body in d["notices"]):
-    print("nothing was said about it: %r" % (d["notices"],))
-    raise SystemExit(1)
-if "paused" in d["pause_label"].lower():
-    print("the menu still claims a pause: %r" % (d["pause_label"],))
-    raise SystemExit(1)
-'
-    # The units were just turned back on by the tray itself, and the enabled
-    # answer is cached to save a fork per tick. The poll that follows has to ask
-    # again: reusing the "disabled" from before the recovery says automatic sync
-    # is off, which is the opposite of what the recovery just did.
-    check "the poll after the recovery believes the units are on again" json_py '
-if not d["settled"]:
-    print("the poll never answered: auto_seen=%r" % (d["auto_seen_after"],))
-    raise SystemExit(1)
-if d["auto_seen_after"] != "on":
-    print("the tray reports %r with the label %r, though the units were enabled"
-          % (d["auto_seen_after"], d["pause_label_after"]))
-    raise SystemExit(1)
-'
-fi
-
-title "A pause whose resume timer cannot be armed at all"
-# The recovery path's fault, without a reboot first: pause_for() stopped and
-# disabled the units and only then asked systemd-run for the resume. When that
-# call failed nothing was turned back on, so sync was off, no stamp was written,
-# and the menu said "Automatic sync is off" with only a manual Resume now to
-# undo it. One fault has one outcome, so the repair the recovery path runs runs
-# here too. The systemd-run stub is still made to fail by the marker above.
-if run_driver pause-arm-failed; then
-    check "a failed pause leaves the units enabled again" json_py '
-if not any("enable --now ztraytest.timer" in x for x in d["enable_after"]):
-    print("the units were left disabled with nothing to end the pause: %r"
-          % (d["enable_after"],))
-    raise SystemExit(1)
-'
-    check "and the message says automatic sync is on again" json_py '
-if not d["said_something"]:
-    print("the failed pause said nothing at all")
-    raise SystemExit(1)
-if not any("on again" in body for body in d["notices"]):
-    print("nothing said sync was back on: %r" % (d["notices"],))
+if not any("Could not pause" in body for body in d["notices"]):
+    print("the notice does not name the failure: %r" % (d["notices"],))
     raise SystemExit(1)
 '
     check "and no pause is claimed that nothing would end" json_py '
-if d["stamp"]:
-    print("a resume stamp was written for a pause with no timer behind it")
+if d["stamp_left"]:
+    print("a stamp was written for a pause that failed")
     raise SystemExit(1)
 if "paused" in d["pause_label"].lower():
     print("the menu claims a pause: %r" % (d["pause_label"],))
-    raise SystemExit(1)
-if not d["settled"] or d["auto_seen"] != "on":
-    print("auto_seen=%r, so the tray reports sync as off after enabling it again"
-          % (d["auto_seen"],))
     raise SystemExit(1)
 '
 fi
@@ -6292,7 +6241,7 @@ for value, want in (("zh_CN.UTF-8", "zh"), ("ZH", "zh"), ("fr", ""), ("", "")):
 if "：" not in d["resume_zh"] or ": " in d["resume_zh"]:
     print("the sentence carries the wrong colon: %r" % (d["resume_zh"],))
     raise SystemExit(1)
-if "systemd-run failed" not in d["resume_zh"]:
+if "the stamp failed" not in d["resume_zh"]:
     print("the reason is missing: %r" % (d["resume_zh"],))
     raise SystemExit(1)
 '

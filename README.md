@@ -86,10 +86,11 @@ The paragraph above is the exception: a `--resync` replaces instead of renaming.
 
 Every run ends with one machine-readable line, `ONEDRIVE_RESULT v=1
 state=<synced|error|stopped> tag=<tag|none> when=HH:MM msg=<sentence>`, and that line is
-what the tray reads for the icon, the time and the reason. Two runs carry no line of
+what the tray reads for the icon, the time and the reason. Three runs carry no line of
 their own: one that found another sync already holding the lock, which leaves the
-verdict to that run, and one that stopped before the log could be opened at all, which
-has nowhere to write it. docs/TROUBLESHOOTING.md lists both. The
+verdict to that run; one that stopped before the log could be opened at all, which has
+nowhere to write it; and one that ran while automatic sync was paused, which did
+nothing there is to report. docs/TROUBLESHOOTING.md lists all three. The
 English around it is what older versions wrote, and it is still what the tray and the
 doctor read when the line is not there. The log rotates at 5 MB, and the tray reads only the
 last 64 KB of it. A sync every five minutes
