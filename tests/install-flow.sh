@@ -646,6 +646,77 @@ check "systemd accepts $UNIT.timer" \
 check "systemd accepts $UNIT-watch.service" \
     systemd-analyze --user verify "$UNIT_DIR/$UNIT-watch.service"
 
+# The timer's interval comes from INTERVAL_MIN through a unit template, and
+# systemd's answer to a value it cannot parse is a warning in the journal and a
+# dropped directive: dropping OnUnitInactiveSec leaves OnActiveSec=2min as the
+# timer's only trigger, which fires once and then stays disabled, so a machine with
+# INTERVAL_MIN="abc" syncs once per login while the timer still reports active. A
+# zero is parsed and means "as soon as the last run finished", which is a loop.
+title "an INTERVAL_MIN systemd cannot use"
+BAD_INTERVAL_HOME="$WORK/bad-interval"
+for bad in abc 0 -5 5.5; do
+    rm -rf "$BAD_INTERVAL_HOME"
+    mkdir -p "$BAD_INTERVAL_HOME/.config/rclone-onedrive-tray"
+    cat > "$BAD_INTERVAL_HOME/.config/rclone-onedrive-tray/config" <<EOF
+REMOTE="$REMOTE"
+LOCAL="$BAD_INTERVAL_HOME/OneDrive"
+UNIT_NAME="zz-interval-probe"
+INTERVAL_MIN="$bad"
+WATCH="0"
+EOF
+    BAD_OUT="$(env HOME="$BAD_INTERVAL_HOME" XDG_CONFIG_HOME="$BAD_INTERVAL_HOME/.config" \
+        XDG_CACHE_HOME="$BAD_INTERVAL_HOME/.cache" XDG_DATA_HOME="$BAD_INTERVAL_HOME/.data" \
+        bash "$SRC_DIR/install.sh" --prefix "$BAD_INTERVAL_HOME/.local" --no-start 2>&1)"
+    BAD_UNIT="$BAD_INTERVAL_HOME/.config/systemd/user/zz-interval-probe.timer"
+    if grep -qxF 'OnUnitInactiveSec=5min' "$BAD_UNIT" &&
+            grep -qE 'is not a whole number of minutes|must be at least 1' <<<"$BAD_OUT"; then
+        ok "INTERVAL_MIN=$bad is refused and 5 takes its place"
+    else
+        bad "INTERVAL_MIN=$bad: unit says '$(grep -m1 OnUnitInactiveSec "$BAD_UNIT" 2>/dev/null)', install said '$(grep -m1 INTERVAL_MIN <<<"$BAD_OUT")'"
+    fi
+done
+
+# A drop-in is what the tray's settings dialog writes, and the comparison used to
+# understand one spelling of the value: `OnUnitInactiveSec=30` is thirty seconds to
+# systemd and matched nothing, so it stayed and outranked INTERVAL_MIN in silence.
+DROPIN_ALT="$WORK/dropin-alt"
+rm -rf "$DROPIN_ALT"
+mkdir -p "$DROPIN_ALT/.config/rclone-onedrive-tray" \
+         "$DROPIN_ALT/.config/systemd/user/zz-alt-probe.timer.d"
+cat > "$DROPIN_ALT/.config/rclone-onedrive-tray/config" <<EOF
+REMOTE="$REMOTE"
+LOCAL="$DROPIN_ALT/OneDrive"
+UNIT_NAME="zz-alt-probe"
+INTERVAL_MIN="5"
+WATCH="0"
+EOF
+printf '[Timer]\nOnUnitInactiveSec=30\n' \
+    > "$DROPIN_ALT/.config/systemd/user/zz-alt-probe.timer.d/interval.conf"
+ALT_OUT="$(env HOME="$DROPIN_ALT" XDG_CONFIG_HOME="$DROPIN_ALT/.config" \
+    XDG_CACHE_HOME="$DROPIN_ALT/.cache" XDG_DATA_HOME="$DROPIN_ALT/.data" \
+    bash "$SRC_DIR/install.sh" --prefix "$DROPIN_ALT/.local" --no-start 2>&1)"
+if grep -qxF 'OnUnitInactiveSec=5min' \
+        "$DROPIN_ALT/.config/systemd/user/zz-alt-probe.timer.d/interval.conf" &&
+        grep -qF 'timer drop-in said "30"' <<<"$ALT_OUT"; then
+    ok "a drop-in in another spelling is brought back in line and quoted as written"
+else
+    bad "drop-in: $(tr '\n' ' ' < "$DROPIN_ALT/.config/systemd/user/zz-alt-probe.timer.d/interval.conf" 2>/dev/null)"
+fi
+
+# A sync in flight when the manager stops is stopped with SIGTERM and killed when
+# the stop times out: the manager's default for a oneshot is 90 seconds, which a
+# bisync of a large tree can exceed. The cap is explicit so the number is a
+# decision, and the start cap has to stay as well, because it is what the unit adds
+# (a oneshot has no start timeout of its own) and a hung bisync would hold the next
+# tick off forever.
+title "the sync service's own timeouts"
+if grep -qxF 'TimeoutStopSec=300' "$UNIT_DIR/$UNIT.service" &&
+        grep -qxF 'TimeoutStartSec=1800' "$UNIT_DIR/$UNIT.service"; then
+    ok "the sync unit caps both how long it may start and how long it may stop"
+else
+    bad "the sync unit's timeouts: $(grep -E '^Timeout' "$UNIT_DIR/$UNIT.service" | tr '\n' ' ')"
+fi
+
 # The watcher is the project's only Restart=always, and it exits 1 on purpose
 # after three permanent inotifywait failures. Without a start limit of its own the
 # cycle is the three failures plus RestartSec, about nine seconds, so one
@@ -3507,6 +3578,21 @@ check "and the install went through sudo" \
     grep -qF -- "install -m 0755 -o root -g root" "$NM_SUDO_CALLS"
 check "and sudo was handed the hook path the installer named" \
     grep -qF -- " $NM_HOOK" "$NM_SUDO_CALLS"
+# The hook starts the sync service when an interface comes up, and the timer is the
+# switch for automatic syncing: a pause is the tray having stopped and disabled it
+# on purpose, so a hook that starts the service regardless ran a sync during every
+# pause and on every install with automatic sync switched off. The gate has to come
+# before the start.
+check "and the hook asks the timer before it starts anything" \
+    grep -qF -- "is-enabled --quiet" "$NM_HOOK"
+check "and the name it asks about is the configured one" \
+    grep -qF -- "$NM_UNIT.timer" "$NM_HOOK"
+if [ "$(grep -n 'is-enabled --quiet' "$NM_HOOK" | head -1 | cut -d: -f1)" \
+        -lt "$(grep -n 'start --no-block' "$NM_HOOK" | head -1 | cut -d: -f1)" ]; then
+    ok "and it asks before it starts, not after"
+else
+    bad "the hook starts the service before it checks the timer"
+fi
 # The prefix is not ~/.local here, which is the branch that warns the hook is
 # machine-wide and starts a unit outside the default prefix.
 check "and a prefix outside ~/.local is called out as machine-wide" \

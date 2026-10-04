@@ -316,6 +316,23 @@ mkdir -p "$UNIT_DIR"
 # the NetworkManager hook cannot be reached with a name systemd would reject.
 INTERVAL_MIN="$(config_value INTERVAL_MIN)"
 INTERVAL_MIN="${INTERVAL_MIN:-5}"
+# The value goes straight into OnUnitInactiveSec=%INTERVAL%min, and systemd's
+# answer to a value it cannot parse is a warning in the journal and a dropped
+# directive. Dropping it leaves OnActiveSec=2min as the timer's only trigger,
+# which fires once per activation and is then disabled: exactly one sync per
+# login, with the timer still reported as active. A zero is parsed happily and
+# means "as soon as the last run finished", which is a sync loop. The tray
+# refuses an interval under a minute and setup.sh --interval refuses anything
+# that is not a whole number; this is the third entry point into the same file,
+# and a hand edit or a value carried over from an old config reaches it.
+case "$INTERVAL_MIN" in
+    ''|*[!0-9]*)
+        warn "INTERVAL_MIN in $CONFIG_DIR/config is not a whole number of minutes (\"$INTERVAL_MIN\"); using 5"
+        INTERVAL_MIN=5 ;;
+    0)
+        warn "INTERVAL_MIN in $CONFIG_DIR/config must be at least 1; using 5"
+        INTERVAL_MIN=5 ;;
+esac
 
 sed -e "s|%SYNC_SCRIPT%|$(sed_replacement "$(systemd_exec_arg "$BIN_DIR/onedrive-sync")")|g" \
     "$SRC_DIR/systemd/onedrive-sync.service.in" > "$UNIT_DIR/$UNIT_NAME.service"
@@ -352,14 +369,24 @@ chmod 0644 "$UNIT_DIR/$UNIT_NAME-watch.service"
 # config edit. The config is the owner here: a drop-in that disagrees is brought
 # back in line, and the run says which value is now in force.
 TIMER_DROPIN="$UNIT_DIR/$UNIT_NAME.timer.d/interval.conf"
+# The comparison reads the whole value, not just a <digits>min spelling.
+# systemd accepts "30" (thirty seconds), "2h", "90s" and " 5min " alike, and the
+# old pattern matched none of those, so a hand-written drop-in kept overriding
+# INTERVAL_MIN with nothing said: OnUnitInactiveSec=30 is a sync every thirty
+# seconds. Anything that is not exactly the config's spelling is rewritten, and
+# what the drop-in said is printed as it was written rather than with "min"
+# glued on.
 if [ -f "$TIMER_DROPIN" ]; then
     dropin_interval="$(sed -n \
-        's/^[[:space:]]*OnUnitInactiveSec=\([0-9][0-9]*\)min.*/\1/p' \
+        's/^[[:space:]]*OnUnitInactiveSec=\(.*\)$/\1/p' \
         "$TIMER_DROPIN" | tail -1)"
-    if [ -n "$dropin_interval" ] && [ "$dropin_interval" != "$INTERVAL_MIN" ]; then
+    # Trailing whitespace and a trailing comment are not part of the value.
+    dropin_interval="${dropin_interval%%#*}"
+    dropin_interval="${dropin_interval%"${dropin_interval##*[![:space:]]}"}"
+    if [ -n "$dropin_interval" ] && [ "$dropin_interval" != "${INTERVAL_MIN}min" ]; then
         sed -i "s|^[[:space:]]*OnUnitInactiveSec=.*|OnUnitInactiveSec=${INTERVAL_MIN}min|" \
             "$TIMER_DROPIN"
-        say "timer drop-in said ${dropin_interval}min; it now says ${INTERVAL_MIN}min, so INTERVAL_MIN in $CONFIG_DIR/config is what runs"
+        say "timer drop-in said \"${dropin_interval}\"; it now says ${INTERVAL_MIN}min, so INTERVAL_MIN in $CONFIG_DIR/config is what runs"
     elif [ -n "$dropin_interval" ]; then
         say "timer drop-in and INTERVAL_MIN agree on ${INTERVAL_MIN}min"
     fi

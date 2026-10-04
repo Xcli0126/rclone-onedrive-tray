@@ -4,7 +4,17 @@ Documentation=https://rclone.org/bisync/
 
 [Service]
 Type=oneshot
-# systemd's default TimeoutStartSec for Type=oneshot is 90s, which would kill a
-# first full sync half way through. Give it room.
+# An earlier version of this comment had the manager's default the wrong way round:
+# for Type=oneshot there is no start timeout at all, so this directive adds a cap
+# rather than raising one. The cap is the point, because the timer waits for the
+# service to become inactive before it counts the interval down, and a bisync that
+# hangs would hold the next tick off forever.
 TimeoutStartSec=1800
+# A sync in flight when the manager stops - a logout with lingering off, a
+# shutdown, a reboot - is stopped with SIGTERM and killed outright when the stop
+# times out. The default for a oneshot is 90 seconds, which a bisync of a large
+# tree can exceed; rclone handles SIGTERM by ending the run and writing its
+# listings, so this is what gives it time to finish, and it is also time a
+# shutdown may spend waiting for this unit.
+TimeoutStopSec=300
 ExecStart="%SYNC_SCRIPT%"

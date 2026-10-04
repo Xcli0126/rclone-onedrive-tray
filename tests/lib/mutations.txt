@@ -313,3 +313,9 @@ install-config-reader-local	install.sh	s|^. "$SRC_DIR/lib/config.sh"$|:|	install
 doctor-tag-other-not-a-failure	bin/onedrive-doctor	s|            if \[ "\${marker_state:-}" = stopped \]; then|            if false; then|	install-flow
 doctor-log-grep-binary	bin/onedrive-doctor	s|grep -a -iE "$ALL_HINTS"|grep -iE "$ALL_HINTS"|	install-flow
 tray-marker-unanchored	bin/onedrive-tray	s|    r"^(?:\\d{4}/\\d{2}/\\d{2} \\d{2}:\\d{2}:\\d{2} )?"|    r"(?:\\d{4}/\\d{2}/\\d{2} \\d{2}:\\d{2}:\\d{2} )?"|	tray
+# round eighteen: the systemd side. An interval systemd cannot parse, a drop-in
+# spelling it ignores, a hook that syncs during a pause, a stop timeout inherited.
+install-interval-not-validated	install.sh	s|^case "\$INTERVAL_MIN" in$|case "" in|	install-flow
+install-dropin-one-spelling	install.sh	s|if \[ -n "$dropin_interval" \] \&\& \[ "$dropin_interval" != "${INTERVAL_MIN}min" \]; then|if false; then|	install-flow
+hook-no-timer-gate	extras/networkmanager-dispatcher.sh	s|systemctl --user is-enabled --quiet "\$TIMER" \|\| continue|true|	install-flow
+unit-no-stop-timeout	systemd/onedrive-sync.service.in	s|^TimeoutStopSec=300$||	install-flow

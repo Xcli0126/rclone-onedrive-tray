@@ -36,6 +36,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `INTERVAL_MIN` reached the unit template unvalidated, and systemd's answer to a
+  value it cannot parse is a warning in the journal and a dropped directive:
+  dropping `OnUnitInactiveSec` leaves `OnActiveSec=2min` as the timer's only
+  trigger, which fires once per activation and stays disabled, so a config holding
+  `INTERVAL_MIN="abc"` synced once per login while the timer still reported active;
+  `0` is parsed and means "as soon as the last run finished", which is a sync loop.
+  `install.sh` refuses anything that is not a whole number of minutes, or is zero,
+  and says what it used instead.
+- `install.sh` compared the timer drop-in against one spelling of the value, so
+  `OnUnitInactiveSec=30` (thirty seconds to systemd) matched nothing and stayed
+  there, outranking `INTERVAL_MIN` in silence. It reads the whole value now, prints
+  it as it was written, and brings it back in line with the config.
+- The NetworkManager hook started the sync service on any interface coming up
+  without asking the timer, and the timer is the switch for automatic syncing: a
+  pause is the tray having stopped and disabled it on purpose, so every pause and
+  every install with automatic sync off ran a sync on the next wifi, dock or VPN
+  event. The hook asks `is-enabled` first and does nothing when the answer is no.
+- The sync service inherited the manager's 90 second stop timeout, which a bisync of
+  a large tree can exceed: a logout with lingering off or a shutdown stopped it with
+  SIGTERM and killed it outright 90 seconds later. `TimeoutStopSec=300` gives rclone
+  the time it needs to end the run and write its listings, and says so where the
+  number is. The comment above `TimeoutStartSec` had the manager's default backwards
+  (a oneshot has no start timeout of its own, so the directive adds a cap rather
+  than raising one) in the unit and in the wrapper's header.
 - The doctor's log check could not read a log with a byte that is not text in it.
   GNU grep calls such a file binary and prints nothing, so one stray byte turned
   every check below into "nothing has ever run through the wrapper" with exit 0,

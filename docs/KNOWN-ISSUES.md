@@ -14,39 +14,76 @@ round uses a different model with a different lens, which is how the entries her
 were found in the first place.
 
 ## Open
-### The pause can outlive the tray, and four other systemd problems
+### The pause is still the write-then-hope kind
 
-Round sixteen's systemd reviewer read the three units, the interval drop-in, the
-transient pause timer and the NetworkManager hook against upstream systemd 259 and
-this machine's man pages. Ten findings came out. Three of them have a fix in that
-reviewer's patch and are listed here with the rest because none is applied yet:
-validating `INTERVAL_MIN`, comparing the whole drop-in value rather than one
-spelling of it, and making the hook ask the timer before it starts a sync.
+Round sixteen's systemd reviewer read the units, the interval drop-in, the transient
+pause timer and the NetworkManager hook against systemd 259. Four of the ten
+findings are fixed and in the changelog: `INTERVAL_MIN` is validated, the drop-in is
+compared as a whole value, the hook asks the timer before it starts a sync, and the
+sync service's stop timeout is explicit. What is left is the one that can leave a
+machine doing nothing at all:
 
-- A pause is stored as "the units are disabled" plus a transient `systemd-run`
-  timer, and only the tray can undo it. With the tray not running (no GTK, the
-  autostart box unticked, a headless machine) a reboot during a pause leaves nothing
-  syncing, forever, and a disabled timer looks like a deliberate off. In the other
-  direction `install.sh` enables both units on every run, so `git pull &&
-  ./install.sh` silently ends a pause. The stamp the tray writes is the only record
-  of which it was, and the poll deletes that stamp when `is-enabled` answers
-  something the code does not know.
-- `INTERVAL_MIN` reaches `OnUnitInactiveSec` unvalidated. A value systemd cannot
-  parse is dropped with a warning and leaves `OnActiveSec=2min` as the timer's only
-  trigger, which fires once per login; `0` asks for `0min`, which is past due the
-  moment it is armed, so the sync re-triggers after every run.
-- The NetworkManager hook starts the sync service on any link-up without asking the
-  timer, so a paused install syncs on every wifi, dock or VPN event.
-- The sync service sets no `TimeoutStopSec`, so the manager's 90 second default
-  applies to a `oneshot` bisync that can run longer: a shutdown or a logout with
-  lingering off can SIGTERM it and SIGKILL it 90 seconds later. The comment in the
-  unit template has the premise backwards, because the manager's default for
-  `Type=oneshot` is no timeout at all, so the directive adds a cap rather than
-  restoring one.
+- A pause is "the units are disabled" plus a transient `systemd-run` timer that
+  re-enables them. Transient units do not survive a reboot, so a reboot during a
+  pause leaves the units disabled with nothing to bring them back, and the only
+  repair is `recover_pause()`, which runs from the tray's constructor. No tray (the
+  autostart box unticked, no GTK, a headless machine) therefore means nothing syncs
+  again, forever, and a disabled timer looks exactly like a deliberate off. The
+  stamp the tray writes is the only record of which it was, and the poll deletes it
+  when `is-enabled` answers something the code does not know.
+- `install.sh` enables both units on every run, so `git pull && ./install.sh` ends a
+  pause without saying so.
 - Pause and resume re-enable the watcher without reading `WATCH`, so a user who had
-  realtime sync off gets it back after any pause, and the resume timer is recognised
-  by matching the English `Running timer` in `systemd-run`'s stderr, which is the
-  locale-dependent match this project removed from the log readers.
+  realtime sync off gets it back after any pause.
+- The resume timer is recognised by matching the English `Running timer` in
+  `systemd-run`'s stderr, which is the locale-dependent match this project removed
+  from the log readers.
+
+The shape the fix should take, and the reason it is a round of its own: a pause does
+not need the units touched at all. The tray already writes an absolute expiry to
+`paused-until`; if `onedrive-sync` honoured that stamp by exiting without syncing,
+then a pause would survive a reboot, need no tray to end, be visible to the doctor,
+and the transient timer, the `is-enabled` probe, the `Running timer` match and the
+watcher question would all disappear rather than being patched one by one. It is a
+change to what a pause means, so it wants its own failing-first cases for the
+wrapper, the tray and the doctor.
+
+### What the loop's own fixes left behind
+
+Round seventeen's meta-review looked for the harm a long series of local fixes does,
+and found it. Four of its findings are the loop's own, and they are listed here
+rather than fixed because each needs its own round: the reviewer's patch covers the
+first three.
+
+- The fifo and directory guards the log work added stopped one file short. The
+  doctor reads `EXCLUDE_FOLDERS_FILE` with a bare `grep` and the tray with a bare
+  `open()` on the GTK main loop: a fifo there hangs the check with no output and
+  freezes the icon, which is the exact freeze the same commit guarded `LOG` against.
+- The doctor's `logfile` row re-decides `LOG` on its own and calls a directory
+  writable ("4096 of 5242880 bytes", exit 0) while the wrapper refuses that same
+  path with "Is a directory". The user's diagnostic is the one that lies.
+- `setup.sh` is a fourth reader of the config format, and it still has both faults
+  that rounds fourteen and sixteen removed from `lib/config.sh`: a carried value
+  loses everything after an escaped quote (`LOG="/home/me/My \"Sync\" folder"` comes
+  back as `/home/me/My \`) and `BW_LIMIT=abc#def` comes back as `abc`. Two pages
+  claim the count is three, which was wrong when it was written.
+- A case added by the round that fixed the tray's cached log read cannot fail: the
+  cache key is size and mtime, and the chmod the case uses moves only the ctime, so
+  the branch under test is never entered and reverting the fix leaves the suite
+  green. The commit that added it says the signature includes the ctime, which is
+  false. The case needs a failure the stat can see, or the fix needs a case that can
+  reach it.
+- `tests/lib/mutate.sh` cannot exit 0 on the shipped table: the `check-name-limit`
+  row survives (the branch is unreachable on a local filesystem, which the ledger
+  already says) and the harness fails a run with any survivor. Every full sweep has
+  therefore been red for a reason that is known and written down, and the harness's
+  own contract needs to say so.
+- Two guards for one thing: `_local_delete_path` re-checks the filesystem root after
+  `local_path_problem` has already refused it, and the case that covers it
+  monkeypatches the first guard away to reach the second. One of the two is dead,
+  and the mutation row pins the dead one.
+- Two tray cases pin source identifiers rather than behaviour: renaming the
+  module-level `STRINGS` fails five cases, one of them unrelated to languages.
 
 ### The panel's state is only in pixels
 

@@ -13,6 +13,7 @@
 # $1 is the interface name (empty for connectivity-change), $2 is the action.
 
 UNIT="%UNIT_NAME%.service"
+TIMER="%UNIT_NAME%.timer"
 
 case "$2" in
     up|connectivity-change|dhcp4-change|dhcp6-change) ;;
@@ -37,6 +38,15 @@ for runtime in /run/user/*; do
 
     # --no-block matters: NetworkManager kills dispatcher scripts that overrun,
     # and a plain `systemctl start` on a oneshot unit waits for the whole sync.
+    #
+    # The timer is the switch for automatic syncing, and a pause is the tray
+    # having stopped and disabled it on purpose. Starting the service here
+    # ignored that switch: any interface coming up during a pause, or with
+    # automatic sync switched off, ran a sync anyway. Only a timer that is still
+    # enabled is a reason to catch up.
+    runuser -u "$user" -- env XDG_RUNTIME_DIR="$runtime" \
+        systemctl --user is-enabled --quiet "$TIMER" || continue
+
     runuser -u "$user" -- env XDG_RUNTIME_DIR="$runtime" \
         systemctl --user start --no-block "$UNIT" >/dev/null 2>&1 || true
 done

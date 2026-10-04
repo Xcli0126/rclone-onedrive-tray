@@ -7,8 +7,9 @@
 #     interrupted run (suspend, power loss, network drop) leaves it demanding a
 #     manual `--resync` forever. This wrapper enables the modern self-healing
 #     flags and adds a few safety nets of its own.
-#   * systemd's default TimeoutStartSec for Type=oneshot is 90s, which kills a
-#     long first-time sync half way through.
+#   * the sync service caps its own start at 30 minutes (a oneshot has no start
+#     timeout of its own, so the cap is what the unit adds), and a first full
+#     sync of a large tree can run longer than that.
 #   * A sync interrupted by suspend leaves a lock file that blocks the next run.
 #
 # Usage:
