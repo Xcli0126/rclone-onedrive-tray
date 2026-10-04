@@ -36,6 +36,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The pause stamp had three readers with three grammars. The tray's `_pause_due()`
+  was given digits and a length rule; `_paused_until()`, which the menu label reads,
+  kept the old `int()` and `time.localtime()`, so an eleven to nineteen digit stamp
+  raised `OverflowError` out of a GTK idle callback on every poll and the pause row
+  never painted; the tray's rule stopped at nineteen digits where the shells' stops
+  at ten, so a twenty digit stamp had the wrapper and the doctor reporting a pause
+  the tray reported as automatic sync on; and the tray stripped whitespace the shells
+  do not, so `" 1791117608 "` was a pause in the menu and a delete-and-sync for the
+  wrapper. All three read the file the way `$(cat ...)` does now - only a trailing
+  newline goes - and a value longer than a clock can hold is answered by length so
+  that no reader can overflow on it.
+- `resume_now()` and the pause recovery indexed `systemctl is-enabled`'s first output
+  line, which is empty when there is no user bus: the stamp was removed, the thread
+  died with `IndexError` and the click said nothing at all. The empty answer is
+  classified where `unit_states()` already classified it, and the doctor no longer
+  warns that reading the log would block when the log is a character device, which is
+  the one non-regular file `onedrive-sync` handles.
 - The tray's state lived only in pixels. The panel shows a 22-pixel icon with a
   badge, the indicator is not a `Gtk.Widget` and so has no accessible object of its
   own, its title was null in every state, and its icon description was the constant

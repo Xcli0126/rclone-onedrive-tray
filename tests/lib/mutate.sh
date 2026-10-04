@@ -90,11 +90,14 @@ fi
 # without a case. Without this list the harness could never exit 0, and every full
 # sweep would be red for a reason that is already recorded.
 KNOWN_SURVIVORS=" check-name-limit tray-setunits-invalidate "
-# The second is a decision rather than an unreachable branch: the generation bump
-# inside _set_units is read by the poll after a resume, and the pause scenarios
-# assert the label the poll ends up with, not the generation that made it re-read.
-# Removing the row was the alternative; keeping it with this note is what says the
-# behaviour is not separately observable rather than unnoticed.
+# The second is a decision rather than an unreachable branch, and the reason is
+# narrower than it first read. The generation bump inside _set_units() is not
+# unobservable: a case shaped like stale-state() but calling _set_units() with an
+# answer in flight applies that answer without the bump and the menu row becomes
+# "Automatic sync is off" (measured, both trees). What the suite lacks is that
+# ordering - no pause scenario straddles a _set_units() call - and the alternative
+# was a case rather than the row. Removing the row would drop the mutation; keeping
+# it here with this note says the coverage is missing rather than unnoticed.
 survived=0
 known=0
 

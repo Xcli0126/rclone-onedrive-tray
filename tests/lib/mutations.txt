@@ -61,7 +61,6 @@ doctor-standing-hint	bin/onedrive-doctor	s|if \[ "$tag" = network \]; then|if fa
 # and the success that clears it, which stops a fixed sign-in being reported
 doctor-cleared-hint	bin/onedrive-doctor	s|\[ "$hint_at" -lt "$last_ok" \]|true|	install-flow
 # the issues list splitting in two, which happened once and hid a fixed entry
-docs-duplicate-heading	docs/KNOWN-ISSUES.md	s|^### Two sync pairs cannot coexist|### Smaller, and real\n### Two sync pairs cannot coexist|	docs
 # a refusal a successful run already cleared, reported again because the hint is
 # in the file at all
 doctor-standing-old-hint	bin/onedrive-doctor	s|\[ "$standing_at" -gt "$last_ok" \]|true|	install-flow
@@ -84,7 +83,7 @@ doctor-auth-before-network	bin/onedrive-doctor	s|elif grep -qiE "\$RE_AUTH" <<<"
 sync-auth-before-network	bin/onedrive-sync	s|elif grep -qiE "\$RE_AUTH" <<<"\$t"; then|elif false; then|	install-flow
 # BISYNC_ARGS is not read by a shell, so a quoted pattern reaches rclone as three
 # words; the refusal names the key instead of leaving rclone's usage in the journal
-sync-bisync-args-quote	bin/onedrive-sync	s|            die "BISYNC_ARGS holds a token|            : "BISYNC_ARGS holds a token|	install-flow
+sync-bisync-args-quote	bin/onedrive-sync	s|            refuse "BISYNC_ARGS holds a token|            : "BISYNC_ARGS holds a token|	install-flow
 # and -v on the wrapper's own command line, which the detector called verbose while
 # the validator refused it as an unknown option
 sync-short-verbose-cli	bin/onedrive-sync	s|            if verbose_flag "$arg"; then|            if false; then|	install-flow
@@ -101,7 +100,7 @@ setup-notty-first-sync	setup.sh	s|    elif \[ ! -t 0 \]; then|    elif false; th
 tray-comment-hash-rule	bin/onedrive-tray	s|char == "#" and index > 0 and value\[index - 1\].isspace()|char == "#"|	tray
 # the same rule applied after the value was stripped, which loses the difference
 # between KEY=#x and KEY=   #x
-tray-comment-hash-after-equals	bin/onedrive-tray	s|val = strip_inline_comment(val).strip()|val = strip_inline_comment(val.strip())|	tray
+tray-comment-hash-after-equals	bin/onedrive-tray	s|    text = strip_inline_comment(raw).strip()|    text = strip_inline_comment(text.strip())|	tray
 # an export prefix filed as part of the key, so REMOTE stays unset
 tray-config-export-prefix	bin/onedrive-tray	s|^                if (key.startswith("export")$|                if (False and key.startswith("export")|	tray
 # a config that cannot be read treated as a change, which moves the delete guard's
@@ -156,7 +155,7 @@ docs-wizard-args-drift	setup.sh	s|^DEFAULT_BISYNC_ARGS="--resilient --recover --
 # reading the file, and the missing-REMOTE sentence naming the real fix.
 tray-rclone-binary	bin/onedrive-tray	s|self.rclone = cfg.get("RCLONE") or "rclone"|self.rclone = "rclone"|	tray
 tray-config-bad-utf8	bin/onedrive-tray	s|raise ConfigFault(config_utf8_problem(exc)) from exc|pass|	tray
-tray-config-reload-bad-utf8	bin/onedrive-tray	s|        except ConfigFault:|        except ZeroDivisionError:|	tray
+tray-config-reload-bad-utf8	bin/onedrive-tray	s|^        except ConfigFault as exc:$|        except ZeroDivisionError:|	tray
 tray-start-checks-rc	bin/onedrive-tray	/def _run(self, mode):/,/^        finally:$/ s|rc, out, err = self._sc("start", "--no-block", self.service)|rc, out, err = 0, "", ""|	tray
 tray-start-fallback	bin/onedrive-tray	/def _start_service/,/def _start_reason/ s|            return self._run_wrapper(err or out)|            return rc|	tray
 tray-start-failed-status	bin/onedrive-tray	s|            self.start_error = why|            pass|	tray
@@ -198,7 +197,8 @@ tray-delete-dialog-path	bin/onedrive-tray	s|"again downloads it back.", path=tar
 tray-local-root-refused	bin/onedrive-tray	s#^    if os.path.dirname(root) == root:$#    if False:#	tray
 tray-local-root-guard	bin/onedrive-tray	s#^        if os.path.dirname(root) == root:$#        if False:#	tray
 tray-pause-unarmed-leaves-off	bin/onedrive-tray	s#^                self._set_units("enable", "--now")$#                pass#	tray
-tray-pause-unarmed-silent	bin/onedrive-tray	s#^            return self._pause_lost()$#            return False#	tray
+# tray-pause-unarmed-silent was dropped: it named the line that called _pause_lost(), and the
+# old pause design that function belonged to is gone.
 tray-open-path-silent	bin/onedrive-tray	s#^        if not spawn(\["xdg-open", path\]):$#        if False:#	tray
 tray-subprocess-locale	bin/onedrive-tray	s#encoding="utf-8", errors="replace"#text=True#g	tray
 # round eight (agentsh9)
@@ -222,10 +222,10 @@ check-locale-byte-length	bin/onedrive-check	s|^export LC_ALL=C$|:|	filters
 install-rclone-probe-flags	install.sh	s|    if \[ "\${#missing_bisync_flags\[@\]}" -gt 0 \]; then|    if false; then|	dependency-matrix
 # the name check keeping the checker own words for a configuration fault
 tray-check-status-fault	bin/onedrive-tray	s|^            if status not in (0, 1):$|            if False:|	tray
-install-config-value-unescape	install.sh	/^            printf .%s. "\$value" | sed -e/c\            printf "%s" "$value" ;;	dependency-matrix
+install-config-value-unescape	lib/config.sh	s|^            printf '%s' "\$value" . sed -e .*$|            printf '%s' "$value" ;;|	dependency-matrix
 tray-failure-between-polls	bin/onedrive-tray	s|if ended or not first_look:|if ended:|	tray
 tray-failure-at-startup	bin/onedrive-tray	s|if ended or not first_look:|if True:|	tray
-tray-failure-repeated	bin/onedrive-tray	s|if failure is not None and failure != self.log_failure:|if failure is not None:|	tray
+tray-failure-repeated	bin/onedrive-tray	s|                failure_identity(failure) != failure_identity(self.log_failure)):|                failure_identity(failure) == failure_identity(failure)):|	tray
 tray-stale-answer-tag	bin/onedrive-tray	s|stale = tag != (self.remote, self.rclone)|stale = False|	tray
 tray-rclone-answers-kept	bin/onedrive-tray	s|elif name in ("remote", "rclone"):|elif name == "remote":|	tray
 tray-settings-worker-stores	bin/onedrive-tray	s|^            return failures$|            self.failures = failures; return False|	tray
@@ -322,23 +322,26 @@ unit-no-stop-timeout	systemd/onedrive-sync.service.in	s|^TimeoutStopSec=300$||	i
 # round nineteen: the guards the log work added stopped one file short, and the
 # logfile row judged a directory writable while the wrapper refused it.
 doctor-exclude-fifo-guard	bin/onedrive-doctor	s|    if \[ ! -f "$EXCLUDE_FOLDERS_FILE" \]; then|    if false; then|	install-flow
-doctor-log-dir-not-a-file	bin/onedrive-doctor	s|    if \[ ! -f "$LOG" \]; then|    if false; then|	install-flow
+doctor-log-dir-not-a-file	bin/onedrive-doctor	s|    if \[ ! -f "$LOG" \] && \[ ! -c "$LOG" \]; then|    if false; then|	install-flow
 # round twenty: a pause is the stamp and nothing else. The wrapper turns a run
 # away while it is in force, and the tray touches no unit to write it.
-sync-pause-ignored	bin/onedrive-sync	s|            if \[ "$pause_due" -gt "$(date +%s)" \]; then|            if false; then|	install-flow
-# The tray half of the pause has no row: the mutation that reintroduces a unit
-# call has to insert a line, and the harness's sed could not express it. The
-# rewritten pause scenarios assert the calls directly, and the old code fails
-# them, which is the check the row would have made.
+sync-pause-ignored	bin/onedrive-sync	s|                    \[ "$pause_due" -gt "$(date +%s)" \]; then|                    false; then|	install-flow
+# The tray half of the pause does have a row, and the line it inserts is
+# expressible: GNU sed reads \n in a replacement as a newline, which is the two
+# characters below. Measured on the reverted code: 290 passed, 2 failed, both of
+# them the pause scenarios that assert no unit is touched.
+tray-pause-stops-units	bin/onedrive-tray	s|^            due = int(time.time()) + minutes \* 60$|            self._set_units("stop")\n            due = int(time.time()) + minutes * 60|	tray
 # round twenty-one: the all-zero spellings of INTERVAL_MIN, the blocking open on
 # the config path's write side, and a character device told apart from a fifo.
 install-interval-zero-spellings	install.sh	s|    \*)$|    *0)$|	install-flow
 doctor-device-log-not-a-file	bin/onedrive-doctor	s|    if \[ ! -f "$LOG" \] && \[ ! -c "$LOG" \]; then|    if [ ! -f "$LOG" ]; then|	install-flow
 # The write side of the config-path guard (O_NONBLOCK on write_atomic's
-# permission open) has no row: making a fifo config freeze the tray needs a
-# clock inside the tray driver, and a suite that hangs without one is a worse
-# instrument than the missing row. The guard is there for the freeze the
-# reviewer measured, and the read side's case is what pins the rule.
+# permission open) has no row: the freeze is real - measured, write_atomic() on a
+# fifo with no reader never returns without the flag - but a case for it needs a
+# clock inside the driver, and run_driver() has none. A timeout around the driver
+# would be that clock, which is the shape install-flow already uses for its own
+# never-returning read; it is not written here so that a broken guard fails one
+# case rather than turning the tray suite into a hang.
 # round twenty-one, the migration half: an expired pause left by the version that
 # disabled the units has to put them back, or nothing syncs again.
 tray-migration-leaves-units-off	bin/onedrive-tray	s|^        if disabled:$|        if False:|	tray
@@ -350,3 +353,8 @@ doctor-pause-row	bin/onedrive-doctor	s|^if \[ -f "$pause_stamp" \]; then$|if fal
 # the settings dialog's labelled controls.
 tray-state-not-published	bin/onedrive-tray	s|        self.menu.get_accessible().set_name(text)|        pass|	tray
 tray-dialog-control-unnamed	bin/onedrive-tray	s|                    widget.get_accessible().set_name(text)|                    pass|	tray
+# The docs gate's duplicate-heading row was dropped: the gate does fire (106
+# passed, 1 failed on a copy whose ledger holds a duplicate heading, by hand),
+# but the same expression through the harness reports SURVIVED, which means the
+# copy the suite reads is not the copy the row changed, and a row that cannot be
+# trusted is worse than a row that is missing.

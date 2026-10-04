@@ -389,10 +389,18 @@ if [ ! -e "$LOG" ]; then
     report warn log "no log at $LOG yet, so no run has written one; the first sync creates it"
 elif [ ! -r "$LOG" ]; then
     report fail log "$LOG exists but is not readable by this user; fix its permissions or your groups"
-elif [ ! -f "$LOG" ]; then
+elif [ ! -f "$LOG" ] && [ ! -c "$LOG" ]; then
     # -e and -r are both true for a fifo, and every read below is a grep: the
     # doctor would wait for a writer that never comes instead of answering.
-    report warn log "$LOG is not a regular file (a fifo, a socket or a device), and reading it would block this check; point LOG at a real file"
+    report warn log "$LOG is not a regular file (a fifo or a socket), and reading it would block this check; point LOG at a real file"
+elif [ ! -f "$LOG" ]; then
+    # A character device is not a regular file either, and reading it is not what
+    # would block: onedrive-sync appends to its log and its rotation guard skips
+    # what it cannot size, so LOG=/dev/null is a working install and the row below
+    # says so. This one reads the file's *contents*, which for /dev/null is an
+    # empty answer and for /dev/tty would be a wait for input, so it is not read -
+    # said as what it is rather than as a failure the wrapper does not have.
+    report ok log "$LOG is a character device, which onedrive-sync appends to; this check does not read it"
 else
     # -a throughout: GNU grep calls a file with a NUL byte in it binary and
     # prints nothing for it, so one stray byte used to silence every check

@@ -2395,21 +2395,41 @@ class Tray:
             self.item_pause.set_label(self.t("Automatic sync state unknown"))
 
     def _paused_until(self) -> str:
-        """Time the automatic resume is due, as HH:MM, or an empty string."""
-        try:
-            with open(PAUSE_STAMP, encoding="utf-8") as fh:
-                due = int(fh.read().strip())
-        except (OSError, ValueError):
+        """Time the automatic resume is due, as HH:MM, or an empty string.
+
+        One reader for the stamp, not two. This used to parse the file again with
+        int(), which accepts a sign, an underscore and non-ASCII digits that
+        _pause_due() rejects, and then handed the raw number to time.localtime(),
+        which raises OverflowError on a value of more than nineteen digits. That
+        raise came out of a GTK idle callback, so the menu row was never drawn -
+        it stayed on "Pause automatic sync" for a tray that was paused - and the
+        traceback repeated on every poll. The clamp is the one on_sync_now()
+        already applies for the same reason.
+        """
+        due = self._pause_due()
+        if due is None or due <= time.time():
             return ""
-        if due <= time.time():
-            return ""
-        return time.strftime("%H:%M", time.localtime(due))
+        return time.strftime("%H:%M", time.localtime(min(due, 2 ** 31 - 1)))
 
     def _clear_stamp(self):
         try:
             os.remove(PAUSE_STAMP)
         except OSError:
             pass
+
+    @staticmethod
+    def _unit_enabled(out) -> bool:
+        """systemctl is-enabled's answer, with an unreadable one as not enabled.
+
+        `sh()` answers (1, "", str(exc)) when the command cannot run at all -
+        systemctl is not installed, or there is no user bus - so `out` can be
+        empty, and `out.splitlines()[0]` was an IndexError inside a worker thread.
+        The click that reached it then said nothing at all and the thread died
+        with the stamp already removed. unit_states() has classified this answer
+        since it was written, including the empty one; these call sites did not.
+        """
+        line = out.splitlines()[0].strip() if out.strip() else ""
+        return line.startswith(("enabled", "linked", "alias"))
 
     # -------------------------------------------------- settings
     def set_icon_visible(self, visible: bool):
@@ -2825,7 +2845,7 @@ class Tray:
         def worker():
             self._clear_stamp()
             _, out, _ = self._sc("is-enabled", self.timer)
-            if out.splitlines()[0].strip() != "enabled":
+            if not self._unit_enabled(out):
                 self._set_units("enable", "--now")
             GLib.idle_add(self._after_resume)
 
@@ -2846,20 +2866,31 @@ class Tray:
         """The time the pause stamp says the resume is due, or None.
 
         The grammar is digits and nothing else, and it is the wrapper's and the
-        doctor's too: `int()` alone accepts a sign, an underscore and non-ASCII
-        digits, which the shell rejects, so a stamp the tray showed as a pause was
-        one the wrapper deleted and synced through. A value longer than ten digits
-        is later than any clock this will meet, and it is answered by length rather
-        than by arithmetic because `time.localtime()` raises on one.
+        doctor's too: both read the file with `$(cat ...)`, which drops trailing
+        newlines and nothing else, so a sign, an underscore, a non-ASCII digit or
+        a space around the value is not a time either of them will read. `int()`
+        alone accepts all of those, so a stamp the tray showed as a pause was one
+        the wrapper deleted and synced through. Only the trailing newline is
+        stripped here, which is exactly what `$(cat ...)` does.
+
+        A value longer than ten digits is later than any clock this will meet, and
+        it is answered by length rather than by arithmetic: `time.localtime()`
+        raises on one, and the shell's `[ -gt ]` errors on one, which is how a
+        pause used to be read as an expiry by both readers and synced through. The
+        answer is a number, not a time, so that every caller can compare it -
+        10 ** (digits - 1) is later than now for every digit count above ten and
+        cannot overflow anything.
         """
         try:
             with open(PAUSE_STAMP, encoding="utf-8") as fh:
-                text = fh.read().strip()
+                text = fh.read().rstrip("\n")
         except OSError:
             return None
-        if not re.fullmatch(r"[0-9]{1,19}", text):
+        if not re.fullmatch(r"[0-9]+", text):
             return None
-        return int(text[:10]) * 10 ** (len(text) - 10)
+        if len(text) > 10:
+            return 10 ** (len(text) - 1)
+        return int(text)
 
     def recover_pause(self):
         """Tidy up a pause the way the units were left, and drop an expired one.
@@ -2881,7 +2912,7 @@ class Tray:
             # nothing here has an opinion about it.
             return
         _, out, _ = self._sc("is-enabled", self.timer)
-        disabled = out.splitlines()[0].strip() != "enabled"
+        disabled = not self._unit_enabled(out)
         if due > time.time():
             # The pause is in force. The shape this version writes leaves the units
             # alone, so there is nothing to repair; the shape an older one wrote

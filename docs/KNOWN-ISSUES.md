@@ -15,70 +15,26 @@ were found in the first place.
 
 ## Open
 
-### What the pause commit's own audit found
+### What the pause audit left
 
-Round twenty-two's commits were audited by the same lens that audited the ones before
-them, and the pattern held: a rule was fixed in one reader and not its twin. All ten
-findings are reproduced in that review; none is fixed yet, and its patch covers most.
+Round twenty-two's audit found ten things; the code, the grammar and the instrument
+are fixed and in the changelog, and the mutation table has no dead rows for the first
+time in several rounds (seven were re-pointed to the lines they name and two dropped
+with their reasons). What is still open from that review:
 
-- `_pause_due()` got a digits-and-length rule; `_paused_until()`, which the menu label
-  reads, kept `int()` and `time.localtime()`. An eleven to nineteen digit stamp
-  therefore raises `OverflowError` out of a GTK idle callback on every poll and the
-  pause row never paints.
-- The tray's rule stops at nineteen digits and the shells' at ten, so a twenty digit
-  stamp has the wrapper and the doctor reporting a pause and the tray reporting
-  automatic sync as on - and "Sync now" in that state is the silent no-op the same
-  commit had just removed, reached by one more digit.
-- The tray's reader strips whitespace and the shells' does not: `" 1791117608 "` is a
-  pause in the menu and a stamp to delete-and-sync for the wrapper. The changelog
-  sentence "both readers take digits only now" is false.
-- `resume_now()` and `_recover_pause_worker()` index `out.splitlines()[0]` on
-  `systemctl is-enabled`, which prints nothing at all with no user bus. The stamp is
-  removed, the thread dies with `IndexError` and nothing is said - where
-  `unit_states()` guards the same answer three hundred lines away.
-- Resume now enables the watcher even when `WATCH="0"`.
-- The doctor failed `LOG=/dev/null` and now exempts it in the `logfile` row, but the
-  `log` row above still warns that reading a character device would block.
-- The mutation table has nine rows that match nothing at the current revision, two of
-  them killed by these two commits editing the very lines those rows name. An earlier
-  claim that the harness's `sed` could not express a tray pause row is false: GNU
-  `sed` inserts a line with `\n` and that row is caught.
-- The `KNOWN_SURVIVORS` note for `tray-setunits-invalidate` gives a reason that is not
-  true; the missing invalidate is observable in a stale-state-shaped probe.
-- The entry below still listed three things the pause commit fixed.
-
-### A carried value is written back with its variables frozen
-
-`setup.sh` reads an existing config through `lib/config.sh`, which answers a value
-as the file wrote it, and then writes every carried value back through
-`config_quote()`, which escapes `$` and the backtick. A config holding
-`LOG="${XDG_CACHE_HOME:-$HOME/.cache}/sync.log"` therefore comes back as
-`LOG="\${XDG_CACHE_HOME:-$HOME/.cache}/sync.log"`, and the wrapper then reads a
-literal directory name where it used to expand one: a wizard re-run breaks the log
-path of an install that was working. The fix is to carry the old file's own line for
-a key rather than its value, so what the file already quoted stays quoted the way it
-was; that touches every line of the writer that carries a value, which is why it is
-a round of its own.
-
-### Two test-side items from the meta-reviews
-
-- Two tray cases pin source identifiers rather than behaviour: renaming the
-  module-level `STRINGS` fails five cases, one of them unrelated to languages. A
-  rename is a refactor, and a suite that fails on one costs more to change than it
-  is worth.
-- Two guards for one thing: `_local_delete_path` re-checks the filesystem root after
-  `local_path_problem` has already refused it, and the case that covers it
-  monkeypatches the first guard away to reach the second. One of the two is dead, and
-  the mutation row pins the dead one, so removing it means deciding which guard is
-  the contract.
-
-### The hook's cases pin its text, not its behaviour
-
-The three NetworkManager hook cases read the generated hook's lines. Commenting its
-timer gate out - text and position kept, which is exactly the behaviour before the
-gate existed - leaves the whole of install-flow green, because no suite ever executes
-the hook. A fixture that runs it against a stub `systemctl` is what would make those
-cases measure something.
+- `resume_now()` enables the watcher even when `WATCH="0"`, so a user who had
+  realtime sync off gets it back by resuming a pause. Whether "Resume now" should
+  mean "automatic sync runs again" or only "this pause is over" is the decision;
+  the review measured the behaviour and left it.
+- The mutation row `tray-setunits-invalidate` still survives, and the reason recorded
+  beside it is narrower than it reads: the generation bump is observable in a
+  stale-state-shaped probe that calls `_set_units()`, and what the suite lacks is that
+  ordering rather than the observability. The case is what would retire the row.
+- With `HOME` unset the three readers disagree about the cache directory: the shells
+  compute `/.cache/rclone-onedrive-tray` and the tray's `expanduser` answers the same,
+  but the doctor's `${XDG_CACHE_HOME:-$HOME/.cache}` expands to an empty `HOME` and
+  then to `/rclone-onedrive-tray`. No shell this project ships runs with `HOME` unset,
+  so it is a note rather than a defect.
 
 ## Accepted, with the reason
 
