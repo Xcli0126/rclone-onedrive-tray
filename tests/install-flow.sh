@@ -451,6 +451,84 @@ else
     printf '%s\n' "$NOTTY_OUT" | tail -4 | sed 's/^/        /'
 fi
 
+# ------------------------------------------------- the access check on a fresh install
+# CHECK_ACCESS is the one guard that stops a run treating an unreadable side as a
+# mass deletion, and the key ships off because turning it on for an install that
+# already exists aborts that install's next run until the marker files are there.
+# A config this run creates has no such history, so the offer belongs on a first
+# install; a re-run keeps whatever the file already holds, through carry(), like
+# every other key the wizard does not ask about. The marker files themselves are
+# not built here: the wizard runs the shipped helper, bin/onedrive-check-access.
+title "the access check on a first install"
+ACC_HOME="$WORK/acc-home"
+ACC_CFG="$ACC_HOME/.config/rclone-onedrive-tray/config"
+acc_wizard() {  # the wizard, in this case's own HOME
+    env HOME="$ACC_HOME" XDG_CONFIG_HOME="$ACC_HOME/.config" \
+        XDG_CACHE_HOME="$ACC_HOME/.cache" \
+    bash "$SRC_DIR/setup.sh" --remote "$REMOTE" --local "$ACC_HOME/OneDrive" \
+        --filters none --unit-name zz-acc-probe --yes --no-install
+}
+rm -rf "$ACC_HOME"
+run "a fresh --yes run decides the access check and says so" 0 \
+    "the access check is left to you" acc_wizard
+# shellcheck disable=SC2016  # $REMOTE/$LOCAL belong to the sourcing shell
+check "and the config it wrote is a working one" \
+    bash -c 'set -u; . "$1"; test -n "$REMOTE" && test -n "$LOCAL"' _ "$ACC_CFG"
+check "and the access check is off in it" grep -qxF 'CHECK_ACCESS="0"' "$ACC_CFG"
+# A first install names a directory that does not exist yet. The wrapper refuses a
+# missing LOCAL rather than inventing a sync root, so the wizard is what creates it.
+check "and the directory it will sync into exists" test -d "$ACC_HOME/OneDrive"
+
+# The offer is for a config that did not exist. A re-run is the upgrade case the
+# off-by-default reason is about, so it must not ask again, and the value the file
+# holds has to survive whether it is 0 or 1.
+ACC_RERUN="$(acc_wizard 2>&1)"; ACC_RERUN_RC=$?
+if [ "$ACC_RERUN_RC" -eq 0 ] && ! grep -qF 'access check' <<<"$ACC_RERUN"; then
+    ok "a re-run does not offer the access check again"
+else
+    bad "a re-run offered the access check (rc=$ACC_RERUN_RC)"
+    printf '%s\n' "$ACC_RERUN" | grep -F 'access check' | head -2 | sed 's/^/        /'
+fi
+sed -i 's/^CHECK_ACCESS=.*/CHECK_ACCESS="0"/' "$ACC_CFG"
+acc_wizard >/dev/null 2>&1 || true
+check "a re-run leaves a hand-set CHECK_ACCESS=0 alone" \
+    grep -qxF 'CHECK_ACCESS="0"' "$ACC_CFG"
+sed -i 's/^CHECK_ACCESS=.*/CHECK_ACCESS="1"/' "$ACC_CFG"
+acc_wizard >/dev/null 2>&1 || true
+check "and a hand-set CHECK_ACCESS=1 is not turned back off" \
+    grep -qxF 'CHECK_ACCESS="1"' "$ACC_CFG"
+
+# Taking the offer, driven on a terminal: the marker files are what makes the check
+# work at all, so the run has to create them and only then write the key. The rclone
+# here answers the helper's copyto/lsf as well as the wizard's probes, which the
+# shared stub cannot: it reports one fixed listing.
+ACC_STUB="$WORK/acc-stub"
+ACC_MARKERS="$WORK/acc-markers"
+mkdir -p "$ACC_STUB"
+cat > "$ACC_STUB/rclone" <<EOF
+#!/bin/bash
+case "\$1" in
+    listremotes) printf '%s\n' 'accfake:' ;;
+    copyto)      cp -- "\$2" "$ACC_MARKERS/\${3##*/}" ;;
+    lsf)         ls -1 "$ACC_MARKERS" 2>/dev/null ;;
+esac
+exit 0
+EOF
+chmod +x "$ACC_STUB/rclone"
+ACC_PTY_HOME="$WORK/acc-pty-home"
+rm -rf "$ACC_PTY_HOME" "$ACC_MARKERS"; mkdir -p "$ACC_MARKERS"
+printf 'y\n' | timeout 60 script -qec \
+    "env HOME=$ACC_PTY_HOME XDG_CONFIG_HOME=$ACC_PTY_HOME/.config XDG_CACHE_HOME=$ACC_PTY_HOME/.cache PATH=$ACC_STUB:\$PATH bash $SRC_DIR/setup.sh --remote accfake:Vault --local $ACC_PTY_HOME/OneDrive --filters none --unit-name zz-acc-pty --skip-folders x --no-install" \
+    /dev/null >"$WORK/acc-pty-out.txt" 2>&1
+check "the run that took the offer turned the access check on" \
+    grep -qxF 'CHECK_ACCESS="1"' "$ACC_PTY_HOME/.config/rclone-onedrive-tray/config"
+check "and the local marker file is there" \
+    test -f "$ACC_PTY_HOME/OneDrive/RCLONE_TEST"
+check "and the remote marker file is there" \
+    test -f "$ACC_MARKERS/RCLONE_TEST"
+check "and the run said what it did" \
+    grep -qiF 'access check on' "$WORK/acc-pty-out.txt"
+
 # ---------------------------------------------------------------- the install
 title "install.sh via setup.sh"
 for s in onedrive-sync onedrive-tray onedrive-watch onedrive-check onedrive-check-access \
@@ -489,16 +567,41 @@ for s in onedrive-sync onedrive-tray onedrive-watch onedrive-check \
         grep -qF "$HOME/.local/bin/$s" <<<"$INSTALL_OUT"
 done
 
-if command -v systemd-analyze >/dev/null 2>&1; then
-    check "systemd accepts $UNIT.service" \
-        systemd-analyze --user verify "$UNIT_DIR/$UNIT.service"
-    check "systemd accepts $UNIT.timer" \
-        systemd-analyze --user verify "$UNIT_DIR/$UNIT.timer"
-    check "systemd accepts $UNIT-watch.service" \
-        systemd-analyze --user verify "$UNIT_DIR/$UNIT-watch.service"
-else
-    skip "systemd-analyze is not installed; unit syntax unchecked"
+# systemd-analyze ships with systemd, which a container or a non-systemd
+# distribution may not have. The three cases below are what catch a unit file the
+# manager would refuse, so they run everywhere: where the real tool is absent a
+# stub stands in earlier on PATH, held to the part it can see (the file exists and
+# is not empty) and named in the output. The skip this replaces dropped three
+# passes on such a machine, which is what pushed the suite under its floor.
+if ! command -v systemd-analyze >/dev/null 2>&1; then
+    SDA_STUB="$WORK/systemd-analyze-stub"
+    mkdir -p "$SDA_STUB"
+    cat > "$SDA_STUB/systemd-analyze" <<'STUB'
+#!/bin/bash
+# Stands in for the real verifier only where systemd is not installed: it refuses
+# a unit file that is missing or empty, which is what the cases below need to see.
+for a in "$@"; do
+    case "$a" in
+        *.service|*.timer)
+            [ -s "$a" ] || {
+                printf 'stub systemd-analyze: %s is missing or empty\n' "$a" >&2
+                exit 1
+            } ;;
+    esac
+done
+exit 0
+STUB
+    chmod +x "$SDA_STUB/systemd-analyze"
+    PATH="$SDA_STUB:$PATH"
+    export PATH
+    printf '  \033[33mnote\033[0m  systemd-analyze is absent; a stub checks that each unit file exists\n'
 fi
+check "systemd accepts $UNIT.service" \
+    systemd-analyze --user verify "$UNIT_DIR/$UNIT.service"
+check "systemd accepts $UNIT.timer" \
+    systemd-analyze --user verify "$UNIT_DIR/$UNIT.timer"
+check "systemd accepts $UNIT-watch.service" \
+    systemd-analyze --user verify "$UNIT_DIR/$UNIT-watch.service"
 
 # ---------------------------------------------------------------- the autostart entry
 # The entry is the tray's "Start tray at login" setting: unticking the box
@@ -1475,32 +1578,70 @@ check "a name with a star is escaped too" \
 # having written no log at all, and the failure hint then pointed at a file that
 # could not exist.
 title "a log that cannot be written"
+# A 0500 directory is the documented fixture, but root ignores the mode bits, so
+# the old case skipped there and gave up four passes. Where 0500 turns out still
+# writable, a regular file stands where the log's directory should be: mkdir and
+# open both fail on it for every uid, so the same wrapper branch is reached and
+# the case runs on every machine instead of skipping.
 RO="$WORK/readonly"
 mkdir -p "$RO"
 chmod 500 "$RO"
+RO_LOG="$RO/sync.log"
 if [ -w "$RO" ]; then
-    skip "a 0500 directory is still writable here, so the log check was not exercised"
-else
-    cap_config "LOG=\"$RO/sync.log\""
-    : > "$WORK/cap-args"
-    run "a run whose log cannot be opened fails, naming the path" 1 "$RO/sync.log" \
-        cap_env "$HOME/.local/bin/onedrive-sync"
-    check "and it stopped before touching the remote" test ! -s "$WORK/cap-args"
-
-    # The same defect one level up: the directory cannot be created at all.
-    cap_config "LOG=\"$RO/nested/sync.log\""
-    : > "$WORK/cap-args"
-    out="$(cap_env "$HOME/.local/bin/onedrive-sync" 2>&1)"
-    rc=$?
-    if [ "$rc" -ne 0 ] && grep -qF "$RO/nested/sync.log" <<<"$out"; then
-        ok "a log directory that cannot be created is reported too"
-    else
-        bad "an uncreatable log directory passed silently (rc=$rc)"
-    fi
-    check "and that run stopped before touching the remote too" \
-        test ! -s "$WORK/cap-args"
+    RO_BLOCK="$WORK/readonly-block"
+    : > "$RO_BLOCK"
+    RO_LOG="$RO_BLOCK/sync.log"
 fi
+RO_LOG_DIR="${RO_LOG%/*}"
+cap_config "LOG=\"$RO_LOG\""
+: > "$WORK/cap-args"
+run "a run whose log cannot be opened fails, naming the path" 1 "$RO_LOG" \
+    cap_env "$HOME/.local/bin/onedrive-sync"
+check "and it stopped before touching the remote" test ! -s "$WORK/cap-args"
+
+# The same defect one level up: the directory cannot be created at all.
+cap_config "LOG=\"$RO_LOG_DIR/nested/sync.log\""
+: > "$WORK/cap-args"
+out="$(cap_env "$HOME/.local/bin/onedrive-sync" 2>&1)"
+rc=$?
+if [ "$rc" -ne 0 ] && grep -qF "$RO_LOG_DIR/nested/sync.log" <<<"$out"; then
+    ok "a log directory that cannot be created is reported too"
+else
+    bad "an uncreatable log directory passed silently (rc=$rc)"
+fi
+check "and that run stopped before touching the remote too" \
+    test ! -s "$WORK/cap-args"
 chmod 700 "$RO"
+
+# ---------------------------------------------------------------- a missing LOCAL
+# The wrapper used to mkdir -p LOCAL before the run, so a typo in the path or an
+# unmounted tree became a fresh, empty directory that bisync then treated as the
+# sync root: Path1 empty, and with CHECK_ACCESS off and only the percentage delete
+# cap in the way that emptiness can travel up to the cloud. onedrive-check and
+# onedrive-watch already refuse the same state ("sync directory not found"),
+# onedrive-doctor already tells the user to mkdir it, and setup.sh creates it for a
+# config it writes, so refusing here costs one command and closes the trap.
+title "a LOCAL that is not there"
+MISSING_LOCAL="$WORK/missing-local"
+rm -rf "$MISSING_LOCAL"
+cap_config "LOCAL=\"$MISSING_LOCAL\""
+: > "$WORK/cap-args"
+run "a run whose LOCAL is missing stops, naming the path and the mkdir" 1 \
+    "mkdir -p \"$MISSING_LOCAL\"" \
+    cap_env "$HOME/.local/bin/onedrive-sync"
+check_absent "and it did not create the directory it was pointed at" "$MISSING_LOCAL"
+check "and it stopped before touching the remote" test ! -s "$WORK/cap-args"
+
+# The log and cache directories are the run's own state rather than the user's
+# tree, so they are still created: a refusal has to be readable in the log.
+MISSING_LOG="$WORK/missing-local-log/rclone-onedrive-tray/sync.log"
+rm -rf "$WORK/missing-local-log"
+cap_config "LOCAL=\"$MISSING_LOCAL\"
+LOG=\"$MISSING_LOG\""
+cap_env "$HOME/.local/bin/onedrive-sync" >/dev/null 2>&1 || true
+check "and the log directory is still created for the refused run" \
+    test -d "$(dirname "$MISSING_LOG")"
+check "and the log file with it" test -f "$MISSING_LOG"
 
 # ---------------------------------------------------------------- the log's clock
 # log_line stamped with an unpinned `date`, so the log carried whatever calendar
@@ -2000,9 +2141,13 @@ MAX_DELETE="0"
 RETRIES="3"
 RETRY_DELAY="1"
 EOF
-# The PID the dead run's lock names. The case checks that it is really gone
-# before it relies on it.
-DEAD_PID=999999
+# The PID the dead run's lock names. It is manufactured rather than guessed: the
+# fixed number this used to hold was live on some machines and the case skipped
+# there, which is one of the ways the suite fell under its floor. A short-lived
+# child is started and reaped, so the pid is gone on every machine.
+sh -c 'exit 0' &
+DEAD_PID=$!
+wait "$DEAD_PID" 2>/dev/null || true
 # The stub stands in for an rclone that is killed by its first attempt: it leaves
 # a lock naming a dead PID and fails, and every later call fails for as long as
 # that lock is there, which is what real rclone does with a lock it cannot use.
@@ -2039,29 +2184,25 @@ stale_env() {
         XDG_CACHE_HOME="$STALE_FX/cache" TMPDIR="$STALE_FX/tmp" "$@"
 }
 
-if kill -0 "$DEAD_PID" 2>/dev/null; then
-    skip "pid $DEAD_PID is in use here, so a lock naming a dead owner cannot be built"
+: > "$STALE_FX/calls"; : > "$STALE_FX/argv"; rm -f "$STALE_FX/sync.log"
+STALE_OUT="$(stale_env "$HOME/.local/bin/onedrive-sync" 2>&1)"; STALE_RC=$?
+# rc 0 is what tells "the sweep before attempt 2 cleared it" apart from
+# "attempt 2 failed for some other reason": any other failure is still a
+# non-zero run, and the two checks below then say which attempt failed.
+if [ "$STALE_RC" -eq 0 ] && [ "$(cat "$STALE_FX/calls")" -eq 2 ]; then
+    ok "the run succeeds once the lock its first attempt left behind is swept"
 else
-    : > "$STALE_FX/calls"; : > "$STALE_FX/argv"; rm -f "$STALE_FX/sync.log"
-    STALE_OUT="$(stale_env "$HOME/.local/bin/onedrive-sync" 2>&1)"; STALE_RC=$?
-    # rc 0 is what tells "the sweep before attempt 2 cleared it" apart from
-    # "attempt 2 failed for some other reason": any other failure is still a
-    # non-zero run, and the two checks below then say which attempt failed.
-    if [ "$STALE_RC" -eq 0 ] && [ "$(cat "$STALE_FX/calls")" -eq 2 ]; then
-        ok "the run succeeds once the lock its first attempt left behind is swept"
-    else
-        bad "the run ended rc=$STALE_RC after $(cat "$STALE_FX/calls" 2>/dev/null || echo 0) attempt(s)"
-        printf '%s\n' "$STALE_OUT" | head -3 | sed 's/^/        /'
-    fi
-    check "and the sweep before attempt 2 is what removed it" \
-        grep -qF "removed stale lock (owner pid $DEAD_PID is gone)" "$STALE_FX/sync.log"
-    check "and the first attempt's failure really was the lock" \
-        grep -qF "[lock]" "$STALE_FX/sync.log"
-    if grep -qF "ERROR: attempt 2" "$STALE_FX/sync.log"; then
-        bad "attempt 2 failed as well, so the lock was still there"
-    else
-        ok "and attempt 2 was not a failure at all"
-    fi
+    bad "the run ended rc=$STALE_RC after $(cat "$STALE_FX/calls" 2>/dev/null || echo 0) attempt(s)"
+    printf '%s\n' "$STALE_OUT" | head -3 | sed 's/^/        /'
+fi
+check "and the sweep before attempt 2 is what removed it" \
+    grep -qF "removed stale lock (owner pid $DEAD_PID is gone)" "$STALE_FX/sync.log"
+check "and the first attempt's failure really was the lock" \
+    grep -qF "[lock]" "$STALE_FX/sync.log"
+if grep -qF "ERROR: attempt 2" "$STALE_FX/sync.log"; then
+    bad "attempt 2 failed as well, so the lock was still there"
+else
+    ok "and attempt 2 was not a failure at all"
 fi
 
 # ------------------------------------------------------- an empty remote side
@@ -2699,6 +2840,12 @@ check "keeps the configuration (documented; --purge removes it)" test -f "$CFG"
 # The hook in /etc belongs to the machine. This sandbox never had one, and the
 # unit name it would name is not the one being removed, so sudo must not run.
 check_absent "never ran sudo" "$WORK/sudo-calls"
+# The one skip left in this suite, and the only environmental state a sandbox
+# cannot manufacture: the file lives in /etc and creating or removing it needs
+# root. The other three conditional skips (systemd-analyze absent, a 0500
+# directory that is still writable, a pid that is already gone) build their own
+# fixture now and pass on any machine, because a skip is not a pass and three of
+# them together ran the suite under its floor.
 HOOK=/etc/NetworkManager/dispatcher.d/90-rclone-onedrive-tray
 if [ -f "$HOOK" ]; then
     # The sentence the HOME-redirect guard prints, not the shared word "Leaving":

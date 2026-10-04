@@ -204,7 +204,12 @@ title "the failure tags the wrapper writes and the tray renders"
 wrapper_tags="$(grep -oE 'tag=[a-z]+' bin/onedrive-sync | sed 's/^tag=//' | sort -u)"
 missing=0
 for tag in $wrapper_tags; do
-    if grep -qE "^        \"$tag\": " bin/onedrive-tray; then
+    if [ "$tag" = other ]; then
+        # `other` is the wrapper's "unclassified" tag, and the tray shows the raw
+        # log line for it in every language: there is no sentence to translate, so
+        # there is no entry to require.
+        ok "the [$tag] tag needs no text: the tray shows the raw line"
+    elif grep -qE "^        \"$tag\": " bin/onedrive-tray; then
         ok "the tray has text for the [$tag] tag"
     else
         bad "the wrapper writes [$tag] and the tray has no text for it"

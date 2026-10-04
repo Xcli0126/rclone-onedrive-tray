@@ -159,8 +159,14 @@ mkdir -p "$CHK_CFG" "$CHK_TREE"
 : > "$CHK_TREE/plain.md"
 
 # A 400-character remote path puts every entry past the measured 380 limit, so
-# the trailing slash on LOCAL is the only thing that can hide the report.
-CHK_REMOTE="onedrive:$(printf 'r%.0s' {1..400})"
+# the trailing slash on LOCAL is the only thing that can hide the report. The
+# shell repeats the character itself; the old `$(seq 1 400)` leaned on word
+# splitting. The fixture's length is asserted, so a form that produced a shorter
+# name fails here instead of quietly leaving the two cases below testing nothing.
+CHK_REMOTE_NAME="$(printf 'r%.0s' {1..400})"
+check "the 400-character name fixture really is 400 characters" \
+    test "${#CHK_REMOTE_NAME}" -eq 400
+CHK_REMOTE="onedrive:$CHK_REMOTE_NAME"
 printf 'LOCAL="%s/"\nREMOTE="%s"\n' "$CHK_TREE" "$CHK_REMOTE" > "$CHK_CFG/config"
 run "a trailing slash on LOCAL still reports over-long paths" 1 "too long" \
     env XDG_CONFIG_HOME="$WORK/checkcfg" "$CHECKER"
@@ -235,7 +241,7 @@ rename_case $'bad\xffname' 'not valid UTF-8'
 # The colon is what makes the same path a rename as well.
 CHK_DEEP="$CHK_TREE"
 for _ in 1 2 3 4 5 6; do
-    CHK_DEEP="$CHK_DEEP/$(printf 'd%.0s' $(seq 1 55))"
+    CHK_DEEP="$CHK_DEEP/$(printf 'd%.0s' {1..55})"
 done
 mkdir -p "$CHK_DEEP"
 CHK_LONG="$CHK_DEEP/$(printf 'd%.0s' {1..54}):$(printf 'x%.0s' {1..40})"
@@ -260,8 +266,13 @@ check "the closing line says 1 path and 1 problem, not 1 paths" \
 
 # The name limit is 255 characters, and the check used -ge, so a name of exactly
 # that length was reported as over-long: a legal name failed the check. Only
-# 256 and up are over it.
-CHK_MAX="$(printf 'm%.0s' $(seq 1 255))"
+# 256 and up are over it. The fixture is one repeated character, built by the
+# shell rather than from `seq` output, and its length is asserted for the same
+# reason as the 400-character one above: a shorter name would still satisfy both
+# cases while testing nothing.
+CHK_MAX="$(printf 'm%.0s' {1..255})"
+check "the 255-character name fixture really is 255 characters" \
+    test "${#CHK_MAX}" -eq 255
 : > "$CHK_TREE/$CHK_MAX"
 CHK_OUT="$(env XDG_CONFIG_HOME="$WORK/checkcfg" "$CHECKER" 2>&1)"; CHK_RC=$?
 check "a name of exactly 255 characters is within the limit" \

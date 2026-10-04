@@ -120,6 +120,7 @@ cd rclone-onedrive-tray
 rclone config            # 创建/授权一个名为 onedrive 的远程
 rclone lsd onedrive:     # 应该能列出你的文件
 ./install.sh
+mkdir -p ~/OneDrive      # 同步目录必须先存在：LOCAL 不存在时 wrapper 会拒绝运行
 onedrive-sync --resync   # 建立基线，会把云端全部拉下来
 ```
 

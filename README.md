@@ -166,6 +166,8 @@ To configure by hand instead, run `./install.sh` and edit the config yourself:
 rclone config            # create/authorise a remote named e.g. "onedrive"
 rclone lsd onedrive:     # should list your files
 ./install.sh
+mkdir -p ~/OneDrive      # the sync folder has to exist; the wrapper refuses a
+                         # LOCAL that does not, rather than creating one
 onedrive-sync --resync   # build the baseline; downloads everything
 ```
 

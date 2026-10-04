@@ -720,6 +720,20 @@ for bad_unit in 'zz&zz' 'zz|zz'; do
     fi
 done
 
+# The readers here took everything up to the FIRST inner quote, so a value the
+# tray wrote with an escaped quote came back truncated and nothing said so: the
+# "Four parsers for one file format" entry. A name holding a quote is refused by
+# the allow-list, and the refusal has to quote the whole value back. That is how
+# this case sees the reader rather than assuming it.
+NM_QUOTED='zz-quoted"unit'
+NM_QUOTED_VALUE="zz-quoted\\\"unit"
+NM_QUOTED_OUT="$(nm_install quoted "$NM_QUOTED_VALUE")"; NM_QUOTED_RC=$?
+check "a UNIT_NAME with an escaped quote is refused as one value" \
+    test "$NM_QUOTED_RC" -eq 1
+check "and the refusal quotes the whole value, not the part before the quote" \
+    grep -qF "invalid UNIT_NAME in $NM_WORK/quoted-cfg/rclone-onedrive-tray/config: '$NM_QUOTED'" \
+    <<<"$NM_QUOTED_OUT"
+
 # ---------------------------------------------------------------- extras/
 # extras/install-issue-watch.sh generates its own unit with
 # ExecStart=$BIN_DIR/watch-issues.sh, unquoted and unescaped. A prefix that needs

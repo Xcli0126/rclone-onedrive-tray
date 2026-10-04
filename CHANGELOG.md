@@ -351,6 +351,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The wrapper and the tray announced any non-zero from `onedrive-check` as bad file
   names, including the configuration faults the checker reports separately. The
   wrapper passes the checker's own sentence through for a configuration fault.
+- The installers read the config with `sed` and stopped at the first inner quote,
+  so a value the tray wrote with an escaped quote came back truncated with nothing
+  said: the concrete half of the "four readers for one file format" entry. They
+  read the whole quoted value now and undo the escaping the writer applies, which
+  is the same reading bash and the tray give the file, and they accept the `export `
+  prefix as well.
+- A sync that started and finished between two polls raised no notification: the
+  failure was announced from the falling edge of the running state, and a run that
+  never appeared as running had no edge. The failure is announced from the parsed
+  log line now, once per distinct failure, and a line older than the tray is not
+  announced at all.
+- A folder listing or quota answer that was in flight when `REMOTE` or `RCLONE`
+  moved was stored anyway, because the worker did not record what it had asked
+  about, and the menu then offered the old account's folders: unticking one wrote
+  that name into the exclusion file that governs the new remote. Each request
+  carries what it is about now, a stale answer is dropped and asked again, and a
+  moved `RCLONE` clears the answers the way a moved `REMOTE` does.
+- `SettingsDialog._worker` wrote its failures into `self.failures` instead of
+  returning them, which was the last method in the file that both computed and
+  stored; it returns them and the dialog's reporting is unchanged.
+- The settings window rewrote a line it changed without the `export ` prefix a
+  hand edit had given it. The line keeps its own prefix; a key that is appended
+  gets none.
+- A reload of a config whose `LOCAL` is relative was refused by the delete guard
+  but applied anyway, so the tray ran on it. The reload applies the same validation
+  as startup now, and both of its refusals say why through a notification instead
+  of one of them being silent.
+- The untagged failure hint showed the wrapper's raw line in English and a fixed
+  sentence in Chinese. The raw line is what a reader needs (it carries the log
+  path), so both languages show it and the now-unused translation is gone.
+- The first-run wizard never offered the access check, so a fresh install shipped
+  with only the delete cap guarding it; the key defaulted to off for upgrade
+  reasons, not for new installs. On a config it creates, the wizard offers the
+  check, runs the shipped access-check helper and writes `CHECK_ACCESS="1"`, and
+  under `--yes` or with no terminal it names the command instead. A re-run keeps
+  the value the file already has.
+- The wrapper created `LOCAL` when it was missing, which turned a typo or an
+  unmounted tree into a fresh sync root that then synced the whole remote into it.
+  It refuses with the `mkdir -p` to run; the wizard creates the directory when it
+  creates the config, and the log and cache directories are still made as before.
+- `install-flow` had four conditional skips while the floor budgeted one, so a
+  machine missing two of them failed CI for a reason unrelated to the change.
+  Three of the four are now created in the sandbox (a stub for a missing
+  `systemd-analyze`, a path the mode bits cannot make writable, a pid that is
+  already gone); only the machine-wide hook needs root and still skips.
+- The ledger's entry about the filters fixture was already fixed in the code; the
+  two remaining fixtures built names by word-splitting `seq` output, and no case
+  checked any fixture's length. All three use brace expansion and two cases assert
+  the length they need.
 
 ### Changed
 

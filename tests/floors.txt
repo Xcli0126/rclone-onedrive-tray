@@ -9,11 +9,13 @@
 # belongs in the commit message.
 #
 # install-flow's floor is one below what it reports on a machine with the
-# NetworkManager hook installed, because its last case skips on a machine
-# without one and a skip is not a pass. That one case is environmental by
-# design; every other case must pass everywhere.
-dependency-matrix.sh 66
-install-flow.sh 359
-filters.sh 48
+# NetworkManager hook installed, because its last case skips on a machine without
+# one and a skip is not a pass. That is the only skip left in the suite: the other
+# three environmental branches (systemd-analyze absent, a directory whose mode bits
+# do not bind, a pid that is already gone) are now created in the sandbox instead,
+# so they pass everywhere. Every other case must pass everywhere.
+dependency-matrix.sh 68
+install-flow.sh 375
+filters.sh 50
 docs.sh 97
-tray.sh 230
+tray.sh 259

@@ -81,6 +81,32 @@ say "Checking dependencies"
 missing=()
 optional=()
 
+# Read one config value the way the other three readers do.
+#
+# The tray writes a value with \, ", $ and the backtick escaped inside the quotes
+# (shell_quote_value), and onedrive-sync sources the file. The sed readers in the
+# installers used to take everything up to the FIRST inner quote, so a value the
+# tray wrote came back truncated with nothing said: the entry in
+# docs/KNOWN-ISSUES.md about four parsers of one file format. This reads the whole
+# quoted value, undoes that escaping, and understands the export prefix the tray
+# and the wrapper accept.
+config_value() {  # config_value <KEY> [<file>] -> the value, or "" when absent
+    local key="$1" file="${2:-$CONFIG_DIR/config}" line value
+    line="$(sed -n "s/^[[:space:]]*\(export[[:space:]]\{1,\}\)\{0,1\}${key}=//p" \
+        "$file" 2>/dev/null | tail -1)"
+    [ -n "$line" ] || return 0
+    case "$line" in
+        \"*)
+            value="$(printf '%s\n' "$line" |
+                sed -n 's/^"\(.*\)"[[:space:]]*\(#.*\)\{0,1\}$/\1/p')"
+            # The writer escapes exactly these four; undo them left to right, which
+            # handles a backslash before a quote the way the shell does.
+            printf '%s' "$value" | sed -e 's/\\\(["\\$`]\)/\1/g' ;;
+        *)
+            printf '%s' "${line%%[[:space:]#]*}" ;;
+    esac
+}
+
 # config.example documents RCLONE as "the rclone binary to run, by name or by
 # path. Change it to use a build outside PATH", and onedrive-sync and
 # onedrive-doctor honour it. This script used to probe and version whatever
@@ -91,8 +117,7 @@ optional=()
 # example carries.
 RCLONE_BIN="rclone"
 if [ -f "$CONFIG_DIR/config" ]; then
-    parsed_rclone="$(sed -n 's/^[[:space:]]*RCLONE="\{0,1\}\([^"]*\)"\{0,1\}.*/\1/p' \
-                     "$CONFIG_DIR/config" | tail -1)"
+    parsed_rclone="$(config_value RCLONE)"
     if [ -n "$parsed_rclone" ]; then
         RCLONE_BIN="$parsed_rclone"
     fi
@@ -120,8 +145,7 @@ fi
 # carries, so the value the units are written with is the same either way.
 UNIT_NAME="onedrive-sync"
 if [ -f "$CONFIG_DIR/config" ]; then
-    parsed_unit="$(sed -n 's/^[[:space:]]*UNIT_NAME="\{0,1\}\([^"]*\)"\{0,1\}.*/\1/p' \
-                   "$CONFIG_DIR/config" | tail -1)"
+    parsed_unit="$(config_value UNIT_NAME)"
     if [ -n "$parsed_unit" ]; then
         UNIT_NAME="$parsed_unit"
     fi
@@ -309,8 +333,7 @@ say "Installing systemd user units into $UNIT_DIR"
 mkdir -p "$UNIT_DIR"
 # UNIT_NAME was read and validated before anything was written, so the units and
 # the NetworkManager hook cannot be reached with a name systemd would reject.
-INTERVAL_MIN="$(sed -n 's/^[[:space:]]*INTERVAL_MIN="\{0,1\}\([0-9]*\)"\{0,1\}.*/\1/p' \
-                 "$CONFIG_DIR/config" | tail -1)"
+INTERVAL_MIN="$(config_value INTERVAL_MIN)"
 INTERVAL_MIN="${INTERVAL_MIN:-5}"
 
 sed -e "s|%SYNC_SCRIPT%|$(sed_replacement "$(systemd_exec_arg "$BIN_DIR/onedrive-sync")")|g" \
@@ -319,8 +342,7 @@ sed -e "s|%INTERVAL%|$INTERVAL_MIN|g" \
     "$SRC_DIR/systemd/onedrive-sync.timer.in" > "$UNIT_DIR/$UNIT_NAME.timer"
 chmod 0644 "$UNIT_DIR/$UNIT_NAME.service" "$UNIT_DIR/$UNIT_NAME.timer"
 
-WATCH="$(sed -n 's/^[[:space:]]*WATCH="\{0,1\}\([^"]*\)"\{0,1\}.*/\1/p' \
-         "$CONFIG_DIR/config" | tail -1)"
+WATCH="$(config_value WATCH)"
 WATCH="${WATCH:-1}"
 
 # The spellings that mean on are the same set onedrive-sync, onedrive-doctor and

@@ -47,10 +47,28 @@ say()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*" >&2; }
 
 # Recover the unit base name from the config (may differ from the default).
+# The same reader install.sh uses: the tray escapes \, ", $ and the backtick
+# inside the quotes, and this script used to stop at the first inner quote, so a
+# name the tray wrote was looked for truncated. See docs/KNOWN-ISSUES.md, "Four
+# parsers for one file format".
+config_value() {  # config_value <KEY> [<file>] -> the value, or "" when absent
+    local key="$1" file="${2:-$CONFIG_DIR/config}" line value
+    line="$(sed -n "s/^[[:space:]]*\(export[[:space:]]\{1,\}\)\{0,1\}${key}=//p" \
+        "$file" 2>/dev/null | tail -1)"
+    [ -n "$line" ] || return 0
+    case "$line" in
+        \"*)
+            value="$(printf '%s\n' "$line" |
+                sed -n 's/^"\(.*\)"[[:space:]]*\(#.*\)\{0,1\}$/\1/p')"
+            printf '%s' "$value" | sed -e 's/\\\(["\\$`]\)/\1/g' ;;
+        *)
+            printf '%s' "${line%%[[:space:]#]*}" ;;
+    esac
+}
+
 UNIT_NAME="onedrive-sync"
 if [ -f "$CONFIG_DIR/config" ]; then
-    parsed="$(sed -n 's/^[[:space:]]*UNIT_NAME="\{0,1\}\([^"]*\)"\{0,1\}.*/\1/p' \
-              "$CONFIG_DIR/config" | tail -1)"
+    parsed="$(config_value UNIT_NAME)"
     if [ -n "$parsed" ]; then
         UNIT_NAME="$parsed"
     fi

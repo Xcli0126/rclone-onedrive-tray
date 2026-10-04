@@ -94,10 +94,37 @@ cat > "$WORK/stubs/rclone" <<STUB
 #!/bin/sh
 printf 'rclone %s\n' "\$*" >> "$WORK/calls/calls"
 case "\$1" in
-    about) [ -f "$WORK/calls/quota-json" ] && cat "$WORK/calls/quota-json" ;;
+    about) if [ -f "$WORK/calls/rclone-about-hold" ]; then
+               # Hold this answer until the scenario releases it, after
+               # capturing what it was answered with: the file the next call
+               # reads can then be changed, so the two answers differ.
+               cat "$WORK/calls/quota-json" 2>/dev/null \
+                   > "$WORK/calls/quota-held"
+               : > "$WORK/calls/quota-holding"
+               while [ -f "$WORK/calls/rclone-about-hold" ]; do sleep 0.05; done
+               cat "$WORK/calls/quota-held"
+               exit 0
+           fi
+           [ -f "$WORK/calls/quota-json" ] && cat "$WORK/calls/quota-json" ;;
     # A listing that fails is what remote_folders() reports as None, so one
-    # marker file is all a scenario needs to ask for one.
-    lsf)   [ -f "$WORK/calls/rclone-lsf-fail" ] && exit 1
+    # marker file is all a scenario needs to ask for one. A hold marker makes
+    # the answer wait, which is how a scenario gets a listing asked for before
+    # a reload and delivered after it.
+    lsf)   if [ -f "$WORK/calls/rclone-lsf-hold" ]; then
+               rm -f "$WORK/calls/folders-held-fail"
+               if [ -f "$WORK/calls/rclone-lsf-fail" ]; then
+                   : > "$WORK/calls/folders-held-fail"
+               else
+                   cat "$WORK/calls/folders" 2>/dev/null \
+                       > "$WORK/calls/folders-held"
+               fi
+               : > "$WORK/calls/folders-holding"
+               while [ -f "$WORK/calls/rclone-lsf-hold" ]; do sleep 0.05; done
+               [ -f "$WORK/calls/folders-held-fail" ] && exit 1
+               cat "$WORK/calls/folders-held"
+               exit 0
+           fi
+           [ -f "$WORK/calls/rclone-lsf-fail" ] && exit 1
            [ -f "$WORK/calls/folders" ] && cat "$WORK/calls/folders" ;;
     # A remote that takes seconds to answer. The re-authorise scenario uses this
     # to hold one sign-in in flight while a second activation arrives.
@@ -1061,6 +1088,62 @@ def scenario_settings_fail():
     return data
 
 
+def scenario_settings_worker():
+    """The settings window's worker hands its failures back.
+
+    _worker computed the failure list and wrote it into self.failures, which is
+    the reporting half's job: _finish() is what shows the list in the window and
+    what the other cases read. That made the worker the last method in the file
+    that both computes and stores, and left no way to ask it what it found. The
+    window's own reporting is checked here as well, because the failures still
+    have to reach it.
+    """
+    base = os.path.join(WORK, "worker-settings")
+    config = os.path.join(base, "config")
+    os.makedirs(base, exist_ok=True)
+    with open(config, "w", encoding="utf-8") as fh:
+        fh.write('REMOTE="traytest-remote:"\n')
+        fh.write('LOCAL="%s"\n' % os.path.join(base, "local"))
+        fh.write('UNIT_NAME="ztraytest"\n')
+        fh.write('LOG="%s"\n' % os.path.join(WORK, "cache", "sync.log"))
+        fh.write('INTERVAL_MIN="5"\n')
+        fh.write('UI_LANG="en"\n')
+    real_config = MODULE.CONFIG_FILE
+    MODULE.CONFIG_FILE = config
+    try:
+        cfg = MODULE.load_config()
+        # The window's own path first: Save, a failing systemd call, and what
+        # the dialog says about it. _finish() is the half that reports.
+        dialog = MODULE.SettingsDialog(None, cfg)
+        dialog.show_all()
+        dialog.spin_interval.set_value(30)
+        dialog.on_save()
+        wait_for(lambda: dialog.done or dialog.failures, 20.0)
+        pump(0.3)
+        # Read defensively: a worker that stores what it found instead of
+        # returning it hands _finish() a False, and the point of this case is
+        # to report that rather than to die on it.
+        shown = dialog.failures
+        reporting = {"done": bool(dialog.done),
+                     "failures": (list(shown) if isinstance(shown, (list, tuple))
+                                  else repr(shown)),
+                     "failures_is_list": isinstance(shown, (list, tuple)),
+                     "status_text": dialog.label_status.get_text()}
+        dialog.destroy()
+        # And the worker itself, asked what it found. Nothing here reads the
+        # window, so a worker that only stores its answer has nothing to give.
+        worker = MODULE.SettingsDialog(None, cfg)
+        worker.spin_interval.set_value(45)
+        returned = worker._worker(worker.values(),
+                                  worker.check_boot.get_active())
+    finally:
+        MODULE.CONFIG_FILE = real_config
+    return {"reporting": reporting,
+            "returned": (list(returned) if isinstance(returned, (list, tuple))
+                         else repr(returned)),
+            "returned_is_list": isinstance(returned, (list, tuple))}
+
+
 def scenario_about():
     """The About window: the version, where the config is, and the project."""
     tray = build()
@@ -1134,6 +1217,55 @@ def scenario_notify():
         MODULE.Notify = real
     return {"notify_on_success": cfg["NOTIFY_ON_SUCCESS"],
             "success_bodies": ok, "failure_bodies": bad}
+
+
+def scenario_notify_missed():
+    """A failure the poll never saw running is still announced.
+
+    The failure notification fires on the falling edge of the running state,
+    and the poll runs every three seconds: a run that starts and finishes
+    inside one tick is never seen as a running unit, so the failure it wrote
+    raised nothing at all while the icon went red. The log's own failure is the
+    second witness, and the one this case drives - through poll(), with a timer
+    stub that answers "inactive" for the whole scenario, so nothing here is
+    ever seen as running, and with the failure that was already in the log when
+    the tray started as the negative control.
+    """
+    cfg = dict(CFG)
+    log = os.path.join(os.path.dirname(cfg["LOG"]), "missed.log")
+    cfg["LOG"] = log
+    old = "2026/01/02 02:00:00 ERROR : [network] an hour-old failure\n"
+    new = "2026/01/02 04:05:06 ERROR : [network] remote unreachable\n"
+    shown = []
+    real_notify = MODULE.Notify
+    MODULE.Notify = install_fake_notify(shown)
+    try:
+        with open(log, "w", encoding="utf-8") as fh:
+            fh.write(old)
+        tray = MODULE.Tray(cfg)
+        GLib.timeout_add(200, tray.poll)
+        pump(1.5)
+        kind, when, tag, raw = MODULE.read_last_result(new)
+        data = {"at_start": list(shown),
+                "state_at_start": tray.state,
+                "was_syncing": bool(tray.was_syncing),
+                "hint": tray._hint(tag, raw)}
+        # The run that starts and finishes between two polls: the log moves
+        # while the units are never seen active.
+        del shown[:]
+        with open(log, "w", encoding="utf-8") as fh:
+            fh.write(new)
+        data["told"] = wait_for(lambda: bool(shown), 8.0)
+        data["bodies"] = list(shown)
+        data["state"] = tray.state
+        data["seen_running"] = bool(tray.was_syncing)
+        # Once, and not again on every tick that follows it.
+        del shown[:]
+        pump(7.0)
+        data["repeated"] = list(shown)
+    finally:
+        MODULE.Notify = real_notify
+    return data
 
 
 def scenario_icons():
@@ -1757,6 +1889,68 @@ def scenario_config_export():
     }
 
 
+def scenario_config_export_save():
+    """A Save rewrites a line with the prefix that line already had.
+
+    load_config() reads `export KEY=value` as KEY, and update_config_file()
+    rewrote a line it changed as `KEY=value`, so a hand-written export was
+    dropped by a settings save. The value and the meaning survived - which is
+    why this was recorded rather than urgent - but the file belongs to the user,
+    the reader accepts the prefix, so the writer keeps it. A line that never had
+    one must not gain one either: the writer is not in the business of
+    restyling the keys it does not touch.
+    """
+    base = os.path.join(WORK, "export-save")
+    config = os.path.join(base, "config")
+    os.makedirs(base, exist_ok=True)
+    with open(config, "w", encoding="utf-8") as fh:
+        fh.write('export REMOTE="export-remote:"\n')
+        fh.write('LOCAL="%s"\n' % os.path.join(base, "local"))
+        fh.write('UNIT_NAME="ztraytest"\n')
+        fh.write('LOG="%s"\n' % os.path.join(WORK, "cache", "sync.log"))
+        fh.write('export INTERVAL_MIN="5"\n')
+        fh.write('export MAX_DELETE="100"\n')
+        fh.write('BW_LIMIT="1M"\n')
+        fh.write('UI_LANG="en"\n')
+    real_config = MODULE.CONFIG_FILE
+    MODULE.CONFIG_FILE = config
+    try:
+        cfg = MODULE.load_config()
+        dialog = MODULE.SettingsDialog(None, cfg)
+        # One key the save changes that has a prefix, one that has none, and one
+        # it does not touch at all.
+        dialog.spin_interval.set_value(15)
+        dialog.spin_delete.set_value(200)
+        dialog.combo_bw.set_active_id("10M")
+        dialog.on_save()
+        saved = wait_for(lambda: dialog.done or dialog.failures, 20.0)
+        pump(0.5)
+        # Read defensively, the way the worker case does: a Save that failed
+        # must be reported by this scenario rather than taking the driver down
+        # with it.
+        reported = dialog.failures
+        data = {"saved": bool(saved and dialog.done),
+                "failures": (list(reported) if isinstance(reported, (list, tuple))
+                             else repr(reported)),
+                "config_text": read_text(config)}
+        dialog.destroy()
+        after = MODULE.load_config()
+    finally:
+        MODULE.CONFIG_FILE = real_config
+    data["values"] = {key: str(after.get(key) or "")
+                      for key in ("UI_LANG", "INTERVAL_MIN", "MAX_DELETE",
+                                  "BW_LIMIT")}
+    # And the lines themselves, which is where a prefix lives.
+    lines = {}
+    for line in data["config_text"].splitlines():
+        for key in ("REMOTE", "INTERVAL_MIN", "MAX_DELETE", "BW_LIMIT"):
+            prefix = "export " if line.startswith("export ") else ""
+            if line.startswith(prefix + key + "="):
+                lines[key] = line
+    data["lines"] = lines
+    return data
+
+
 def scenario_config_reload_fresh():
     """A reload re-resolves the six paths, and a changed one rebuilds the menu.
 
@@ -2130,8 +2324,15 @@ def scenario_config_unreadable():
             "cfg_local": str(tray.cfg.get("LOCAL") or ""),
         }
         os.remove(config)
-        tray._reload_config()
+        shown = []
+        real_notify = MODULE.Notify
+        MODULE.Notify = install_fake_notify(shown)
+        try:
+            tray._reload_config()
+        finally:
+            MODULE.Notify = real_notify
         data = {
+            "notified": list(shown),
             "before": before,
             "local": tray.local,
             "remote": tray.remote,
@@ -2262,7 +2463,9 @@ def scenario_log_result():
     try:
         _, timer_state = tray.unit_states()
         tray.was_syncing = True
-        tray.notified_error_at = None
+        # The failure this tray is about to be handed is news to it, whatever
+        # the log held before: the tracker is the parse, not the running edge.
+        tray.log_failure = None
         tray.state = None
         tray._apply_state(False, timer_state)
         cases["state"] = tray.state
@@ -2270,6 +2473,57 @@ def scenario_log_result():
     finally:
         MODULE.Notify = real_notify
     return cases
+
+
+def scenario_hint_langs():
+    """The `other` tag shows the wrapper's own line in either language.
+
+    _hint() falls back to the raw log line when the tag has no entry in the
+    table, and the zh table had one for `other` while English had none: the same
+    unclassified failure read as the wrapper's own line in English and as a
+    fixed sentence in Chinese. Both point at the log, and only one of them
+    carries the wrapper's `see log: <path>` text, so the raw line is what both
+    languages show. The tag is deliberately not a translation key: a log line is
+    the wrapper's data, not prose for the tray to rewrite.
+    """
+    line = ("2026/10/03 22:40:00 ERROR: attempt 3/3 failed (rc=1) "
+            "[other] see log: /tmp/sync.log")
+    log = os.path.join(WORK, "cache", "hint-other.log")
+    try:
+        os.remove(log)
+    except OSError:
+        pass
+    cfg = dict(CFG)
+    cfg["LOG"] = log
+    shown = []
+    real_notify = MODULE.Notify
+    MODULE.Notify = install_fake_notify(shown)
+    try:
+        # The tray first, with no log at all, and Chinese: the failure is then
+        # new to it when the file appears, so the status row and the
+        # notification are painted in the language the fixed sentence used to
+        # be shown in.
+        tray = MODULE.Tray(cfg)
+        GLib.timeout_add(200, tray.poll)
+        tray.t = MODULE.make_translator("zh")
+        pump(0.5)
+        with open(log, "w", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+        data = {"told": wait_for(lambda: bool(shown), 8.0)}
+        pump(0.3)
+        data["status"] = tray.item_status.get_label() or ""
+        data["bodies"] = list(shown)
+        # The two languages over the same parsed line: the hint is the
+        # wrapper's own text either way, and the two have to agree.
+        for lang in ("en", "zh"):
+            tray.t = MODULE.make_translator(lang)
+            kind, when, tag, raw = MODULE.read_last_result(line)
+            data[lang] = {"tag": tag, "raw": raw,
+                          "hint": tray._hint(tag, raw),
+                          "is_raw": tray._hint(tag, raw) == raw}
+    finally:
+        MODULE.Notify = real_notify
+    return data
 
 
 def scenario_log_cache_moved():
@@ -2876,6 +3130,220 @@ def scenario_folders_unlisted():
     return data
 
 
+def scenario_folders_stale():
+    """An answer in flight when the remote moves is dropped, not stored.
+
+    refresh_folders() and refresh_quota() run on a worker and store what they
+    answered when they finish. A reload that moves REMOTE clears those answers
+    and asks again, and that ask is skipped while the worker is busy, so the
+    answer already in flight used to land anyway: the submenu showed the old
+    account's folders - unticking one wrote that name into the exclusion file
+    that now governs the new remote - and a listing that failed for the old
+    remote left "could not list" against the new one. The stub holds both
+    answers here until after a reload has moved the remote and the binary.
+    """
+    calls = os.environ["TRAY_CALLS"]
+    lsf_hold = os.path.join(calls, "rclone-lsf-hold")
+    about_hold = os.path.join(calls, "rclone-about-hold")
+    markers = [lsf_hold, about_hold,
+               os.path.join(calls, "folders-holding"),
+               os.path.join(calls, "quota-holding"),
+               os.path.join(calls, "folders-held-fail"),
+               os.path.join(calls, "rclone-lsf-fail")]
+    folders_file = os.path.join(calls, "folders")
+    quota_file = os.path.join(calls, "quota-json")
+
+    base = os.path.join(WORK, "stale")
+    config = os.path.join(base, "config")
+    exclude = os.path.join(base, "exclude-folders.txt")
+    log = os.path.join(base, "sync.log")
+    local = os.path.join(base, "local")
+    os.makedirs(local, exist_ok=True)
+    remote_old, remote_new = "held-remote:", "fresh-remote:"
+    listing_old = ["src", "old-remote-only"]
+    listing_new = ["Docs", "Music"]
+    quota_old, quota_new = (111, 222), (7, 8)
+
+    def write_config(remote, rclone=""):
+        with open(config, "w", encoding="utf-8") as fh:
+            fh.write('REMOTE="%s"\n' % remote)
+            fh.write('LOCAL="%s"\n' % local)
+            fh.write('LOG="%s"\n' % log)
+            fh.write('EXCLUDE_FOLDERS_FILE="%s"\n' % exclude)
+            fh.write('UNIT_NAME="ztraytest"\n')
+            fh.write('UI_LANG="en"\n')
+            if rclone:
+                fh.write('RCLONE="%s"\n' % rclone)
+
+    def listing(names):
+        with open(folders_file, "w", encoding="utf-8") as fh:
+            fh.write("".join("%s/\n" % name for name in names))
+
+    def quota(used, total):
+        with open(quota_file, "w", encoding="utf-8") as fh:
+            fh.write('{"total": %d, "used": %d}\n' % (total, used))
+
+    original_folders = read_text(folders_file)
+    original_quota = read_text(quota_file)
+    real_config = MODULE.CONFIG_FILE
+    for marker in markers:
+        if os.path.exists(marker):
+            os.remove(marker)
+    try:
+        listing(listing_old)
+        quota(*quota_old)
+        # Both queries are held: the answers belong to the remote and the
+        # binary named now, and the reload below moves both.
+        for marker in (lsf_hold, about_hold):
+            with open(marker, "w", encoding="utf-8"):
+                pass
+        write_config(remote_old)
+        MODULE.CONFIG_FILE = config
+        clear_calls()
+        tray = MODULE.Tray(MODULE.load_config())
+        GLib.timeout_add(200, tray.poll)
+        data = {"remote_old": remote_old, "remote_new": remote_new,
+                "listing_new": list(listing_new), "quota_new": list(quota_new)}
+        data["held_listing"] = wait_for(
+            lambda: os.path.exists(os.path.join(calls, "folders-holding")), 8.0)
+        data["held_quota"] = wait_for(
+            lambda: os.path.exists(os.path.join(calls, "quota-holding")), 8.0)
+        data["busy_before"] = bool(tray.folders_busy and tray.quota_busy)
+        data["folders_before"] = (list(tray.folders)
+                                  if tray.folders is not None else None)
+
+        # The reload: a different remote, and a different rclone binary.
+        listing(listing_new)
+        quota(*quota_new)
+        write_config(remote_new, os.path.join(WORK, "stubs", "rclone-other"))
+        tray._reload_config()
+        data["remote_after"] = tray.remote
+        data["rclone_after"] = tray.rclone
+        data["cleared"] = bool(tray.folders is None and tray.quota is None)
+
+        # Now the two answers of the remote and the binary just left.
+        for marker in (lsf_hold, about_hold):
+            os.remove(marker)
+        data["relisted"] = wait_for(lambda: tray.folders == listing_new, 8.0)
+        data["requota"] = wait_for(
+            lambda: list(tray.quota or []) == list(quota_new), 8.0)
+        pump(0.8)
+        data["folders"] = (list(tray.folders)
+                           if tray.folders is not None else None)
+        data["quota"] = list(tray.quota) if tray.quota else None
+        data["error"] = tray.folders_error
+        data["labels"] = visible_labels(tray.menu)
+        data["stale_row"] = "old-remote-only" in data["labels"]
+        # The hazard the ledger names: unticking a row from the stale list
+        # writes that folder name into the file that now governs the new
+        # remote. Only a row that is really there can be unticked into it.
+        if data["stale_row"]:
+            find_at(tray.menu, "old-remote-only").set_active(False)
+            pump(0.8)
+        data["excluded"] = MODULE.read_excluded_folders(exclude)
+        data["calls"] = call_lines()
+    finally:
+        for marker in markers:
+            if os.path.exists(marker):
+                os.remove(marker)
+        MODULE.CONFIG_FILE = real_config
+        with open(folders_file, "w", encoding="utf-8") as fh:
+            fh.write(original_folders)
+        with open(quota_file, "w", encoding="utf-8") as fh:
+            fh.write(original_quota)
+    return data
+
+
+def scenario_rclone_stale():
+    """A moved RCLONE drops the answers that binary fetched.
+
+    The folder list and the quota row were fetched from the binary the config
+    named. A reload that moved RCLONE re-resolved the binary and rebuilt the
+    menu without touching either, so both went on describing the build that was
+    left behind until the next half-hour refresh. REMOTE does not move here, so
+    the binary is the only thing that can be doing it.
+    """
+    calls = os.environ["TRAY_CALLS"]
+    folders_file = os.path.join(calls, "folders")
+    quota_file = os.path.join(calls, "quota-json")
+
+    base = os.path.join(WORK, "rclone-stale")
+    config = os.path.join(base, "config")
+    exclude = os.path.join(base, "exclude-folders.txt")
+    log = os.path.join(base, "sync.log")
+    local = os.path.join(base, "local")
+    os.makedirs(local, exist_ok=True)
+    listing_old = ["src", "old-binary-only"]
+    listing_new = ["Docs", "new-binary-only"]
+    quota_old, quota_new = (111, 222), (7, 8)
+
+    def write_config(rclone):
+        with open(config, "w", encoding="utf-8") as fh:
+            fh.write('REMOTE="binary-remote:"\n')
+            fh.write('LOCAL="%s"\n' % local)
+            fh.write('LOG="%s"\n' % log)
+            fh.write('EXCLUDE_FOLDERS_FILE="%s"\n' % exclude)
+            fh.write('UNIT_NAME="ztraytest"\n')
+            fh.write('UI_LANG="en"\n')
+            if rclone:
+                fh.write('RCLONE="%s"\n' % rclone)
+
+    def listing(names):
+        with open(folders_file, "w", encoding="utf-8") as fh:
+            fh.write("".join("%s/\n" % name for name in names))
+
+    def quota(used, total):
+        with open(quota_file, "w", encoding="utf-8") as fh:
+            fh.write('{"total": %d, "used": %d}\n' % (total, used))
+
+    original_folders = read_text(folders_file)
+    original_quota = read_text(quota_file)
+    real_config = MODULE.CONFIG_FILE
+    try:
+        listing(listing_old)
+        quota(*quota_old)
+        write_config("")
+        MODULE.CONFIG_FILE = config
+        clear_calls()
+        tray = MODULE.Tray(MODULE.load_config())
+        GLib.timeout_add(200, tray.poll)
+        data = {"binary": tray.rclone,
+                "listing_old": list(listing_old),
+                "listing_new": list(listing_new),
+                "quota_old": list(quota_old), "quota_new": list(quota_new)}
+        data["listed"] = wait_for(lambda: tray.folders == listing_old, 8.0)
+        data["quoted"] = wait_for(
+            lambda: list(tray.quota or []) == list(quota_old), 8.0)
+
+        # The same remote, a different binary.
+        listing(listing_new)
+        quota(*quota_new)
+        write_config(os.path.join(WORK, "stubs", "rclone-other"))
+        tray._reload_config()
+        data["binary_after"] = tray.rclone
+        # Read at once: the old answer is either gone or already replaced, and
+        # it is never the thing left on screen.
+        data["kept_folders"] = (list(tray.folders)
+                                if tray.folders is not None else None)
+        data["kept_quota"] = list(tray.quota) if tray.quota else None
+        data["relisted"] = wait_for(lambda: tray.folders == listing_new, 8.0)
+        data["requota"] = wait_for(
+            lambda: list(tray.quota or []) == list(quota_new), 8.0)
+        pump(0.5)
+        data["folders"] = (list(tray.folders)
+                           if tray.folders is not None else None)
+        data["quota"] = list(tray.quota) if tray.quota else None
+        data["asked_other"] = [line for line in call_lines()
+                               if line.startswith("rclone-other")]
+    finally:
+        MODULE.CONFIG_FILE = real_config
+        with open(folders_file, "w", encoding="utf-8") as fh:
+            fh.write(original_folders)
+        with open(quota_file, "w", encoding="utf-8") as fh:
+            fh.write(original_quota)
+    return data
+
+
 def scenario_settings_enabled():
     """A yes/no value spelled "enabled" is on, and a Save leaves it alone.
 
@@ -3291,6 +3759,60 @@ def scenario_relative_local():
     return data
 
 
+def scenario_reload_relative_local():
+    """A reload that makes LOCAL relative is refused, and says why.
+
+    main() refuses a relative LOCAL before it builds a tray: the delete guard
+    resolves it against the tray process's own working directory, which systemd
+    leaves at the user's home, while rclone syncs nothing there. The reload path
+    had no such check, so a hand edit to LOCAL="OneDrive" was applied to the
+    running tray - the guard then refused every deletion, because the tree it
+    resolved is outside the sync root, while the tray went on running with a
+    path nothing syncs. The refusal keeps the value already in use, the way the
+    missing-REMOTE refusal does, and it is said out loud: the reload has no
+    window of its own.
+    """
+    base = os.path.join(WORK, "relative-reload")
+    config = os.path.join(base, "config")
+    local = os.path.join(base, "local")
+    exclude = os.path.join(base, "exclude-folders.txt")
+    os.makedirs(os.path.join(local, "Archive"), exist_ok=True)
+
+    def write(local_value):
+        with open(config, "w", encoding="utf-8") as fh:
+            fh.write('REMOTE="traytest-remote:"\n')
+            fh.write('LOCAL="%s"\n' % local_value)
+            fh.write('UNIT_NAME="ztraytest"\n')
+            fh.write('LOG="%s"\n' % os.path.join(WORK, "cache", "sync.log"))
+            fh.write('EXCLUDE_FOLDERS_FILE="%s"\n' % exclude)
+            fh.write('UI_LANG="en"\n')
+
+    shown = []
+    real_notify = MODULE.Notify
+    real_config = MODULE.CONFIG_FILE
+    MODULE.Notify = install_fake_notify(shown)
+    try:
+        write(local)
+        MODULE.CONFIG_FILE = config
+        tray = MODULE.Tray(MODULE.load_config())
+        pump(0.5)
+        before = {"local": tray.local, "cfg_local": str(tray.cfg.get("LOCAL") or ""),
+                  "delete": tray._local_delete_path("Archive")}
+        del shown[:]
+        # The hand edit: a relative LOCAL, everything else unchanged.
+        write("OneDrive")
+        tray._reload_config()
+        pump(0.5)
+        data = {"before": before, "local": tray.local,
+                "cfg_local": str(tray.cfg.get("LOCAL") or ""),
+                "delete": tray._local_delete_path("Archive"),
+                "notices": list(shown)}
+    finally:
+        MODULE.Notify = real_notify
+        MODULE.CONFIG_FILE = real_config
+    return data
+
+
 def scenario_local_delete_path():
     """The delete confirmation names the directory it will remove.
 
@@ -3349,23 +3871,30 @@ SCENARIOS = {
     "stale-state": scenario_stale_state,
     "stale-state-cache": scenario_stale_state_cache,
     "relative-local": scenario_relative_local,
+    "reload-relative-local": scenario_reload_relative_local,
     "local-delete-path": scenario_local_delete_path,
     "settings-view": scenario_settings_view,
     "settings-bandwidth": scenario_settings_bandwidth,
     "settings-markers": scenario_settings_markers,
     "settings-save": scenario_settings_save,
     "settings-fail": scenario_settings_fail,
+    "settings-worker": scenario_settings_worker,
     "about": scenario_about,
     "notify": scenario_notify,
+    "notify-missed": scenario_notify_missed,
     "notify-manual": scenario_notify_manual,
     "config-reload": scenario_config_reload,
     "config-comments": scenario_config_comments,
     "config-export": scenario_config_export,
+    "config-export-save": scenario_config_export_save,
     "config-reload-fresh": scenario_config_reload_fresh,
     "config-unreadable": scenario_config_unreadable,
     "config-unreadable-poll": scenario_config_unreadable_poll,
     "log-result": scenario_log_result,
+    "hint-langs": scenario_hint_langs,
     "log-cache-moved": scenario_log_cache_moved,
+    "folders-stale": scenario_folders_stale,
+    "rclone-stale": scenario_rclone_stale,
     "pause-survives-poll": scenario_pause_survives_poll,
     "manual-missed": scenario_manual_missed,
     "poll-cost": scenario_poll_cost,
@@ -4033,6 +4562,47 @@ if d["not_a_prefix"] != "kept" or d["other"] != "1":
 '
 fi
 
+title "A settings save and the export prefix"
+# The reader above accepts `export KEY=value`, and the writer rewrote a line it
+# changed as `KEY=value`, so a settings save dropped a prefix the user's file
+# had. The value and the meaning survived, which is why this was recorded rather
+# than urgent; the file is the user's, and the key is not the writer's to
+# restyle. A line that never had a prefix must not gain one either.
+if run_driver config-export-save; then
+    check "the save went through and reported nothing" json_py '
+if not d["saved"] or d["failures"]:
+    print("saved=%r failures=%r" % (d["saved"], d["failures"]))
+    raise SystemExit(1)
+'
+    check "a changed line keeps the export prefix it had" json_py '
+for key in ("INTERVAL_MIN", "MAX_DELETE"):
+    line = d["lines"].get(key, "")
+    if not line.startswith("export "):
+        print("%s came back as %r, without its export prefix" % (key, line))
+        raise SystemExit(1)
+'
+    check "a line the save did not touch keeps its prefix too" json_py '
+line = d["lines"].get("REMOTE", "")
+if not line.startswith("export REMOTE="):
+    print("REMOTE came back as %r" % (line,))
+    raise SystemExit(1)
+'
+    check "a line without a prefix does not gain one" json_py '
+line = d["lines"].get("BW_LIMIT", "")
+if line.startswith("export "):
+    print("BW_LIMIT gained a prefix it never had: %r" % (line,))
+    raise SystemExit(1)
+'
+    check "and every value the save changed is the one it wrote" json_py '
+want = {"INTERVAL_MIN": "15", "MAX_DELETE": "200", "BW_LIMIT": "10M",
+        "UI_LANG": "en"}
+for key, value in want.items():
+    if d["values"].get(key) != value:
+        print("%s reads back as %r, wanted %r" % (key, d["values"].get(key), value))
+        raise SystemExit(1)
+'
+fi
+
 title "A reload re-resolves the six startup snapshots"
 # The config keys behind the two "open" rows, the folder submenu's exclusion
 # list, the remote the quota asks about and the delete guard's root are resolved
@@ -4190,6 +4760,14 @@ if d["delete"] != d["before"]["delete"]:
           % (d["delete"], d["before"]["delete"], d["default_root"]))
     raise SystemExit(1)
 '
+    check "and it says why it stopped following the file" json_py '
+if not any("not applied" in body for body in d["notified"]):
+    print("nothing said the config was not applied: %r" % (d["notified"],))
+    raise SystemExit(1)
+if not any("REMOTE" in body for body in d["notified"]):
+    print("and the sentence does not name REMOTE: %r" % (d["notified"],))
+    raise SystemExit(1)
+'
 fi
 
 title "A poll over a config that cannot be read"
@@ -4251,7 +4829,10 @@ if d["synced"] != ["synced", "22:30", "", "", ""]:
     check "a failure with no tag falls back to other and the raw line" json_py '
 line = ("2026/10/03 22:40:00 ERROR : Bisync aborted. Must run --resync to "
         "recover.")
-want = ["error", "22:40", "other", line, "详见同步日志"]
+# The fourth entry is the hint. It used to be the Chinese fixed sentence while
+# English showed the raw line; the two languages now show the same thing, and
+# the thing they show is the line the wrapper wrote.
+want = ["error", "22:40", "other", line, line]
 if d["untagged"] != want:
     print("got %r" % (d["untagged"],))
     raise SystemExit(1)
@@ -4262,6 +4843,43 @@ if d["state"] != "error":
     raise SystemExit(1)
 if "22:21" not in d["status"] or "网络" not in d["status"]:
     print("status=%r" % (d["status"],))
+    raise SystemExit(1)
+'
+fi
+
+title "The untagged failure hint in both languages"
+# _hint() falls back to the raw line only when the tag has no entry in the
+# table. The zh table had one for `other` and English had none, so the same
+# unclassified failure read as the wrapper's own `see log: <path>` line in
+# English and as a fixed sentence in Chinese. Both point at the log and only one
+# of them carries the path, so the raw line is what both languages show: a log
+# line is the wrapper's data, not prose for the tray to rewrite.
+if run_driver hint-langs; then
+    check "the other tag yields the raw line under UI_LANG=en" json_py '
+if d["en"]["tag"] != "other":
+    print("the line parsed as tag %r, not other" % (d["en"]["tag"],))
+    raise SystemExit(1)
+if not d["en"]["is_raw"]:
+    print("hint=%r raw=%r" % (d["en"]["hint"], d["en"]["raw"]))
+    raise SystemExit(1)
+'
+    check "and the same raw line under UI_LANG=zh" json_py '
+if not d["zh"]["is_raw"]:
+    print("hint=%r raw=%r" % (d["zh"]["hint"], d["zh"]["raw"]))
+    raise SystemExit(1)
+if d["zh"]["hint"] != d["en"]["hint"]:
+    print("the two languages disagree: %r against %r"
+          % (d["zh"]["hint"], d["en"]["hint"]))
+    raise SystemExit(1)
+'
+    check "and the status row under Chinese carries it too" json_py '
+if "see log: /tmp/sync.log" not in d["status"]:
+    print("status=%r" % (d["status"],))
+    raise SystemExit(1)
+'
+    check "and so does the notification" json_py '
+if not any("see log: /tmp/sync.log" in body for body in d["bodies"]):
+    print("bodies=%r" % (d["bodies"],))
     raise SystemExit(1)
 '
 fi
@@ -4378,6 +4996,109 @@ if not d["asked_again"]:
     raise SystemExit(1)
 if not d["retried"] or "Docs" not in d["labels_after"]:
     print("the retry did not bring the folders in: %r" % (d["labels_after"],))
+    raise SystemExit(1)
+'
+fi
+
+title "An answer that was in flight when the remote moved"
+# refresh_folders() and refresh_quota() store what they answered when their
+# worker finishes. The ask a moved remote triggers is skipped while the worker is
+# busy, and the worker did not check which remote - or which binary - it had
+# asked, so an answer already in flight landed anyway: the submenu showed the old
+# account's folders, unticking one wrote that name into the exclusion file that
+# now governs the new remote, and a listing that failed for the old remote was
+# stored as "could not list" the new one. The stub holds both answers until after
+# the reload, which is what makes the ordering happen.
+if run_driver folders-stale; then
+    check "both answers really were in flight across the reload" json_py '
+if not (d["held_listing"] and d["held_quota"] and d["busy_before"]):
+    print("held_listing=%r held_quota=%r busy=%r"
+          % (d["held_listing"], d["held_quota"], d["busy_before"]))
+    raise SystemExit(1)
+if d["folders_before"] is not None:
+    print("a listing landed before the stub was released: %r"
+          % (d["folders_before"],))
+    raise SystemExit(1)
+'
+    check "the reload moved both the remote and the binary" json_py '
+if d["remote_after"] != d["remote_new"] or "rclone-other" not in d["rclone_after"]:
+    print("remote=%r rclone=%r" % (d["remote_after"], d["rclone_after"]))
+    raise SystemExit(1)
+if not d["cleared"]:
+    print("the reload did not clear the answers it moved away from")
+    raise SystemExit(1)
+'
+    check "the old remote's listing is not stored" json_py '
+if d["folders"] is None or "old-remote-only" in d["folders"]:
+    print("folders=%r (the stale listing was %r)"
+          % (d["folders"], ["src", "old-remote-only"]))
+    raise SystemExit(1)
+'
+    check "the folder submenu does not offer the old account's folder" json_py '
+if d["stale_row"]:
+    print("the submenu lists a folder of the remote that was left: %r"
+          % (d["labels"],))
+    raise SystemExit(1)
+'
+    check "so unticking cannot write the stale name" json_py '
+if "old-remote-only" in d["excluded"]:
+    print("the stale name reached the exclusion file: %r" % (d["excluded"],))
+    raise SystemExit(1)
+'
+    check "the new remote's folders arrive without the half-hour wait" json_py '
+if d["folders"] != d["listing_new"]:
+    print("folders=%r wanted %r (error=%r)"
+          % (d["folders"], d["listing_new"], d["error"]))
+    raise SystemExit(1)
+'
+    check "and the quota is asked again rather than kept" json_py '
+if d["quota"] != d["quota_new"]:
+    print("quota=%r wanted %r" % (d["quota"], d["quota_new"]))
+    raise SystemExit(1)
+'
+    check "and it is the new binary that answered" json_py '
+if not any(line.startswith("rclone-other") for line in d["calls"]):
+    print("calls: %r" % (d["calls"],))
+    raise SystemExit(1)
+'
+fi
+
+title "A reload that moves only the rclone binary"
+# The other ledger entry for the same shape: RCLONE moves, REMOTE does not. The
+# binary was re-resolved and the menu rebuilt, and the folder list and the quota
+# row - both fetched from the binary being left behind - were kept, so they
+# described the wrong build until the next refresh.
+if run_driver rclone-stale; then
+    check "the first binary answered both queries" json_py '
+if not d["listed"] or not d["quoted"]:
+    print("listed=%r quoted=%r" % (d["listed"], d["quoted"]))
+    raise SystemExit(1)
+if "rclone-other" in d["binary"]:
+    print("the tray started on the wrong binary: %r" % (d["binary"],))
+    raise SystemExit(1)
+'
+    check "moving RCLONE drops the answers that binary fetched" json_py '
+if d["kept_folders"] == d["listing_old"]:
+    print("the folders of the binary that was left were kept: %r"
+          % (d["kept_folders"],))
+    raise SystemExit(1)
+if d["kept_quota"] == d["quota_old"]:
+    print("the quota of the binary that was left was kept: %r"
+          % (d["kept_quota"],))
+    raise SystemExit(1)
+if "rclone-other" not in d["binary_after"]:
+    print("rclone after the reload: %r" % (d["binary_after"],))
+    raise SystemExit(1)
+'
+    check "and asks the new binary for both, without waiting" json_py '
+if not d["relisted"] or d["folders"] != d["listing_new"]:
+    print("folders=%r wanted %r" % (d["folders"], d["listing_new"]))
+    raise SystemExit(1)
+if not d["requota"] or d["quota"] != d["quota_new"]:
+    print("quota=%r wanted %r" % (d["quota"], d["quota_new"]))
+    raise SystemExit(1)
+if not d["asked_other"]:
+    print("the new binary was never asked")
     raise SystemExit(1)
 '
 fi
@@ -5378,6 +6099,45 @@ if "OnUnitInactiveSec=30min" not in d["dropin"]:
 fi
 rm -f "$WORK/calls/systemctl-fail"
 
+title "What the settings window's worker does with a failure"
+# _worker computed the failure list and wrote it into self.failures, which is the
+# reporting half's job: _finish() is what shows the list and what the other cases
+# read. It was the last method in the file that both computes and stores, and
+# there was no way to ask it what it found. The window's own reporting is checked
+# here with it, because the failures still have to reach it.
+: > "$WORK/calls/systemctl-fail"
+if run_driver settings-worker; then
+    check "the worker returns the failures it found" json_py '
+if not d["returned_is_list"]:
+    print("the worker answered %r, so it kept its failures to itself"
+          % (d["returned"],))
+    raise SystemExit(1)
+if len(d["returned"]) != 1 or "Could not apply the sync interval" not in d["returned"][0]:
+    print("returned: %r" % (d["returned"],))
+    raise SystemExit(1)
+'
+    check "and the window still shows them, exactly as it did" json_py '
+if d["reporting"]["done"]:
+    print("the window closed over a failure it never reported")
+    raise SystemExit(1)
+if not d["reporting"]["failures_is_list"]:
+    print("what the window stored was not a list of failures: %r"
+          % (d["reporting"]["failures"],))
+    raise SystemExit(1)
+if len(d["reporting"]["failures"]) != 1:
+    print("failures: %r" % (d["reporting"]["failures"],))
+    raise SystemExit(1)
+if "Could not apply the sync interval" not in d["reporting"]["status_text"]:
+    print("status: %r" % (d["reporting"]["status_text"],))
+    raise SystemExit(1)
+if d["returned"] != d["reporting"]["failures"]:
+    print("the returned list and the shown list differ: %r against %r"
+          % (d["returned"], d["reporting"]["failures"]))
+    raise SystemExit(1)
+'
+fi
+rm -f "$WORK/calls/systemctl-fail"
+
 title "About"
 if run_driver about; then
     check "it names the application and the version" json_py '
@@ -5430,6 +6190,45 @@ if not any("Sync finished" in body for body in d["manual_bodies"]):
 if any("Sync finished" in body for body in d["scheduled_bodies"]):
     print("the scheduled run announced itself: %r (the failure before it was %r)"
           % (d["scheduled_bodies"], d["failed_bodies"]))
+    raise SystemExit(1)
+'
+fi
+
+title "A failure the poll never saw running"
+# The notification fires on the falling edge of the running state, and rclone's
+# run is short enough to start and finish inside one three-second tick: the tray
+# then never sees it as running, and the failure it wrote raised nothing while
+# the icon went red. The log's own failure is the second witness. A failure that
+# was already in the log when the tray started is not news, and the same failure
+# may not be announced twice.
+if run_driver notify-missed; then
+    check "a failure older than the tray is not announced" json_py '
+if d["at_start"]:
+    print("the old failure was announced at startup: %r" % (d["at_start"],))
+    raise SystemExit(1)
+'
+    check "the tray never saw a run, so the falling edge cannot fire" json_py '
+if d["was_syncing"] or d["seen_running"]:
+    print("a run was seen as running: was=%r seen=%r"
+          % (d["was_syncing"], d["seen_running"]))
+    raise SystemExit(1)
+if d["state"] != "error":
+    print("the icon did not go red, so there was no failure to announce: %r"
+          % (d["state"],))
+    raise SystemExit(1)
+'
+    check "a failure that starts and ends between two polls is announced" json_py '
+if not d["told"]:
+    print("nothing was announced for a run that failed between two polls "
+          "(state=%r)" % (d["state"],))
+    raise SystemExit(1)
+if d["bodies"] != [d["hint"]]:
+    print("bodies=%r wanted %r" % (d["bodies"], [d["hint"]]))
+    raise SystemExit(1)
+'
+    check "and the same failure is not announced again" json_py '
+if d["repeated"]:
+    print("the same failure was announced again: %r" % (d["repeated"],))
     raise SystemExit(1)
 '
 fi
@@ -5639,6 +6438,32 @@ if d["root_guard"] is not None:
     raise SystemExit(1)
 if d["root_guard_refused"] is not None:
     print("the guard returned %r for LOCAL=\"/\"" % (d["root_guard_refused"],))
+    raise SystemExit(1)
+'
+fi
+
+title "A reload whose LOCAL is relative"
+# main() refuses a relative LOCAL before it builds a tray, and the reload path
+# had no such check: a hand edit to LOCAL="OneDrive" was applied to the running
+# tray, whose delete guard then resolved it against whatever directory the
+# process happened to run in - systemd leaves that at the user's home - while
+# rclone synced nothing there. The refusal keeps the value already in use, the
+# way the missing-REMOTE refusal does, and it says why.
+if run_driver reload-relative-local; then
+    check "the reload keeps the LOCAL the tray was using" json_py '
+if d["local"] != d["before"]["local"] or d["cfg_local"] != d["before"]["cfg_local"]:
+    print("local=%r before=%r; cfg local=%r before=%r"
+          % (d["local"], d["before"]["local"],
+             d["cfg_local"], d["before"]["cfg_local"]))
+    raise SystemExit(1)
+'
+    check "and it says why the file was not applied" json_py '
+if not d["notices"]:
+    print("the reload refused the file without telling anyone")
+    raise SystemExit(1)
+body = " ".join(d["notices"])
+if "LOCAL" not in body or "absolute" not in body:
+    print("notices: %r" % (d["notices"],))
     raise SystemExit(1)
 '
 fi

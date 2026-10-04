@@ -386,7 +386,14 @@ def shell_quote_value(value) -> str:
     return f'"{text}"'
 
 
-KEY_RE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=")
+# The text in front of a key, which the writer puts back, and the key itself.
+# `export KEY=value` is the same setting to load_config(), to onedrive-sync and
+# to the doctor, and a line is replaced in place, so the prefix a hand-written
+# file has is kept rather than quietly dropped by the next settings save. The
+# leading whitespace belongs to the prefix for the same reason: it was there
+# before the save.
+KEY_RE = re.compile(
+    r"^(?P<prefix>\s*(?:export\s+)?)(?P<key>[A-Za-z_][A-Za-z0-9_]*)\s*=")
 
 
 def write_atomic(path: str, text: str) -> None:
@@ -466,6 +473,11 @@ def update_config_file(path: str, changes: dict) -> list:
     lines whose keys are being changed are replaced and keys that are missing are
     appended at the end.
 
+    A line is replaced with its own prefix: `export KEY=value` is the setting
+    load_config() reads, so a save that changed that key used to drop the word
+    the user wrote. Keys that had to be appended get no prefix, because there was
+    no line to take one from.
+
     Returns the keys that had to be appended. Raises OSError when the file cannot
     be read or written.
     """
@@ -480,9 +492,10 @@ def update_config_file(path: str, changes: dict) -> list:
         found = KEY_RE.match(line)
         if not found:
             continue
-        key = found.group(1)
+        key = found.group("key")
         if key in wanted:
-            lines[index] = f"{key}={shell_quote_value(wanted.pop(key))}"
+            lines[index] = (f"{found.group('prefix')}{key}="
+                            f"{shell_quote_value(wanted.pop(key))}")
 
     appended = sorted(wanted)
     if appended:
@@ -809,7 +822,12 @@ STRINGS = {
             "无法修改实时同步服务：{why}",
         "Could not change the login setting: {why}":
             "无法修改开机自启动设置：{why}",
-        "other": "详见同步日志",
+        "The config file was not applied: {why}": "配置文件未生效：{why}",
+        "REMOTE is not set in it": "里面没有设置 REMOTE",
+        # Kept although _hint() answers the `other` tag with the wrapper's own
+        # line in every language, because a log line is not prose to translate.
+        # tests/docs.sh requires every tag onedrive-sync writes to have a tray
+        # string, and this is that string; dropping it turns that gate red.
     },
 }
 DEFAULT_LANG = "en"
@@ -1330,7 +1348,13 @@ class Tray:
         self.shown_icon = self.icons["unknown"]
         self.sync_pct = None       # percentage last drawn into the syncing icon
         self.was_syncing = False
-        self.notified_error_at = None
+        # The failure the log is showing, as the parse saw it, and whether the
+        # log has been read at all. The falling edge of was_syncing is not the
+        # only thing that ends a run - one short enough to start and finish
+        # between two polls is never seen as running - so the failure left in
+        # the log is tracked as well. See _announce_finish().
+        self.log_failure = None
+        self.log_looked = False
         self.manual_requested = False
         self.busy = False
         # The re-authorise row runs a terminal and a flow that waits minutes for
@@ -1418,29 +1442,55 @@ class Tray:
         self.refresh_folders()
 
     def refresh_folders(self):
-        """List the remote's top-level folders off the main loop."""
+        """List the remote's top-level folders off the main loop.
+
+        The request carries the remote and the binary it was made for. A reload
+        can move either while the worker is asking - a settings save, a hand
+        edit, the poll's own reload - and the answer that comes back then
+        describes an account or a build the tray has just left. The re-ask that
+        move wants is refused while this flag is set, so without the tag the
+        stale answer landed: the submenu showed the old account's folders, and
+        unticking one wrote that name into the exclusion file that now governs
+        the new remote. `folders_error` is part of that answer and is dropped
+        with it, or a listing that failed for the old remote would be stored as
+        "could not list" the new one.
+        """
         if not self.folders_busy:
             self.folders_busy = True
+            tag = (self.remote, self.rclone)
 
             def worker():
+                stale = False
                 try:
-                    listed = remote_folders(self.remote, self.rclone)
+                    listed = remote_folders(tag[0], tag[1])
+                    stale = tag != (self.remote, self.rclone)
                     # None means the listing failed. Storing it turned the submenu
                     # into one greyed "Loading…" row, and a folder the user had
                     # deselected could not be ticked again until the next
                     # half-hour refresh. The failure is remembered instead, so a
                     # listing that has never arrived can say so and offer the
                     # retry rather than wait for that refresh.
-                    if listed is not None:
-                        self.folders = listed
-                        self.folders_error = ""
-                    else:
-                        self.folders_error = self.remote or self.rclone
+                    if not stale:
+                        if listed is not None:
+                            self.folders = listed
+                            self.folders_error = ""
+                        else:
+                            self.folders_error = tag[0] or tag[1]
                 finally:
                     self.folders_busy = False
+                    if stale:
+                        # The ask this answer's move wanted was refused while
+                        # this worker held the flag; it happens now, once the
+                        # flag is down and the stale answer is out of the way.
+                        GLib.idle_add(self._ask_folders_again)
 
             threading.Thread(target=worker, daemon=True).start()
         return True
+
+    def _ask_folders_again(self):
+        """Ask for the listing once more, from an idle callback."""
+        self.refresh_folders()
+        return False
 
     def _build_folder_menu(self):
         """One check item per remote folder; checked means kept locally."""
@@ -1718,7 +1768,6 @@ class Tray:
             if ok:
                 self.notify(APP_NAME, self.t("Signed in. Syncing now."))
                 self.state = None
-                self.notified_error_at = None
                 threading.Thread(target=self._start_service, daemon=True).start()
             else:
                 self.notify(APP_NAME, self.t("The sign-in did not finish: {why}",
@@ -1903,14 +1952,23 @@ class Tray:
         return False
 
     def refresh_quota(self):
-        """Query the account quota off the main loop; never block the menu."""
+        """Query the account quota off the main loop; never block the menu.
+
+        The same tag as the folder listing, and for the same reason: an
+        account's usage read through a binary the config has since left is not
+        this remote's usage either, and the ask that move wanted was refused
+        while this worker was busy.
+        """
         if not self.quota_busy:
             self.quota_busy = True
+            tag = (self.remote, self.rclone)
 
             def worker():
+                stale = False
                 try:
-                    result = read_quota(self.remote, self.rclone)
-                    if result:
+                    result = read_quota(tag[0], tag[1])
+                    stale = tag != (self.remote, self.rclone)
+                    if result and not stale:
                         self.quota = result
                         # Show it now, not at the next poll tick up to three
                         # seconds later: the suite once caught that gap as a
@@ -1920,9 +1978,16 @@ class Tray:
                         GLib.idle_add(self._refresh_now)
                 finally:
                     self.quota_busy = False
+                    if stale:
+                        GLib.idle_add(self._ask_quota_again)
 
             threading.Thread(target=worker, daemon=True).start()
         return True
+
+    def _ask_quota_again(self):
+        """Ask for the quota once more, from an idle callback."""
+        self.refresh_quota()
+        return False
 
     # -------------------------------------------------- menu
     def _build_menu(self):
@@ -2128,7 +2193,9 @@ class Tray:
         old account's folders in the submenu - unticking one wrote that name into
         the exclusion file that now governs the new remote - and showed the old
         account's usage in the quota row, until the 1800-second refresh replaced
-        them.
+        them. A binary that moved is the same case with a different name on it:
+        the two answers were read through the build being left behind, so they go
+        with it as well and both are asked again.
 
         UNIT_NAME is deliberately not one of them. self.service, self.timer and
         self.watch were resolved from it when the tray started and the poll keeps
@@ -2145,7 +2212,7 @@ class Tray:
             "rclone": fresh.get("RCLONE") or "rclone",
         }
         moved = False
-        remote_moved = False
+        answers_moved = False
         for name, value in wanted.items():
             if getattr(self, name) != value:
                 moved = True
@@ -2159,22 +2226,25 @@ class Tray:
                     self.log_signature = None
                     self.log_tail = ""
                     self.log_result = ("unknown", "", "", "")
-                elif name == "remote":
+                elif name in ("remote", "rclone"):
                     # The listing and the quota are answers about the remote that
-                    # was just left behind, so they go with it. The caller's
-                    # _build_menu() paints the cleared state before an answer
-                    # lands: the folder row says Loading… and the quota row is
-                    # hidden rather than showing the old account.
+                    # was just left behind - read through the binary that was - so
+                    # they go with it. The caller's _build_menu() paints the
+                    # cleared state before an answer lands: the folder row says
+                    # Loading… and the quota row is hidden rather than showing the
+                    # old account.
                     self.folders = None
                     self.folders_seen = None
                     self.folders_error = ""
                     self.folders_error_seen = ""
                     self.quota = None
-                    remote_moved = True
+                    answers_moved = True
                 setattr(self, name, value)
-        if remote_moved:
+        if answers_moved:
             # The functions that already run on the 1800-second timers, called now
-            # instead of waited on.
+            # instead of waited on. An ask that is refused because a worker is
+            # still busy is made again by that worker, which knows its answer is
+            # about the thing being left behind.
             self.refresh_folders()
             self.refresh_quota()
         return moved
@@ -2192,10 +2262,13 @@ class Tray:
         the rest go into self.cfg for the code that reads them when it needs
         them, because that code is running too.
 
-        A file that cannot be trusted is not applied at all: see the REMOTE check
-        below. The tray keeps what it was using rather than moving onto the
-        defaults an unreadable file comes back as, and a save that puts REMOTE
-        back is applied normally on the tick that notices it.
+        A file that cannot be trusted is not applied at all: see the REMOTE and
+        LOCAL checks below. The tray keeps what it was using rather than moving
+        onto the defaults an unreadable file comes back as, and a save that puts
+        REMOTE back is applied normally on the tick that notices it. What is
+        refused is said out loud: this process has no window of its own, so a
+        notification is the only way it can tell the user that the edit it just
+        picked up is not in use.
         """
         # Every key, not only the two the window applies: NOTIFY_ON_SUCCESS is
         # read when a run ends, so a standalone --settings save has to land in
@@ -2222,7 +2295,25 @@ class Tray:
             # folder menu would offer to delete a directory under a root the
             # confirmation dialog never mentioned. Refusing keeps what is already
             # in use; the file coming back with REMOTE set is a change like any
-            # other.
+            # other. The LOCAL refusal below says why it refused; this one is the
+            # same kind of news about the same file, so it speaks the same way
+            # rather than leaving a tray that stopped following its config looking
+            # like one that has nothing to report.
+            self.notify(APP_NAME, self.t("The config file was not applied: {why}",
+                                         why=self.t("REMOTE is not set in it")))
+            return
+        bad_local = local_path_problem(fresh.get("LOCAL"))
+        if bad_local:
+            # The other rule main() applies before it builds a tray, applied to
+            # the file a running one just picked up. A relative LOCAL is resolved
+            # against whatever directory this process happens to run in - systemd
+            # starts the tray with no WorkingDirectory, so that is the user's home
+            # - and the delete guard then checks a tree rclone never syncs while
+            # the tray goes on running on it. The guard already refuses every
+            # deletion in that state; this is the sentence that says why, and
+            # keeps the value that works.
+            self.notify(APP_NAME, self.t("The config file was not applied: {why}",
+                                         why=bad_local))
             return
         fresh["UNIT_NAME"] = self.cfg.get("UNIT_NAME", fresh.get("UNIT_NAME", ""))
         self.apply_settings(fresh)
@@ -2704,12 +2795,36 @@ class Tray:
         return auto
 
     def _hint(self, tag, raw) -> str:
-        """The localised failure hint, or the log line when the tag has none."""
+        """The localised failure hint, or the log line when the tag has none.
+
+        The `other` tag is the wrapper saying it could not classify the failure,
+        and what follows it is the wrapper's own "see log: <path>" text. That is
+        the wrapper's data and not prose for the tray to rewrite, and it is the
+        only one of the two that carries the path, so it is shown as it was
+        written in every language. The rest of the tags are the contract between
+        the two programs and are translated.
+        """
+        if tag == "other":
+            return raw
         hint = self.t(tag)
         return raw if hint == tag else hint
 
-    def _announce_finish(self, syncing, kind, when, hint):
-        """Notify once when a run ends: a failure always, a success on request."""
+    def _announce_finish(self, syncing, kind, when, hint, identity=None):
+        """Notify once when a run ends: a failure always, a success on request.
+
+        The falling edge of the running state is one witness that a run ended,
+        and not the only one. A run short enough to start and finish between two
+        polls is never seen as running, so the failure it wrote raised nothing
+        at all while the icon went red; the log's own failure is the witness
+        that catches it. `identity` is that failure as the parse saw it - time,
+        tag and raw line - and is deliberately not the localised hint, because a
+        language change must not turn the failure already on screen into a new
+        one.
+
+        What may not happen either way: a failure that was in the log before
+        this process started is not news (the first look only records it), and
+        the same failure is not announced twice.
+        """
         if self.manual_requested:
             # A manual run can start and finish between two polls, and then there
             # is nothing to announce: without forgetting the request, the next
@@ -2723,12 +2838,20 @@ class Tray:
                 self.manual_ticks = getattr(self, "manual_ticks", 0) + 1
                 if not getattr(self, "manual_seen_syncing", False) and self.manual_ticks >= 2:
                     self.manual_requested = False
-        if self.was_syncing and not syncing:
+        failure = None if kind != "error" else (
+            identity if identity is not None else (when, hint))
+        ended = self.was_syncing and not syncing
+        first_look = not self.log_looked
+        self.log_looked = True
+        if failure is not None and failure != self.log_failure:
+            if ended or not first_look:
+                self.notify(self.t("{app} sync failed", app=APP_NAME),
+                            hint or self.t("see the sync log"))
+        self.log_failure = failure
+        if ended:
             if kind == "error":
-                if when != self.notified_error_at:
-                    self.notified_error_at = when
-                    self.notify(self.t("{app} sync failed", app=APP_NAME),
-                                hint or self.t("see the sync log"))
+                # Announced above, whichever of the two witnesses saw it first.
+                pass
             elif self.manual_requested:
                 # The setting is about the good news only: a failure is always
                 # worth a notification.
@@ -2741,8 +2864,6 @@ class Tray:
             self.manual_requested = False
             self.manual_seen_syncing = False
             self.manual_ticks = 0
-        if kind != "error":
-            self.notified_error_at = None
         self.was_syncing = syncing
 
     def _status_text(self, syncing, prog, auto, kind, when, hint) -> str:
@@ -2869,7 +2990,8 @@ class Tray:
             self.state = state
             self._set_icon(self.icons[state])
 
-        self._announce_finish(syncing, kind, when, hint)
+        self._announce_finish(syncing, kind, when, hint,
+                              (when, tag, raw) if kind == "error" else None)
 
         prog = read_progress(log_tail) if syncing else None
         self.item_status.set_label(
@@ -3114,13 +3236,29 @@ def _settings_dialog_class():
             # touch them from the worker.
             values = self.values()
             boot = self.check_boot.get_active()
-            threading.Thread(target=self._worker, args=(values, boot),
+            threading.Thread(target=self._save_worker, args=(values, boot),
                              daemon=True).start()
+
+        def _save_worker(self, values, boot):
+            """Run one Save off the main loop, and report what it found.
+
+            The one place that knows the worker runs on a thread: _worker() does
+            the work and answers with the failures, _finish() puts them on
+            screen, and neither has to know about the other.
+            """
+            GLib.idle_add(self._finish, values, self._worker(values, boot))
 
         def _unit(self) -> str:
             return self.cfg.get("UNIT_NAME") or "onedrive-sync"
 
         def _worker(self, values, boot):
+            """Apply one Save, and return the failures it found.
+
+            Answers with a list rather than storing it: what is shown is
+            _finish()'s job, and a worker that wrote into self.failures as well
+            was the last method here that both computed and stored, so there was
+            no way to ask it what it found without a window to read.
+            """
             failures = []
             changed = {key: value for key, value in values.items()
                        if self.original.get(key) != value}
@@ -3146,8 +3284,7 @@ def _settings_dialog_class():
                 if err:
                     failures.append(self.t(
                         "Could not change the login setting: {why}", why=err[:160]))
-            GLib.idle_add(self._finish, values, failures)
-            return False
+            return failures
 
         def _finish(self, values, failures):
             self.busy = False

@@ -111,14 +111,27 @@ command -v flock >/dev/null 2>&1 ||
 # An unwritable log directory used to be silent: the directory creation hid its
 # own failure, the run carried on and could "succeed" having recorded nothing,
 # and the failure hint then pointed at a file that could not exist. Open the log
-# for append here, before the run, and stop with the path if that fails.
+# for append here, before the run, and stop with the path if that fails. The log
+# and the cache are this run's own state, so they are still created for a run that
+# goes on to refuse below: the refusal has to be readable.
 log_dir="$(dirname "$LOG")"
-mkdir -p "$log_dir" "$LOCAL" "$CACHE_DIR" 2>/dev/null || true
+mkdir -p "$log_dir" "$CACHE_DIR" 2>/dev/null || true
 if ! log_err="$({ : >>"$LOG"; } 2>&1)"; then
     # bash's own message ends with the reason ("... : Permission denied").
     log_err="${log_err##*: }"
     [ -n "$log_err" ] || log_err="it could not be opened for append"
     die "cannot write the log $LOG: $log_err (check that $log_dir is writable, or point LOG somewhere else in $CONFIG_FILE)"
+fi
+
+# A missing LOCAL used to be created here, which turned a typo in the path or an
+# unmounted tree into a fresh directory that the run then treated as the sync
+# root: bisync would read an empty Path1, CHECK_ACCESS is off by default, and only
+# the delete cap stands between that emptiness and the cloud. onedrive-check and
+# onedrive-watch already refuse the same state, onedrive-doctor already prints
+# this mkdir, and setup.sh creates the directory for a config it writes, so the
+# wrapper refuses too and names the one command that fixes it.
+if [ ! -d "$LOCAL" ]; then
+    die "$LOCAL does not exist. Create it first:  mkdir -p \"$LOCAL\"  (or point LOCAL at the right directory in $CONFIG_FILE)"
 fi
 
 # The stamp is pinned to the C locale on purpose: a locale whose %Y is not

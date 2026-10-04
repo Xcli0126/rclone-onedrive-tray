@@ -140,6 +140,13 @@ command -v "$RCLONE_BIN" >/dev/null 2>&1 ||
 
 say "rclone-onedrive-tray setup"
 
+# A config this run creates is a first install; one that is already there is an
+# upgrade, and the two want different defaults for the access check below. The
+# answer is taken before the overwrite question, because both branches rewrite
+# the file.
+CONFIG_EXISTED=0
+[ -f "$CONFIG_FILE" ] && CONFIG_EXISTED=1
+
 if [ -f "$CONFIG_FILE" ]; then
     warn "a config already exists: $CONFIG_FILE"
     # ask() answers with the default without reading anything under --yes or
@@ -412,6 +419,59 @@ for kept_file in "${kept[@]}"; do
 done
 if [ "${#kept[@]}" -gt 0 ]; then
     warn "  pass --filters / --skip-folders to replace them"
+fi
+
+# --------------------------------------------------------------- access check
+# The helper rewrites one key in the config this run just wrote. The heredoc above
+# has already run carry(), so a re-run's CHECK_ACCESS survived it; this is the one
+# place a fresh install can end up with 1, and the value is written here rather
+# than from a second template so the keys around it are not written twice.
+set_config_key() {  # set_config_key <KEY> <value>
+    local key="$1" value="$2" tmp="$CONFIG_FILE.tmp$$"
+    awk -v k="$key" -v v="$value" '
+        $0 ~ "^" k "=" { print k "=\"" v "\""; next }
+        { print }
+    ' "$CONFIG_FILE" > "$tmp" && chmod 0644 "$tmp" && mv -f "$tmp" "$CONFIG_FILE"
+}
+
+# LOCAL is where the sync goes, and a first install names a directory that does
+# not exist yet. bin/onedrive-sync refuses a missing LOCAL rather than creating it
+# (a typo or an unmounted share would otherwise become the sync root), so a wizard
+# that writes this path is what has to create it, and only on the run that creates
+# the config: a re-run whose tree is gone is the trap, not the first install.
+if [ "$CONFIG_EXISTED" -eq 0 ] && [ ! -d "$LOCAL_IN" ]; then
+    mkdir -p "$LOCAL_IN" && say "Created the local sync directory: $LOCAL_IN"
+fi
+
+# CHECK_ACCESS is the only guard that stops a run treating an unreadable side as
+# a mass deletion, and it ships off because turning it on for a config that
+# already exists aborts that install's next run until the marker files are there.
+# A config this run creates has no such history, so the offer belongs here and
+# nowhere else. The markers are not built inline: onedrive-check-access is the
+# helper that knows the file name, both sides and the rclone calls.
+if [ "$CONFIG_EXISTED" -eq 0 ]; then
+    CHECK_WANTED=0
+    if [ "$ASSUME_YES" -eq 1 ]; then
+        # The markers are written to the remote, and --yes is an instruction not
+        # to be asked about side effects, so the answer is the quiet one and the
+        # command to do it later is named, as the first-sync prompt does.
+        echo "    With --yes the access check is left to you:  onedrive-check-access"
+    elif [ ! -t 0 ]; then
+        echo "    With no terminal to answer the prompt the access check is left to you:  onedrive-check-access"
+    else
+        case "$(ask 'Create the access-check marker files now? (Y/n)' 'y')" in
+            [yY]*) CHECK_WANTED=1 ;;
+        esac
+    fi
+    if [ "$CHECK_WANTED" -eq 1 ]; then
+        if ! "$SRC_DIR/bin/onedrive-check-access"; then
+            warn "the marker files were not created; CHECK_ACCESS stays \"0\""
+        elif set_config_key CHECK_ACCESS 1; then
+            say "Access check on: CHECK_ACCESS=\"1\" in $CONFIG_FILE"
+        else
+            warn "the marker files are there but CHECK_ACCESS could not be written; set it by hand in $CONFIG_FILE"
+        fi
+    fi
 fi
 
 if [ "$DO_INSTALL" -eq 1 ]; then

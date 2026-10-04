@@ -17,18 +17,17 @@ were found in the first place.
 
 ### Four parsers for one file format
 
-`install.sh` reads the config with one `sed` expression, `uninstall.sh` with a
-second, the tray parses it in Python (`load_config`, `KEY_RE`,
-`shell_quote_value`), and `onedrive-sync` sources it with `.`. They do not agree:
-the tray escapes a quote as `\"`, and neither `sed` expression can express that,
-so a value the tray wrote reads back truncated in the installer.
+`install.sh` and `uninstall.sh` read the config with `sed`, the tray parses it in
+Python, and `onedrive-sync` sources it with `.`. They agree about the escaping now:
+the tray writes `\`, `"`, `$` and the backtick escaped, and both sed readers undo
+exactly that, so a value the tray wrote is read back whole instead of being cut at
+the first inner quote. What is left is the count: a new key has to be taught to all
+four, and `EXCLUDE_FOLDERS_FILE` is read by two of them in different ways.
 
-Cost: a config that one program writes can be misread by another, and the failure
-surfaces later in whichever program read it wrong.
-
-A fix means one reader, or one writer plus readers that understand its escaping.
-That is a new runtime file, which pulls `install.sh`, `uninstall.sh` and the
-documentation along with it.
+Cost: a key added to one reader and forgotten in another is invisible until a user
+hits it. The fix worth doing is one reader, which is a new runtime file and pulls
+the installers and the documentation along with it; that is larger than the cost of
+the remaining duplication, so the four stay and the escaping is what had to agree.
 
 ### Non-GNU userlands are a guess
 
@@ -57,56 +56,12 @@ test is allowed to touch before anyone starts.
 
 ### Smaller, and real
 
-- `SettingsDialog._worker` writes its failures into `self.failures` instead of
-  returning them, which is the last method in the file that both computes and
-  stores.
 - The first-run wizard never offers the access check, so a fresh install ships
   with only the delete cap guarding it. The reason the key defaults to off is
   about upgrades, not new installs.
-- A sync that fails inside one three-second poll raises no notification at all:
-  the failure notification fires on the falling edge of the running state, and a
-  run that starts and ends between two polls is never seen as running. The icon
-  still shows the error.
 - `tests/filters.sh` builds its 400-character name with
   `printf 'r%.0s' $(seq 1 400)`, which relies on word splitting of the `seq`
   output. It works, and it is the suite's own fixture.
-- The duplication figures quoted in the 1.2.0 audit came from a hand-written
-  six-line window script, not a clone detector, and `extras/` was never measured
-  at all.
-- `onedrive-check`'s name-length branch cannot fire on a local filesystem: the
-  limit is the documented 255, and a filesystem refuses a name longer than 255
-  bytes, so nothing on disk can reach it. It was found by mutating the limit to
-  99999 and watching every suite stay green. The branch is kept for filesystems
-  that allow longer names, and it is not tested because there is nothing to test
-  it with.
-- A folder listing or quota refresh that is already in flight when `REMOTE` moves
-  can still store the answer for the remote before it. The re-ask a moved remote
-  triggers is skipped while the worker is busy, and the worker does not check which
-  remote it asked, so the stale answer lands and the menu shows the old account's
-  folders until the answer after it arrives. It needs a generation counter or an
-  answer tagged with the remote it belongs to, which is a larger change than the
-  reload path. The stale list is not only displayed: unticking a row in it writes
-  that folder name into the exclusion file that now governs the new remote, and a
-  listing that failed for the old remote stores its error as "could not list" the
-  new one.
-- The settings window rewrites a line it changes without its `export ` prefix:
-  `KEY_RE` matches `export REMOTE=`, and `update_config_file` writes the line back
-  as `REMOTE=`. The value and the meaning are the same either way, so this is a
-  hand-written file losing its style rather than a setting changing; it is written
-  down because the reader now accepts the prefix and the writer does not produce
-  it.
-- A `RCLONE` that moves is re-resolved and the menu is rebuilt, but the folder list
-  and the quota row are not cleared the way they are when `REMOTE` moves: they were
-  fetched from the binary being left behind, so they can describe the wrong build
-  until the next refresh. It needs the same clear-and-re-ask the remote gets.
-- A reload of a config whose `LOCAL` is relative is refused by the delete guard but
-  the tray keeps running with it, since only `main()` validates the path when the
-  tray starts. Validating it in the reload as well is a few lines; the guard is the
-  part that can lose data, and it refuses.
-- `onedrive-doctor` reads the tray's pid from `/proc/locks`, which is Linux only.
-  Where that file is absent or unreadable the line says `pid unknown` and the
-  verdict still comes from `flock`, so the check is right and only the pid is
-  missing.
 - `tests/floors.txt` budgets one environmental skip for `install-flow`, because its
   last case needs the NetworkManager hook. The suite has four conditional skips
   (systemd-analyze absent, a 0500 directory that is still writable, a pid that is
@@ -120,9 +75,6 @@ test is allowed to touch before anyone starts.
   `mkdir` for that state and nothing is deleted), and it is written down because it
   is the reason the checker's "sync directory not found" cannot be reached from the
   wrapper.
-- The untagged failure hint is asymmetric between the languages: English shows the
-  raw log line for a failure with no `[tag]`, while Chinese shows 详见同步日志. Both
-  point at the log, so it is a rough edge rather than a defect.
 
 ### The tray's state is read out of English prose in a shared log
 
@@ -160,6 +112,17 @@ have to derive it from three file names.
 
 ## Accepted, with the reason
 
+- `onedrive-check`'s name-length branch cannot fire on a local filesystem: the
+  limit is the documented 255, and a filesystem refuses a name longer than 255
+  bytes, so nothing on disk can reach it. It was found by mutating the limit to
+  99999 and watching every suite stay green. The branch is kept for filesystems
+  that allow longer names and is deliberately untested, because there is nothing to
+  test it with; the mutation row that keeps the limit honest is the coverage it has.
+- `onedrive-doctor` reads the tray's pid from `/proc/locks`, which is Linux only.
+  Where that file is absent or unreadable the line says `pid unknown`, and the
+  verdict itself comes from `flock` on the tray's own lock file, which is portable.
+  The pid is a nicety on top of a correct answer, so the lookup stays and its limit
+  is written down here rather than left as an open item.
 - `NOTIFY_ON_SUCCESS` covers a sync you start from the tray, not the scheduled
   runs. The window says so ("Tell me when a sync I start succeeds"), and the
   reason is that a five-minute timer announcing every success would train people
