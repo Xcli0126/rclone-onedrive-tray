@@ -21,6 +21,19 @@
 
 set -uo pipefail
 
+# bash counts ${#var} in characters under a UTF-8 locale and in bytes under C, so
+# the length checks below used to give different verdicts depending on who ran
+# the checker: a tree whose cloud path was 494 bytes and 166 characters came back
+# clean under C.UTF-8 and over-long under C. Every limit here is a byte limit --
+# ext4's 255 for one name, and the measured cloud and total numbers for a path --
+# so the whole run is pinned to the C locale and ${#...} is a byte count
+# everywhere. The UTF-8 scan further down already forced this per call; doing it
+# once for the script keeps the walk fork-free as well, which a helper called
+# through a command substitution would not (one substitution per length costs
+# about 14x on a 3000-file tree). This script's messages are English and it
+# reads and writes no locale-sensitive data, so nothing else moves with it.
+export LC_ALL=C
+
 APP="onedrive-check"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/rclone-onedrive-tray"
 CONFIG_FILE="$CONFIG_DIR/config"
@@ -81,6 +94,12 @@ REMOTE_PATH="${REMOTE#*:}"
 # 400, so the service counts something a little longer than the path itself and
 # the documented number is not a working limit. 380 sits below every failure seen
 # and leaves room for a file that gets renamed.
+#
+# Both limits below are compared against a byte count, not a character count:
+# every measured path above was ASCII, where the two are the same number, and a
+# non-ASCII path is longer in bytes, so the byte count applies the limit
+# conservatively. The script is pinned to the C locale at the top so the count
+# does not depend on who ran it.
 LIMIT_CLOUD=380
 # Microsoft's documented total: a local path of up to 400 plus a root folder of
 # up to 120. Only reachable with a long LOCAL, but nothing else catches it.
@@ -215,9 +234,9 @@ while IFS= read -r -d '' path; do
         local_len=$(( ${#LOCAL} + ${#rel} + 1 ))
         [ -n "$REMOTE_PATH" ] && cloud_len=$((cloud_len + 1))
         if [ "$cloud_len" -ge "$LIMIT_CLOUD" ]; then
-            add long "$rel" "cloud path $cloud_len chars: $rel"
+            add long "$rel" "cloud path $cloud_len bytes: $rel"
         elif [ "$local_len" -ge "$LIMIT_TOTAL" ]; then
-            add long "$rel" "local path $local_len chars: $rel"
+            add long "$rel" "local path $local_len bytes: $rel"
         fi
     fi
 
@@ -228,7 +247,7 @@ while IFS= read -r -d '' path; do
     # 255 is the documented maximum, so a name of exactly that length is legal:
     # -ge failed a name the service accepts.
     if [ "${#name}" -gt "$LIMIT_NAME" ]; then
-        add long "$rel" "name is ${#name} chars: $rel"
+        add long "$rel" "name is ${#name} bytes: $rel"
     fi
 
     # --- names the service cannot tell apart ---------------------------------

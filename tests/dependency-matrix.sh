@@ -350,11 +350,17 @@ fi
 
 # An rclone older than the flags in BISYNC_ARGS rejects them before it opens its
 # log file, so this used to end as a bare "[other] see log" pointing at nothing.
+# The floor in the wrapper's own sentence belongs to bin/onedrive-sync, and that
+# sentence still said 1.65 when this case was written; what is asserted here is
+# that an unknown flag is classified as a version problem at all rather than as
+# "[other]". The real floor is asserted against install.sh, which owns the
+# version check, in the installer section below.
 mkdir -p "$WORK/oldbin"
 printf '#!/bin/bash\necho "Error: unknown flag: --resilient" >&2\nexit 1\n' \
     > "$WORK/oldbin/rclone"
 chmod +x "$WORK/oldbin/rclone"
-run "rclone too old for the flags: names the version problem" 1 "rclone >= 1.65" \
+run "rclone too old for the flags: names the flag and the version that has it" 1 \
+    "does not know --resilient; that flag arrived in rclone 1.64" \
     env -i PATH="$WORK/oldbin:$PATH" HOME="$HOME" XDG_CONFIG_HOME="$FIX/cfg" \
         XDG_CACHE_HOME="$FIX/cache" TMPDIR="$FIX/tmp" RC_LOG="$WORK/never" \
     bash "$SRC_DIR/bin/onedrive-sync"
@@ -372,11 +378,12 @@ run "no config: explains which file is missing" 1 "config not found" \
 # Both cases above only reach the watcher's failure paths, so neither the
 # debounce default nor the arguments inotifywait is handed were ever seen. This
 # fixture leaves WATCH_DEBOUNCE unset and sets an exclude regex, and a stub
-# inotifywait records the command line it was given before failing. The watcher
-# answers a failing inotifywait by retrying, so each run is cut short with
-# timeout and its exit status deliberately ignored; the debounce line is printed
-# before the loop is entered, and the recorded call is what the second case
-# reads.
+# inotifywait records the command line it was given before failing. A failing
+# inotifywait is retried a few times and then ends the loop, so each run is cut
+# short with timeout and its exit status deliberately ignored; the debounce line
+# is printed before the loop is entered, and the recorded call is what the second
+# case reads. The exit after repeated permanent failures has its own case in
+# tests/install-flow.sh.
 WATCH_FIX="$WORK/watch"; rm -rf "$WATCH_FIX"
 mkdir -p "$WATCH_FIX/cfg/rclone-onedrive-tray" "$WATCH_FIX/local" \
          "$WATCH_FIX/bin" "$WATCH_FIX/tmp"
@@ -494,6 +501,64 @@ run "rclone older than 1.65: installs, but warns about recovery" 0 "older than 1
         XDG_CACHE_HOME="$WORK/i5c" XDG_DATA_HOME="$WORK/i5d" \
     bash "$SRC_DIR/install.sh" --prefix "$WORK/i5p" --no-start
 
+# rclone too old for the flags: the old floor here was 1.65, and 1.65 is exactly
+# the version a user would install to satisfy it. --recover, --max-lock,
+# --conflict-resolve and --conflict-loser all arrived in 1.66 (checked against
+# rclone's cmd/bisync/cmd.go at the v1.65.0 and v1.66.0 tags), so the installer
+# asks the binary what it supports instead of trusting a version string, and
+# names each flag the binary does not list. This fixture answers `bisync --help`
+# the way 1.65 does, so the case is about the flags, not about the number.
+mkdir -p "$WORK/rclone165"
+cat > "$WORK/rclone165/rclone" <<'EOF'
+#!/bin/bash
+case "$1" in
+    version) echo "rclone v1.65.0" ;;
+    bisync)
+        printf '%s\n' \
+          "      --resilient       Allow future runs to retry after certain less-serious errors" \
+          "      --check-access    Ensure expected RCLONE_TEST files are found on both paths" \
+          "  -1, --resync          Performs the resync run." ;;
+esac
+exit 0
+EOF
+chmod +x "$WORK/rclone165/rclone"
+R165_OUT="$(env PATH="$WORK/rclone165:$STUB:$PATH" HOME="$HOME" \
+    XDG_CONFIG_HOME="$WORK/r165-cfg" XDG_CACHE_HOME="$WORK/r165-cache" \
+    XDG_DATA_HOME="$WORK/r165-data" \
+    bash "$SRC_DIR/install.sh" --prefix "$WORK/r165-prefix" --no-start 2>&1)"
+check "rclone 1.65: the install still completes" grep -qF "Installed" <<<"$R165_OUT"
+check "and it names the flags this rclone does not list" \
+    grep -qF "has no --recover --max-lock --conflict-resolve --conflict-loser" <<<"$R165_OUT"
+check "and it names 1.66, the version those flags arrived in" \
+    grep -qF "1.66" <<<"$R165_OUT"
+
+# The other half of asking the binary: a build that reports 1.65 and lists the
+# four flags has them, so nothing may be said about a floor it already meets.
+mkdir -p "$WORK/rclone165all"
+cat > "$WORK/rclone165all/rclone" <<'EOF'
+#!/bin/bash
+case "$1" in
+    version) echo "rclone v1.65.0" ;;
+    bisync)
+        printf '%s\n' \
+          "      --recover         Automatically recover from interruptions" \
+          "      --max-lock Duration   Consider lock files older than this to be expired" \
+          "      --conflict-resolve string   Automatically resolve conflicts" \
+          "      --conflict-loser ConflictLoserAction   Action to take on the loser" ;;
+esac
+exit 0
+EOF
+chmod +x "$WORK/rclone165all/rclone"
+R165B_OUT="$(env PATH="$WORK/rclone165all:$STUB:$PATH" HOME="$HOME" \
+    XDG_CONFIG_HOME="$WORK/r165b-cfg" XDG_CACHE_HOME="$WORK/r165b-cache" \
+    XDG_DATA_HOME="$WORK/r165b-data" \
+    bash "$SRC_DIR/install.sh" --prefix "$WORK/r165b-prefix" --no-start 2>&1)"
+if grep -qF "1.66" <<<"$R165B_OUT"; then
+    bad "a 1.65 build that lists all four flags was still warned about the floor"
+else
+    ok "a 1.65 build that does list the four flags is not warned"
+fi
+
 # config.example documents RCLONE as "the rclone binary to run, by name or by path.
 # Change it to use a build outside PATH", and onedrive-sync and onedrive-doctor
 # honour it. install.sh gated the whole install on `command -v rclone` and took its
@@ -550,6 +615,154 @@ else
     bad "the config's rclone was never asked its version"
 fi
 
+# ---------------------------------------------------------------- enable
+# systemctl's own reason for a failed enable is the only thing that says why.
+# The installer threw it away and warned "(no user systemd session?)", which is
+# the wrong cause for a masked or missing unit, and then printed "Installed"
+# over it. The captured sentence has to appear, followed by the same repair
+# command the unreachable-manager branch already prints.
+ENABLE_STUB="$WORK/enable-stubs"
+rm -rf "$ENABLE_STUB"; mkdir -p "$ENABLE_STUB"
+cat > "$ENABLE_STUB/systemctl" <<'EOF'
+#!/bin/bash
+shift
+case "$1" in
+    daemon-reload) exit 0 ;;
+    show)          printf '%s\n' "$XDG_CONFIG_HOME/systemd/user/${@: -1}"; exit 0 ;;
+    enable)        echo "Failed to enable unit: Unit file does not exist." >&2; exit 1 ;;
+esac
+exit 0
+EOF
+chmod +x "$ENABLE_STUB/systemctl"
+ENABLE_CFG="$WORK/enable-cfg"
+rm -rf "$ENABLE_CFG"; mkdir -p "$ENABLE_CFG/rclone-onedrive-tray"
+cat > "$ENABLE_CFG/rclone-onedrive-tray/config" <<EOF
+REMOTE="r:x"
+LOCAL="$WORK/enable-local"
+UNIT_NAME="zz-enable-probe"
+INTERVAL_MIN="5"
+WATCH="0"
+EOF
+ENABLE_OUT="$(env PATH="$ENABLE_STUB:$STUB:$PATH" HOME="$HOME" \
+    XDG_CONFIG_HOME="$ENABLE_CFG" XDG_CACHE_HOME="$WORK/enable-cache" \
+    XDG_DATA_HOME="$WORK/enable-data" \
+    bash "$SRC_DIR/install.sh" --prefix "$WORK/enable-prefix" --no-start 2>&1)"
+check "a failed enable repeats systemctl's own reason" \
+    grep -qF "Failed to enable unit: Unit file does not exist." <<<"$ENABLE_OUT"
+check "and the command that repairs it follows the warning" \
+    grep -qF "systemctl --user daemon-reload && systemctl --user enable --now zz-enable-probe.timer" \
+    <<<"$ENABLE_OUT"
+
+# ---------------------------------------------------------------- UNIT_NAME
+# install.sh substitutes UNIT_NAME from the config into the NetworkManager
+# dispatcher hook, which NetworkManager runs as root. The value used to go in
+# through sed with no escaping and no validation: "$(touch ...)" was executed by
+# the hook's own shell, "&" produced a hook that could never match a unit while
+# the install still said a sync starts on connection, and "|" killed the run
+# inside sed without ever naming UNIT_NAME. The config lives in a scratch
+# XDG_CONFIG_HOME and the dispatcher directory in the scratch tree; the sudo stub
+# only executes an install whose target is inside that tree.
+NM_WORK="$WORK/nm-units"
+NM_STUB="$NM_WORK/stubs"
+rm -rf "$NM_WORK"; mkdir -p "$NM_WORK/dispatcher" "$NM_STUB"
+cat > "$NM_STUB/sudo" <<EOF
+#!/bin/bash
+printf '%s\n' "\$*" >> "$NM_WORK/sudo-calls"
+target="\${@: -1}"
+case "\$1:\$target" in
+    install:"$NM_WORK"/*) exec install -m 0755 "\${@: -2:1}" "\$target" ;;
+esac
+exit 1
+EOF
+chmod +x "$NM_STUB/sudo"
+
+nm_install() {  # nm_install <tag> <unit-name> -- install.sh for that UNIT_NAME
+    local tag="$1" name="$2" cfg
+    cfg="$NM_WORK/$tag-cfg"
+    rm -rf "$cfg" "$NM_WORK/dispatcher"; mkdir -p "$cfg/rclone-onedrive-tray" \
+        "$NM_WORK/dispatcher" "$NM_WORK/tmp"
+    cat > "$cfg/rclone-onedrive-tray/config" <<EOF
+REMOTE="r:x"
+LOCAL="$NM_WORK/local"
+UNIT_NAME="$name"
+INTERVAL_MIN="5"
+WATCH="0"
+EOF
+    env PATH="$NM_STUB:$STUB:$PATH" HOME="$HOME" XDG_CONFIG_HOME="$cfg" \
+        XDG_CACHE_HOME="$NM_WORK/cache" XDG_DATA_HOME="$NM_WORK/data" \
+        TMPDIR="$NM_WORK/tmp" \
+        NM_DISPATCHER_DIR="$NM_WORK/dispatcher" REAL_HOME_OVERRIDE="$HOME" \
+    bash "$SRC_DIR/install.sh" --prefix "$NM_WORK/prefix" --no-start \
+        --with-nm-dispatcher 2>&1
+}
+
+NM_SH_VALUE="zz\$(touch \${IFS}pwned)zz"
+NM_SH_OUT="$(nm_install shellcmd "$NM_SH_VALUE")"; NM_SH_RC=$?
+check "a UNIT_NAME holding a command substitution is refused" \
+    test "$NM_SH_RC" -eq 1
+check "and the refusal names the key, the value and the config file" \
+    grep -qF "invalid UNIT_NAME in $NM_WORK/shellcmd-cfg/rclone-onedrive-tray/config: '$NM_SH_VALUE'" \
+    <<<"$NM_SH_OUT"
+if grep -rqF '$' "$NM_WORK/dispatcher" 2>/dev/null; then
+    bad "a hook carrying a shell expansion was installed anyway"
+else
+    ok "and no hook carrying a shell expansion was installed"
+fi
+
+for bad_unit in 'zz&zz' 'zz|zz'; do
+    NM_BAD_OUT="$(nm_install bad "$bad_unit")"
+    if grep -qF "invalid UNIT_NAME in $NM_WORK/bad-cfg/rclone-onedrive-tray/config: '$bad_unit'" \
+            <<<"$NM_BAD_OUT"; then
+        ok "a UNIT_NAME holding '$bad_unit' is refused, naming the key and the value"
+    else
+        bad "a UNIT_NAME holding '$bad_unit' was not refused by name"
+        printf '%s\n' "$NM_BAD_OUT" | head -3 | sed 's/^/        /'
+    fi
+done
+
+# ---------------------------------------------------------------- extras/
+# extras/install-issue-watch.sh generates its own unit with
+# ExecStart=$BIN_DIR/watch-issues.sh, unquoted and unescaped. A prefix that needs
+# quoting is then split on whitespace by systemd, and a prefix holding % or $ is
+# read as a specifier or a variable reference. No suite ran extras/ at all, which
+# is how that survived. systemd-analyze is not on every machine, so the check
+# skips where it is absent instead of reporting a pass it did not earn.
+title "extras/install-issue-watch.sh"
+ISSUE_STUB="$WORK/issue-stubs"
+rm -rf "$ISSUE_STUB"; mkdir -p "$ISSUE_STUB"
+printf '#!/bin/bash\nexit 0\n' > "$ISSUE_STUB/systemctl"
+chmod +x "$ISSUE_STUB/systemctl"
+
+ISSUE_CFG="$WORK/issue-cfg"
+ISSUE_PREFIX="$WORK/issue prefix/100%"
+rm -rf "$ISSUE_CFG" "$ISSUE_PREFIX"; mkdir -p "$ISSUE_CFG"
+env PATH="$ISSUE_STUB:$PATH" XDG_CONFIG_HOME="$ISSUE_CFG" HOME="$HOME" \
+    bash "$SRC_DIR/extras/install-issue-watch.sh" --prefix "$ISSUE_PREFIX" \
+    >/dev/null 2>&1
+ISSUE_UNIT="$ISSUE_CFG/systemd/user/onedrive-issue-watch.service"
+if command -v systemd-analyze >/dev/null 2>&1; then
+    ISSUE_VERIFY="$(systemd-analyze verify "$ISSUE_UNIT" 2>&1)" || true
+    if grep -qF 'is not executable' <<<"$ISSUE_VERIFY"; then
+        bad "the generated ExecStart was split by systemd: $(grep -m1 -F 'is not executable' <<<"$ISSUE_VERIFY")"
+    else
+        ok "a prefix holding a space and a % still verifies as one ExecStart"
+    fi
+else
+    skip "systemd-analyze is not installed; the generated unit was not verified"
+fi
+
+# systemd-analyze does not resolve $$, so the dollar rule is checked as text: the
+# generated line has to carry $$ where the prefix carries one $.
+ISSUE_DOLLAR_CFG="$WORK/issue-dollar-cfg"
+ISSUE_DOLLAR_PREFIX="$WORK/issue \$cash"
+rm -rf "$ISSUE_DOLLAR_CFG" "$ISSUE_DOLLAR_PREFIX"; mkdir -p "$ISSUE_DOLLAR_CFG"
+env PATH="$ISSUE_STUB:$PATH" XDG_CONFIG_HOME="$ISSUE_DOLLAR_CFG" HOME="$HOME" \
+    bash "$SRC_DIR/extras/install-issue-watch.sh" --prefix "$ISSUE_DOLLAR_PREFIX" \
+    >/dev/null 2>&1
+check "a literal \$ in the prefix reaches systemd as \$\$" \
+    grep -qxF "ExecStart=\"$WORK/issue \$\$cash/bin/watch-issues.sh\"" \
+    "$ISSUE_DOLLAR_CFG/systemd/user/onedrive-issue-watch.service"
+
 # ---------------------------------------------------------------- the wizard
 title "setup.sh"
 build_reduced_path rclone
@@ -586,6 +799,56 @@ for bad_interval in abc 0; do
             XDG_CACHE_HOME="$WORK/s3c" \
         bash "$SRC_DIR/setup.sh" --interval "$bad_interval" --yes --no-install
 done
+
+# exclude-folders.txt is read by onedrive-sync and by the tray's folder menu, and
+# both drop a line starting with # and trim the line. A deselected folder named
+# "#Archive" was therefore written as a comment: the folder kept syncing while
+# the menu showed it as excluded. The tray refuses that name with an explanation
+# (exclusion_problem); the wizard has to refuse it too, and say why, instead of
+# writing a line neither reader can see.
+SKIP_HOME="$WORK/skip-folders"
+SKIP_CFG="$SKIP_HOME/cfg"
+rm -rf "$SKIP_HOME"; mkdir -p "$SKIP_CFG" "$SKIP_HOME/bin"
+cat > "$SKIP_HOME/bin/rclone" <<'EOF'
+#!/bin/bash
+[ "$1" = listremotes ] && echo "zz:"
+exit 0
+EOF
+chmod +x "$SKIP_HOME/bin/rclone"
+SKIP_OUT="$(env -i PATH="$SKIP_HOME/bin:$PATH" HOME="$SKIP_HOME" \
+    XDG_CONFIG_HOME="$SKIP_CFG" XDG_CACHE_HOME="$SKIP_HOME/cache" \
+    bash "$SRC_DIR/setup.sh" --remote zz: --local "$SKIP_HOME/local" \
+    --skip-folders '#Archive,Notes' --yes --no-install 2>&1)"
+SKIP_FILE="$SKIP_CFG/rclone-onedrive-tray/exclude-folders.txt"
+if grep -qF 'Cannot leave #Archive out of the sync' <<<"$SKIP_OUT"; then
+    ok "a folder name starting with # is refused, with an explanation"
+else
+    bad "a folder name starting with # was written without a warning"
+    printf '%s\n' "$SKIP_OUT" | tail -3 | sed 's/^/        /'
+fi
+if [ -f "$SKIP_FILE" ] && grep -qE '^[[:space:]]*#' "$SKIP_FILE"; then
+    bad "exclude-folders.txt holds a line both readers skip"
+else
+    ok "and no line both readers skip was written to exclude-folders.txt"
+fi
+check "and the name that can be expressed is still written" \
+    grep -qxF 'Notes' "$SKIP_FILE"
+
+# A flag whose value is missing used to reach bash's own ":?" and print a
+# localized internal that names no flag ("setup.sh: line 77: 2: parameter null or
+# not set"), while --skip-folders three lines below printed its intended
+# sentence. An unknown option exited 1 where install.sh exits 2, so the same
+# class of usage error had a different status depending on which installer ran.
+for value_flag in --remote --local --interval; do
+    run "$value_flag without a value names the flag" 1 "$value_flag needs a value" \
+        env -i PATH="$PATH" HOME="$WORK/s4h" XDG_CONFIG_HOME="$WORK/s4" \
+            XDG_CACHE_HOME="$WORK/s4c" \
+        bash "$SRC_DIR/setup.sh" "$value_flag"
+done
+run "an unknown option exits 2, the same as install.sh" 2 "unknown option: --bogus" \
+    env -i PATH="$PATH" HOME="$WORK/s4h" XDG_CONFIG_HOME="$WORK/s4" \
+        XDG_CACHE_HOME="$WORK/s4c" \
+    bash "$SRC_DIR/setup.sh" --bogus
 
 # ---------------------------------------------------------------- summary
 summary

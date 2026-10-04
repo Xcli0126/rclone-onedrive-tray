@@ -54,6 +54,10 @@ WATCH_GIVEN=0
 say()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31m[x]\033[0m %s\n' "$*" >&2; exit 1; }
+# A usage error exits 2, the same status install.sh gives one, so a script can
+# tell "I called it wrong" from "it ran and failed". A missing value is a bash
+# ":?" error and keeps bash's status; both are named now.
+usage_error() { printf '\033[1;31m[x]\033[0m %s\n' "$*" >&2; exit 2; }
 
 # The config file is read back with `.` by onedrive-sync, so a value holding a
 # quote, a dollar or a backtick has to be escaped or it sources to something
@@ -74,17 +78,17 @@ usage() { sed -n '2,/^[^#]/p' "$0" | sed -e '$d' -e 's/^# \{0,1\}//'; }
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --remote)     REMOTE_IN="${2:?}"; shift 2 ;;
-        --local)      LOCAL_IN="${2:?}"; shift 2 ;;
-        --filters)    FILTERS_CHOICE="${2:?}"; FILTERS_GIVEN=1; shift 2 ;;
-        --interval)   INTERVAL="${2:?}"; INTERVAL_GIVEN=1; shift 2 ;;
-        --watch)      WATCH="${2:?}"; WATCH_GIVEN=1; shift 2 ;;
-        --unit-name)  UNIT_NAME="${2:?}"; shift 2 ;;
+        --remote)     REMOTE_IN="${2?--remote needs a value}"; shift 2 ;;
+        --local)      LOCAL_IN="${2?--local needs a value}"; shift 2 ;;
+        --filters)    FILTERS_CHOICE="${2?--filters needs a value}"; FILTERS_GIVEN=1; shift 2 ;;
+        --interval)   INTERVAL="${2?--interval needs a value}"; INTERVAL_GIVEN=1; shift 2 ;;
+        --watch)      WATCH="${2?--watch needs a value}"; WATCH_GIVEN=1; shift 2 ;;
+        --unit-name)  UNIT_NAME="${2?--unit-name needs a value}"; shift 2 ;;
         --skip-folders) SKIP_FOLDERS="${2?--skip-folders needs a value}"; SKIP_FOLDERS_GIVEN=1; shift 2 ;;
         --yes|-y)     ASSUME_YES=1; shift ;;
         --no-install) DO_INSTALL=0; shift ;;
         -h|--help)    usage; exit 0 ;;
-        *)            die "unknown option: $1 (try --help)" ;;
+        *)            usage_error "unknown option: $1 (try --help)" ;;
     esac
 done
 
@@ -259,14 +263,36 @@ if [ "$SKIP_FOLDERS_GIVEN" -eq 0 ] && [ -f "$EXCLUDE_FOLDERS_FILE" ]; then
 else
     : > "$EXCLUDE_FOLDERS_FILE"
     if [ -n "$SKIP_FOLDERS" ]; then
-        printf '%s' "$SKIP_FOLDERS" | tr ',' '\n' |
-            sed 's/^[[:space:]]*//; s/[[:space:]]*$//' |
-            grep -v '^$' > "$EXCLUDE_FOLDERS_FILE" || true
-        while IFS= read -r name; do
+        # Both readers of this file drop a line starting with # and strip the
+        # line's edges, so a folder named "#Archive" was written as a comment:
+        # the menu showed it as excluded while the sync kept running. The tray
+        # refuses that name with an explanation (exclusion_problem) and this is
+        # the same rule, so a name the file cannot express is named and left out
+        # instead of being written as a line nobody reads. The edges are trimmed
+        # first because the readers trim them too, which is the only reading of
+        # " Notes" that can be expressed at all.
+        rest="$SKIP_FOLDERS"
+        while [ -n "$rest" ]; do
+            case "$rest" in
+                *,*) item="${rest%%,*}"; rest="${rest#*,}" ;;
+                *)   item="$rest"; rest="" ;;
+            esac
+            name="$(printf '%s' "$item" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+            [ -n "$name" ] || continue
+            case "$name" in
+                '#'*)            problem="a name starting with # is read as a comment" ;;
+                *$'\n'*|*$'\r'*) problem="the folder name has a line break in it" ;;
+                *)               problem="" ;;
+            esac
+            if [ -n "$problem" ]; then
+                warn "Cannot leave $name out of the sync: $problem"
+                continue
+            fi
+            printf '%s\n' "$name" >> "$EXCLUDE_FOLDERS_FILE"
             if [ -n "${listing:-}" ] && ! printf '%s\n' "$listing" | grep -qxF "$name"; then
                 warn "no folder named '$name' at the top level of $REMOTE"
             fi
-        done < "$EXCLUDE_FOLDERS_FILE"
+        done
     fi
 fi
 

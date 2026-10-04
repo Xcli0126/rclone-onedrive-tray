@@ -709,6 +709,46 @@ def scenario_openapp():
             "open_cmd": tray.open_cmd}
 
 
+def scenario_open_path_tool_missing():
+    """An open row with no xdg-open says so instead of doing nothing.
+
+    install.sh treats xdg-utils as optional, so a machine can have both rows and
+    no xdg-open. open_path() threw spawn()'s answer away while open_app() four
+    lines above checked it, so the two rows did nothing and said nothing. Both
+    paths exist here, so the missing-tool branch is the one that has to answer
+    rather than the missing-path one.
+    """
+    tray = build()
+    os.makedirs(os.path.dirname(tray.log), exist_ok=True)
+    with open(tray.log, "a", encoding="utf-8"):
+        pass
+    shown = []
+    real_notify = MODULE.Notify
+    MODULE.Notify = install_fake_notify(shown)
+    saved_path = os.environ.get("PATH", "")
+    clear_calls()
+    try:
+        # A directory that holds no tools at all, so Popen cannot find xdg-open.
+        os.environ["PATH"] = os.path.join(WORK, "no-tools")
+        find_at(tray.menu, "Open sync folder").activate()
+        wait_for(lambda: bool(shown), 5.0)
+        pump(0.3)
+        folder_notices = list(shown)
+        del shown[:]
+        find_at(tray.menu, "View sync log").activate()
+        wait_for(lambda: bool(shown), 5.0)
+        pump(0.3)
+        log_notices = list(shown)
+    finally:
+        os.environ["PATH"] = saved_path
+        MODULE.Notify = real_notify
+    return {"log": tray.log, "local": tray.local,
+            "log_exists": os.path.exists(tray.log),
+            "local_exists": os.path.exists(tray.local),
+            "folder_notices": folder_notices, "log_notices": log_notices,
+            "opened": [x for x in call_lines() if x.startswith("xdg-open")]}
+
+
 def scenario_lock_hold():
     """Take the single-instance lock and hold it for the second process."""
     lock = MODULE.acquire_lock()
@@ -1482,6 +1522,61 @@ def scenario_pause_recovery():
             pump(0.3)
             data["auto_seen_after"] = getattr(tray, "auto_seen", None)
             data["pause_label_after"] = tray.item_pause.get_label() or ""
+    finally:
+        MODULE.Notify = real_notify
+    return data
+
+
+def scenario_pause_arm_failed():
+    """A fresh pause whose resume timer cannot be armed is not a pause.
+
+    pause_for() stopped and disabled the units and only then asked systemd-run to
+    arm the resume, so when that call failed nothing was turned back on: sync was
+    off, no stamp was written, and the menu said "Automatic sync is off" with only
+    a manual Resume now to undo it. The recovery path already treats the same
+    systemd-run failure as a reason to end the pause, so this is the same repair
+    asked of the fresh case.
+    """
+    stamp = MODULE.PAUSE_STAMP
+    try:
+        os.remove(stamp)
+    except OSError:
+        pass
+    calls = os.environ["TRAY_CALLS"]
+    marker = os.path.join(calls, "timer-disabled")
+    try:
+        os.remove(marker)
+    except OSError:
+        pass
+
+    tray = build()
+    wait_for(lambda: getattr(tray, "auto_seen", None) == "on", 8.0)
+    # What pause_for() leaves behind until the resume is armed: the units
+    # disabled, which the stub answers from this marker.
+    with open(marker, "w"):
+        pass
+    shown = []
+    real_notify = MODULE.Notify
+    MODULE.Notify = install_fake_notify(shown)
+    clear_calls()
+    try:
+        tray.pause_for(30)
+        data = {"said_something": wait_for(lambda: bool(shown), 8.0)}
+        data["settled"] = wait_for(
+            lambda: getattr(tray, "auto_seen", None) in ("on", "off"), 12.0)
+        pump(0.5)
+        data.update({
+            "notices": list(shown),
+            # Only the direct systemctl calls: the systemd-run argument list
+            # carries "enable --now ztraytest.timer" too, so a filter that did not
+            # separate them would read the failed arming as the repair.
+            "enable_after": [x for x in call_lines()
+                             if x.startswith("systemctl")
+                             and "enable --now" in x],
+            "pause_label": tray.item_pause.get_label() or "",
+            "stamp": os.path.exists(stamp),
+            "auto_seen": getattr(tray, "auto_seen", None),
+        })
     finally:
         MODULE.Notify = real_notify
     return data
@@ -2298,6 +2393,55 @@ def scenario_manual_missed():
     return data
 
 
+def scenario_utf8_folders():
+    """A folder name read out of rclone survives a non-UTF-8 desktop locale.
+
+    Every file the tray reads is pinned to UTF-8, but sh() and run_script() asked
+    subprocess.run for text=True, which decodes with the ambient locale. Under a
+    non-UTF-8 locale the listing was mis-decoded, and unticking a folder wrote the
+    wrong name into exclude-folders.txt, so the wrapper built an --exclude that
+    matched nothing while the menu said the folder was left out.
+    """
+    want = "\u6587\u6863"          # a name only UTF-8 gives back unchanged
+    folders_file = os.path.join(os.environ["TRAY_CALLS"], "folders")
+    previous_folders = read_text(folders_file)
+    tray = None
+    previous_excluded = ""
+    with open(folders_file, "w", encoding="utf-8") as fh:
+        fh.write(want + "/\nMusic/\n")
+    try:
+        tray = build()
+        listed = wait_for(lambda: bool(tray.folders), 8.0)
+        pump(0.3)
+        previous_excluded = read_text(tray.exclude_file)
+        data = {"want": want, "listed": listed,
+                "seen": list(tray.folders or []),
+                "round_trip": want in (tray.folders or []),
+                "write_round_trip": False, "excluded": [], "added": []}
+        # Only drive the row the listing produced: when the name did not survive,
+        # there is no item to activate and that is the failure, not a crash.
+        if data["round_trip"]:
+            tray._build_folder_menu()
+            pump(0.3)
+            before = set(MODULE.read_excluded_folders(tray.exclude_file))
+            find_at(tray.menu, want).set_active(False)
+            wait_for(lambda: set(MODULE.read_excluded_folders(
+                tray.exclude_file)) != before, 8.0)
+            data["excluded"] = MODULE.read_excluded_folders(tray.exclude_file)
+            # What the untick added, which is the written name and nothing else:
+            # the file already holds whatever earlier scenarios put there.
+            data["added"] = sorted(set(data["excluded"]) - before)
+            data["write_round_trip"] = data["added"] == [want]
+    finally:
+        # Both files belong to the other scenarios as much as to this one.
+        with open(folders_file, "w", encoding="utf-8") as fh:
+            fh.write(previous_folders)
+        if tray is not None:
+            with open(tray.exclude_file, "w", encoding="utf-8") as fh:
+                fh.write(previous_excluded)
+    return data
+
+
 def scenario_poll_cost():
     """What one idle tick pays for.
 
@@ -2465,6 +2609,49 @@ def scenario_diagnostics():
     finally:
         MODULE.sibling_script = real_sibling
         MODULE.run_script = real_run
+        MODULE.Tray._show_check = real_show
+    return data
+
+
+
+def scenario_check_names():
+    """The name check keeps the checker's own words for a configuration fault.
+
+    onedrive-check answers 1 for "names were found" and 2 for a configuration or
+    usage fault. The tray threw the status away and described both as "These will
+    fail or be renamed:", so a config with a broken LOCAL sent the user to look at
+    file names. The three statuses have to read differently, and this path had no
+    case at all before.
+    """
+    tray = build()
+    real_status = MODULE.run_script_status
+    real_sibling = MODULE.sibling_script
+    real_show = MODULE.Tray._show_check
+    shown = []
+
+    def capture(self, report, clean, title=None, blurb=None):
+        shown.append({"report": report, "clean": clean, "title": title,
+                      "blurb": blurb})
+        return False
+
+    MODULE.sibling_script = lambda name: "/stub/onedrive-check"
+    MODULE.Tray._show_check = capture
+    data = {}
+    try:
+        for label, status, report in (
+                ("fault", 2, "onedrive-check: sync directory not found: /nowhere"),
+                ("findings", 1, "OneDrive will rename these (1)\n  a:b.md"),
+                ("clean", 0, "nothing to fix.")):
+            del shown[:]
+            MODULE.run_script_status = (
+                lambda cmd, timeout=900, _s=status, _r=report: (_s, _r))
+            tray.check_busy = False
+            tray._check_names()
+            wait_for(lambda: bool(shown), 8.0)
+            data[label] = list(shown)
+    finally:
+        MODULE.run_script_status = real_status
+        MODULE.sibling_script = real_sibling
         MODULE.Tray._show_check = real_show
     return data
 
@@ -3048,6 +3235,12 @@ def scenario_relative_local():
     check = getattr(MODULE, "local_path_problem", None)
     data = {"problem": check("OneDrive") if check else ""}
 
+    # The other root the absolute check says nothing about. "/" is absolute, so
+    # only a rule about the filesystem root refuses it, and the delete guard's
+    # separator-anchored prefix is then "/" itself: every top-level directory
+    # passes, and a cloud folder named like a system one is offered for deletion.
+    data["root_problem"] = check("/") if check else ""
+
     # The guard, run from a directory where a same-named decoy exists: with a
     # relative LOCAL this is the path it used to hand to shutil.rmtree.
     decoy = os.path.join(WORK, "relative-local-decoy")
@@ -3064,6 +3257,23 @@ def scenario_relative_local():
                                           "Documents")
     finally:
         os.chdir(here)
+
+    # The guard's own rule, with local_path_problem() out of the way so the
+    # belt-and-braces check is the thing that answers. /etc is a directory at the
+    # filesystem root on any Linux, so without that check this hands it back.
+    class RootBare:
+        local = "/"
+
+    real_problem = MODULE.local_path_problem
+    MODULE.local_path_problem = lambda value: ""
+    try:
+        data["root_guard"] = MODULE.Tray._local_delete_path(RootBare(), "etc")
+    finally:
+        MODULE.local_path_problem = real_problem
+    # And the same call with the refusal in place, which is the whole path: the
+    # scenario's own config is not the one this uses, so the value is all that is
+    # being asked about.
+    data["root_guard_refused"] = MODULE.Tray._local_delete_path(RootBare(), "etc")
 
     # And the real main(), which has to refuse before it builds a window.
     env = dict(os.environ)
@@ -3112,6 +3322,7 @@ def scenario_local_delete_path():
 SCENARIOS = {
     "menus": scenario_menus,
     "diagnostics": scenario_diagnostics,
+    "check-names": scenario_check_names,
     "rclone-binary": scenario_rclone_binary,
     "bad-bytes": scenario_bad_bytes,
     "sync-fail": scenario_sync_fail,
@@ -3126,7 +3337,9 @@ SCENARIOS = {
     "excluded-name": scenario_excluded_name,
     "folder-delete": scenario_folder_delete,
     "pause-recovery": scenario_pause_recovery,
+    "pause-arm-failed": scenario_pause_arm_failed,
     "openapp": scenario_openapp,
+    "open-path-tool-missing": scenario_open_path_tool_missing,
     "lock-hold": scenario_lock_hold,
     "lock-second": scenario_lock_second,
     "lock-inode": scenario_lock_inode,
@@ -3156,6 +3369,7 @@ SCENARIOS = {
     "pause-survives-poll": scenario_pause_survives_poll,
     "manual-missed": scenario_manual_missed,
     "poll-cost": scenario_poll_cost,
+    "utf8-folders": scenario_utf8_folders,
     "no-remote": scenario_no_remote,
     "icons": scenario_icons,
     "cli-settings": scenario_cli_settings,
@@ -3572,6 +3786,42 @@ if not d["settled"]:
 if d["auto_seen_after"] != "on":
     print("the tray reports %r with the label %r, though the units were enabled"
           % (d["auto_seen_after"], d["pause_label_after"]))
+    raise SystemExit(1)
+'
+fi
+
+title "A pause whose resume timer cannot be armed at all"
+# The recovery path's fault, without a reboot first: pause_for() stopped and
+# disabled the units and only then asked systemd-run for the resume. When that
+# call failed nothing was turned back on, so sync was off, no stamp was written,
+# and the menu said "Automatic sync is off" with only a manual Resume now to
+# undo it. One fault has one outcome, so the repair the recovery path runs runs
+# here too. The systemd-run stub is still made to fail by the marker above.
+if run_driver pause-arm-failed; then
+    check "a failed pause leaves the units enabled again" json_py '
+if not any("enable --now ztraytest.timer" in x for x in d["enable_after"]):
+    print("the units were left disabled with nothing to end the pause: %r"
+          % (d["enable_after"],))
+    raise SystemExit(1)
+'
+    check "and the message says automatic sync is on again" json_py '
+if not d["said_something"]:
+    print("the failed pause said nothing at all")
+    raise SystemExit(1)
+if not any("on again" in body for body in d["notices"]):
+    print("nothing said sync was back on: %r" % (d["notices"],))
+    raise SystemExit(1)
+'
+    check "and no pause is claimed that nothing would end" json_py '
+if d["stamp"]:
+    print("a resume stamp was written for a pause with no timer behind it")
+    raise SystemExit(1)
+if "paused" in d["pause_label"].lower():
+    print("the menu claims a pause: %r" % (d["pause_label"],))
+    raise SystemExit(1)
+if not d["settled"] or d["auto_seen"] != "on":
+    print("auto_seen=%r, so the tray reports sync as off after enabling it again"
+          % (d["auto_seen"],))
     raise SystemExit(1)
 '
 fi
@@ -4290,6 +4540,49 @@ if run_driver openapp; then
         json_expr "not any('\"' in x for x in d['openapp_argv'])"
 fi
 set_config OPEN_APP_CMD '""'
+
+title "An open row with no xdg-open on PATH"
+# install.sh treats xdg-utils as optional, so both rows can be there with no
+# xdg-open to serve them. open_path() discarded spawn()'s answer while open_app()
+# four lines above checked it: the missing-path branch notified, and the
+# missing-tool branch notified nothing. Both paths exist in this scenario, so the
+# missing-tool branch is the one under test.
+if run_driver open-path-tool-missing; then
+    check "Open sync folder says it could not open the folder" json_py '
+bodies = d["folder_notices"]
+if not d["local_exists"]:
+    print("the folder %r does not exist, so this measured the other branch"
+          % (d["local"],))
+    raise SystemExit(1)
+if not bodies:
+    print("the row did nothing and said nothing (no xdg-open on PATH)")
+    raise SystemExit(1)
+if not any(d["local"] in b for b in bodies):
+    print("no message names the folder %r: %r" % (d["local"], bodies))
+    raise SystemExit(1)
+if not any("xdg-open" in b for b in bodies):
+    print("no message names xdg-open: %r" % (bodies,))
+    raise SystemExit(1)
+'
+    check "View sync log says it could not open the log" json_py '
+bodies = d["log_notices"]
+if not d["log_exists"]:
+    print("the log %r does not exist, so this measured the other branch"
+          % (d["log"],))
+    raise SystemExit(1)
+if not bodies:
+    print("the row did nothing and said nothing (no xdg-open on PATH)")
+    raise SystemExit(1)
+if not any(d["log"] in b for b in bodies):
+    print("no message names the log path %r: %r" % (d["log"], bodies))
+    raise SystemExit(1)
+if not any("xdg-open" in b for b in bodies):
+    print("no message names xdg-open: %r" % (bodies,))
+    raise SystemExit(1)
+'
+    check "and neither row ran a program that is not there" \
+        json_expr "not d['opened']"
+fi
 
 title "The single-instance lock"
 # The lock lives under XDG_RUNTIME_DIR, which is this suite's $WORK/run: 0700 and
@@ -5331,6 +5624,23 @@ if d["guard"] is not None:
           % (d["guard"], d["decoy_path"]))
     raise SystemExit(1)
 '
+    # The same scenario, asked about "/": absolute, so the sentence above says
+    # nothing about it, and the guard's prefix is then "/" itself.
+    check "the filesystem root is refused as LOCAL too" json_py '
+if "LOCAL" not in d["root_problem"]:
+    print("LOCAL=\"/\" was accepted: %r" % (d["root_problem"],))
+    raise SystemExit(1)
+'
+    check "and the delete guard has no root to resolve a folder against" json_py '
+if d["root_guard"] is not None:
+    print("with local_path_problem out of the way the guard returned %r, so a "
+          "top-level folder resolved against the filesystem root"
+          % (d["root_guard"],))
+    raise SystemExit(1)
+if d["root_guard_refused"] is not None:
+    print("the guard returned %r for LOCAL=\"/\"" % (d["root_guard_refused"],))
+    raise SystemExit(1)
+'
 fi
 
 title "A config that is not valid UTF-8"
@@ -5491,6 +5801,45 @@ if got["blurb"] == "Nothing needs fixing.":
 '
 fi
 
+title "What the name check says for each exit status"
+# onedrive-check answers 1 for "names were found" and 2 for a configuration or
+# usage fault, and this dialog had no case at all, so both read the same.
+if run_driver check-names; then
+    check "a configuration fault is titled as one and carries the checker's words" json_py '
+got = d["fault"][0] if d["fault"] else {}
+if got.get("title") != "onedrive-check could not run:":
+    print("title: %r" % (got.get("title"),))
+    raise SystemExit(1)
+if got.get("clean"):
+    print("a configuration fault was reported as clean")
+    raise SystemExit(1)
+if "sync directory not found" not in (got.get("blurb") or ""):
+    print("blurb: %r" % (got.get("blurb"),))
+    raise SystemExit(1)
+if "sync directory not found" not in got["report"]:
+    print("report: %r" % (got["report"],))
+    raise SystemExit(1)
+'
+    check "findings are not clean, and let the dialog say what they are" json_py '
+got = d["findings"][0] if d["findings"] else {}
+if got.get("clean"):
+    print("findings were reported as clean")
+    raise SystemExit(1)
+if got.get("title") is not None or got.get("blurb") is not None:
+    print("findings went through the fault wording: %r" % (got,))
+    raise SystemExit(1)
+'
+    check "and a clean run still says nothing needs fixing" json_py '
+got = d["clean"][0] if d["clean"] else {}
+if not got.get("clean"):
+    print("a clean run was not reported as clean: %r" % (got,))
+    raise SystemExit(1)
+if got.get("title") is not None or got.get("blurb") is not None:
+    print("a clean run went through the fault wording: %r" % (got,))
+    raise SystemExit(1)
+'
+fi
+
 title "Progress, in the shapes a real run writes"
 # The fixture above feeds one statistics block, the one with a percentage. A real
 # log is mostly the other shape: a run that transfers nothing prints "-" where the
@@ -5578,5 +5927,35 @@ if problems:
     print("; ".join(problems))
     raise SystemExit(1)
 PY
+
+title "A folder name is read as UTF-8, not as the desktop locale"
+# Every file the tray reads is pinned to UTF-8, and its subprocesses were not:
+# sh() and run_script() asked subprocess.run for text=True, which decodes with the
+# ambient locale. A desktop that is not UTF-8 then built the folder menu from
+# mis-decoded names and wrote the wrong name into exclude-folders.txt, so the
+# wrapper built an --exclude that matched nothing while the menu said the folder
+# was left out. C decodes to ASCII, which mangles a UTF-8 name the same way, so it
+# stands in for the GB18030 desktop without needing one built here. PYTHONIOENCODING
+# keeps the driver's own JSON on stdout out of the way; the locale is what the
+# tray's subprocesses see.
+if run_driver utf8-folders LC_ALL=C LANG=C PYTHONUTF8=0 PYTHONCOERCECLOCALE=0 \
+        PYTHONIOENCODING=utf-8; then
+    check "the folder listing survives a non-UTF-8 locale" json_py '
+if not d["listed"]:
+    print("rclone answered with %r and the tray never listed it (it read %r)"
+          % (d["want"], d["seen"]))
+    raise SystemExit(1)
+'
+    check "and the name unticking writes is the one rclone listed" json_py '
+if not d["round_trip"]:
+    print("the name the tray read does not match: saw %r, wanted %r"
+          % (d["seen"], d["want"]))
+    raise SystemExit(1)
+if not d["write_round_trip"]:
+    print("unticking added %r, wanted %r (the file holds %r)"
+          % (d["added"], [d["want"]], d["excluded"]))
+    raise SystemExit(1)
+'
+fi
 
 summary

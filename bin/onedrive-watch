@@ -54,13 +54,60 @@ fi
 
 running() { systemctl --user is-active --quiet "$SERVICE"; }
 
-# Wait for one event. With a timeout of 0, block until something happens.
+# Every inotifywait call used to discard both streams, so a failure was silently
+# "sleep 5 and try the same thing again". A permanent one -- an exclude pattern
+# that is not a valid regular expression, or the kernel's watch limit -- failed on
+# every attempt: the unit stayed active, so systemd's Restart=always never fired,
+# the journal held the startup banner alone, and nothing was watched at all while
+# every diagnostic said the watcher was fine. The stderr is kept and written to
+# the journal now, a permanent failure is told apart from a tree that went away,
+# and a few permanent failures in a row end the process so systemd restarts it
+# and the journal carries the reason.
+MAX_PERMANENT_FAILS=3    # in a row, then exit non-zero for Restart=always
+PERMANENT_RETRY=2        # seconds between attempts at something that keeps failing
+TRANSIENT_RETRY=5        # seconds before looking again for a tree that is not there
+
+error_count=0            # consecutive failures, whatever their kind
+permanent_fails=0        # consecutive permanent ones, for the exit above
+last_start_err=""        # so a failing systemctl start is reported once per reason
+
+# report_error <message> -- the first failure, then every twelfth, so a tree left
+# away for an hour is one line a minute rather than seven hundred.
+report_error() {
+    error_count=$((error_count + 1))
+    if [ "$error_count" -eq 1 ] || [ $((error_count % 12)) -eq 0 ]; then
+        printf '%s: inotifywait failed (%d in a row): %s\n' \
+            "$APP" "$error_count" "$1" >&2
+    fi
+}
+
+# permanent_failure <inotifywait stderr> -- true when retrying cannot help. A
+# tree that is not there any more is the one failure that clears itself: put it
+# back and watching works again. inotifywait says "No such file or directory" for
+# a path that vanished between the check above and the watch, and says nothing at
+# all when its directory is removed under it, so both the message and the state
+# of the tree are asked.
+permanent_failure() {
+    [ -d "$LOCAL" ] || return 1
+    case "$1" in
+        *"No such file or directory"*|*"Not a directory"*) return 1 ;;
+    esac
+    return 0
+}
+
+# Wait for one event. With a timeout of 0, block until something happens. The
+# exit status answers the caller's question (0: an event, non-zero: the timeout
+# expired or inotifywait failed); EVENT_RC and EVENT_ERR carry the rest, because
+# a command substitution can report the text or the status but not both.
+EVENT_RC=0; EVENT_ERR=""
 wait_event() {
     if [ "${1:-0}" = "0" ]; then
-        inotifywait "${ARGS[@]}" "$LOCAL" >/dev/null 2>&1
+        EVENT_ERR="$(inotifywait "${ARGS[@]}" "$LOCAL" 2>&1 >/dev/null)"
     else
-        inotifywait -t "$1" "${ARGS[@]}" "$LOCAL" >/dev/null 2>&1
+        EVENT_ERR="$(inotifywait -t "$1" "${ARGS[@]}" "$LOCAL" 2>&1 >/dev/null)"
     fi
+    EVENT_RC=$?
+    [ "$EVENT_RC" -eq 0 ]
 }
 
 # Consume events until the tree has been quiet for $1 seconds.
@@ -73,9 +120,25 @@ drain "$SETTLE"     # ignore anything that happened before we started
 
 while true; do
     if ! wait_event 0; then
-        sleep 5         # inotify failed (watch limit, vanished dir); retry
+        if permanent_failure "$EVENT_ERR"; then
+            permanent_fails=$((permanent_fails + 1))
+            report_error "${EVENT_ERR:-inotifywait exited $EVENT_RC without saying why}"
+            if [ "$permanent_fails" -ge "$MAX_PERMANENT_FAILS" ]; then
+                printf '%s: inotifywait failed %d times in a row and retrying cannot help; exiting so systemd restarts this unit and the journal keeps the reason\n' \
+                    "$APP" "$permanent_fails" >&2
+                exit 1
+            fi
+            sleep "$PERMANENT_RETRY"
+        else
+            # Not permanent, and not a reason to give up: the tree may come back.
+            permanent_fails=0
+            report_error "${EVENT_ERR:-the tree is not there (inotifywait exited $EVENT_RC)}"
+            sleep "$TRANSIENT_RETRY"
+        fi
         continue
     fi
+    error_count=0
+    permanent_fails=0
 
     drain "$DEBOUNCE"   # wait for the burst of edits to stop
 
@@ -84,7 +147,20 @@ while true; do
         sleep 2         # let bisync release its lock
     fi
 
-    systemctl --user start "$SERVICE" 2>/dev/null || true
+    # The old line threw systemd's answer away. A refused start -- no session, a
+    # unit that does not exist -- left the watcher looking healthy while nothing
+    # was ever started, and the journal had nothing to say about it either. One
+    # line per distinct reason, so a start that keeps failing is not one per edit.
+    start_err=""
+    if ! start_out="$(systemctl --user start "$SERVICE" 2>&1)"; then
+        start_err="$(printf '%s\n' "$start_out" | head -1)"
+        [ -n "$start_err" ] || start_err="it exited non-zero without a message"
+    fi
+    if [ -n "$start_err" ] && [ "$start_err" != "$last_start_err" ]; then
+        printf '%s: systemctl --user start %s failed: %s\n' \
+            "$APP" "$SERVICE" "$start_err" >&2
+    fi
+    last_start_err="$start_err"
 
     drain "$SETTLE"     # swallow whatever the run just wrote locally
 done

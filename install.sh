@@ -106,6 +106,33 @@ if ! command -v "$RCLONE_BIN" >/dev/null 2>&1; then
     fi
 fi
 
+# UNIT_NAME becomes a unit file name and, with --with-nm-dispatcher, the value
+# substituted into the machine-wide hook NetworkManager runs as root. It is read
+# here, before anything is written, and checked with the allow-list setup.sh
+# applies to its own --unit-name: systemd accepts letters, digits, ':', '_', '.',
+# '-' and '@' and nothing else, and a name must not start with a dot. It used to
+# be read only when the units were written and never checked, so a value holding
+# a shell expansion was executed by the dispatcher's own shell, a value holding
+# sed's '&' silently produced a hook that could not match a unit, and a value
+# holding '|' killed the run inside sed without ever naming the key.
+#
+# A first install has no config yet; the default is the name the shipped example
+# carries, so the value the units are written with is the same either way.
+UNIT_NAME="onedrive-sync"
+if [ -f "$CONFIG_DIR/config" ]; then
+    parsed_unit="$(sed -n 's/^[[:space:]]*UNIT_NAME="\{0,1\}\([^"]*\)"\{0,1\}.*/\1/p' \
+                   "$CONFIG_DIR/config" | tail -1)"
+    if [ -n "$parsed_unit" ]; then
+        UNIT_NAME="$parsed_unit"
+    fi
+fi
+case "$UNIT_NAME" in
+    ''|*[!A-Za-z0-9:_.@-]*)
+        die "invalid UNIT_NAME in $CONFIG_DIR/config: '$UNIT_NAME' (allowed: letters, digits, and : _ . - @)" ;;
+    .*)
+        die "invalid UNIT_NAME in $CONFIG_DIR/config: '$UNIT_NAME' (a unit name must not start with a dot)" ;;
+esac
+
 # flock is not optional: without it onedrive-sync cannot serialise runs.
 command -v flock >/dev/null 2>&1 || missing+=("util-linux (flock)")
 
@@ -143,9 +170,9 @@ On Debian/Ubuntu install them with:
 
     $APT_LINE
 
-The rclone shipped by distributions is often too old: --resilient/--recover
-(which let an interrupted sync heal itself instead of demanding a manual
---resync) need rclone >= 1.65. Check with \`rclone version\`; if it is older, get
+The rclone shipped by distributions is often too old: --recover, --max-lock,
+--conflict-resolve and --conflict-loser, which the shipped BISYNC_ARGS uses,
+all need rclone >= 1.66. Check with \`rclone version\`; if it is older, get
 a current build from https://rclone.org/downloads/ and put the binary in
 /usr/local/bin (which takes precedence over /usr/bin).
 
@@ -174,12 +201,43 @@ if [ "${#optional[@]}" -gt 0 ]; then
     printf '    - %s\n' "${optional[@]}" >&2
 fi
 
+# The wrapper's default BISYNC_ARGS uses --recover, --max-lock,
+# --conflict-resolve and --conflict-loser, and every one of those four arrived in
+# rclone 1.66 (checked against rclone's cmd/bisync/cmd.go at the v1.65.0 and
+# v1.66.0 tags). This check used to warn below 1.65 only, so 1.65 -- the version
+# the docs blessed -- was told nothing and then failed every run on an unknown
+# flag. A version string does not settle it either: a distribution may backport a
+# flag, and RCLONE may name a build that reports a different version, so the
+# binary is asked what it lists, the way onedrive-sync probes --resync-mode. Each
+# flag it does not list is named, because "upgrade rclone" without the flag is
+# advice a user cannot act on.
+rclone_has_bisync_flag() {  # rclone_has_bisync_flag <help-text> <flag name>
+    grep -qE "^[[:space:]]*(-[^,]+, )?--$2([[:space:]]|$)" <<<"$1"
+}
 RCLONE_VER="$("$RCLONE_BIN" version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+' | head -1 || true)"
-if [ -n "$RCLONE_VER" ]; then
+RCLONE_HELP="$("$RCLONE_BIN" bisync --help 2>/dev/null || true)"
+missing_bisync_flags=()
+for bisync_flag in recover max-lock conflict-resolve conflict-loser; do
+    rclone_has_bisync_flag "$RCLONE_HELP" "$bisync_flag" ||
+        missing_bisync_flags+=("--$bisync_flag")
+done
+if [ -n "$RCLONE_HELP" ]; then
+    if [ "${#missing_bisync_flags[@]}" -gt 0 ]; then
+        warn "this rclone has no ${missing_bisync_flags[*]}, so the flags in"
+        warn "BISYNC_ARGS that need them will be refused and every run will fail."
+        warn "All four arrived in rclone 1.66; see docs/TROUBLESHOOTING.md."
+    fi
+elif [ -n "$RCLONE_VER" ]; then
+    # The binary would not list its flags, so fall back to the version it
+    # reports. 1.65 is the version that used to pass this check and fail the run.
     major="${RCLONE_VER%%.*}"; minor="${RCLONE_VER##*.}"
     if [ "$major" -eq 0 ] || { [ "$major" -eq 1 ] && [ "$minor" -lt 65 ]; }; then
         warn "rclone $RCLONE_VER is older than 1.65: automatic recovery from an"
         warn "interrupted sync (--recover) will not work. See docs/TROUBLESHOOTING.md."
+    elif [ "$major" -eq 1 ] && [ "$minor" -lt 66 ]; then
+        warn "rclone $RCLONE_VER may lack --recover, --max-lock, --conflict-resolve"
+        warn "and --conflict-loser, which the default BISYNC_ARGS needs. They arrived"
+        warn "in rclone 1.66. See docs/TROUBLESHOOTING.md."
     fi
 else
     warn "Could not determine the rclone version."
@@ -249,9 +307,8 @@ fi
 # --------------------------------------------------------------- systemd units
 say "Installing systemd user units into $UNIT_DIR"
 mkdir -p "$UNIT_DIR"
-UNIT_NAME="$(sed -n 's/^[[:space:]]*UNIT_NAME="\{0,1\}\([^"]*\)"\{0,1\}.*/\1/p' \
-             "$CONFIG_DIR/config" | tail -1)"
-UNIT_NAME="${UNIT_NAME:-onedrive-sync}"
+# UNIT_NAME was read and validated before anything was written, so the units and
+# the NetworkManager hook cannot be reached with a name systemd would reject.
 INTERVAL_MIN="$(sed -n 's/^[[:space:]]*INTERVAL_MIN="\{0,1\}\([0-9]*\)"\{0,1\}.*/\1/p' \
                  "$CONFIG_DIR/config" | tail -1)"
 INTERVAL_MIN="${INTERVAL_MIN:-5}"
@@ -401,7 +458,10 @@ if [ "$NM_DISPATCHER" -eq 1 ]; then
         fi
         NM_TARGET="$NM_DISPATCHER_DIR/90-rclone-onedrive-tray"
         NM_TMP="$(mktemp)"
-        sed -e "s|%UNIT_NAME%|$UNIT_NAME|g" \
+        # The value is escaped for sed like every other substitution in this
+        # file. The unit-name check above is what keeps a shell expansion out of
+        # the hook; this keeps sed's own metacharacters from reaching it.
+        sed -e "s|%UNIT_NAME%|$(sed_replacement "$UNIT_NAME")|g" \
             "$SRC_DIR/extras/networkmanager-dispatcher.sh" > "$NM_TMP"
         if [ -d "$NM_DISPATCHER_DIR" ]; then
             if sudo install -m 0755 -o root -g root "$NM_TMP" "$NM_TARGET"; then
@@ -435,12 +495,22 @@ if systemctl --user daemon-reload 2>/dev/null; then
         warn "activate them yourself once the units are in its search path:"
         warn "    systemctl --user daemon-reload && systemctl --user enable --now $UNIT_NAME.timer"
     else
-        systemctl --user enable --now "$UNIT_NAME.timer" 2>/dev/null || \
-            warn "could not enable $UNIT_NAME.timer (no user systemd session?)"
+        # systemctl's own sentence is the only thing that says why an enable
+        # failed. It used to be thrown away and replaced with a guess ("no user
+        # systemd session?"), so a masked or missing unit read as a manager
+        # problem, and the repair command below was printed only by the other
+        # branch. A failure now says what systemctl said and names the fix.
+        enable_err="$(systemctl --user enable --now "$UNIT_NAME.timer" 2>&1)" || {
+            warn "could not enable $UNIT_NAME.timer: ${enable_err:-systemctl printed nothing}"
+            warn "run this yourself once the manager can see the unit:"
+            warn "    systemctl --user daemon-reload && systemctl --user enable --now $UNIT_NAME.timer"
+        }
         systemctl --user list-timers "$UNIT_NAME.timer" --no-pager 2>/dev/null | head -3 || true
         if watch_on "$WATCH" && [ "$HAVE_INOTIFY" -eq 1 ]; then
-            systemctl --user enable --now "$UNIT_NAME-watch.service" 2>/dev/null || \
-                warn "could not enable $UNIT_NAME-watch.service"
+            watch_err="$(systemctl --user enable --now "$UNIT_NAME-watch.service" 2>&1)" || {
+                warn "could not enable $UNIT_NAME-watch.service: ${watch_err:-systemctl printed nothing}"
+                warn "    systemctl --user enable --now $UNIT_NAME-watch.service"
+            }
             # enable --now is a no-op on a unit that is already active, and the
             # watcher is a long-running loop, so an update would leave the old
             # code running until reboot. try-restart touches only a running unit

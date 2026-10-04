@@ -46,13 +46,18 @@ CALLS="$WORK/rclone-calls"
 SYSTEMCTL_CALLS="$WORK/systemctl-calls"
 
 # The one thing this suite must not do for real is talk to a remote. bisync
-# --help is the wrapper's one-off question about --resync-mode, and this stub
-# answers it the way the rclone version it reports would: the flag exists. It is
-# answered here rather than recorded, because the recorded lines are the syncs
-# and the cases below count them.
+# --help is the wrapper's one-off question about the flags this rclone knows,
+# and this stub answers it the way the version it reports would: every flag the
+# wrapper's default set needs, plus --resync-mode. It is answered here rather
+# than recorded, because the recorded lines are the syncs and the cases below
+# count them.
 cat > "$WORK/stubs/rclone" <<EOF
 #!/bin/bash
 if [ "\$1" = bisync ] && [ "\$2" = --help ]; then
+    printf '%s\\n' '      --recover                          Skip --resync and recover from an interrupted run'
+    printf '%s\\n' '      --max-lock duration                Consider lock files older than this to be stale (default 2m0s)'
+    printf '%s\\n' '      --conflict-resolve string          How to resolve conflicting files'
+    printf '%s\\n' '      --conflict-loser string            What to do with the losing file'
     printf '%s\\n' '      --resync-mode string   During resync, prefer the version that is: path1, path2, newer, older, larger, smaller'
     exit 0
 fi
@@ -817,6 +822,87 @@ fi
 check "the watcher reports the tree it watches" \
     grep -qF "watching $LOCAL_DIR" "$WORK/watch.log"
 
+# inotifywait's stderr used to go to /dev/null and every failure meant "sleep 5
+# and try the same thing again". A WATCH_EXCLUDE that is not a valid regular
+# expression fails on every attempt, so the unit stayed active forever, systemd's
+# Restart=always never fired, and the journal held the startup banner alone while
+# the watcher did nothing at all. Measured with inotifywait 4.23.9 and
+# WATCH_EXCLUDE="[": the tool prints "Error in `exclude' regular expression." on
+# stderr and exits 1, and the watcher was still spinning after 12 seconds with
+# nothing else ever printed.
+title "onedrive-watch when inotifywait fails for good"
+WATCH_PERM="$WORK/watch-permanent"
+rm -rf "$WATCH_PERM"
+mkdir -p "$WATCH_PERM/cfg/rclone-onedrive-tray" "$WATCH_PERM/local" "$WATCH_PERM/cache"
+cat > "$WATCH_PERM/cfg/rclone-onedrive-tray/config" <<EOF
+LOCAL="$WATCH_PERM/local"
+UNIT_NAME="zz-watch-perm"
+WATCH_EXCLUDE="["
+WATCH_DEBOUNCE="1"
+WATCH_SETTLE="1"
+EOF
+WATCH_PERM_ERR="$WORK/watch-permanent.err"
+env PATH="$PATH" HOME="$WATCH_PERM" XDG_CONFIG_HOME="$WATCH_PERM/cfg" \
+    XDG_CACHE_HOME="$WATCH_PERM/cache" TMPDIR="$WATCH_PERM" \
+    "$HOME/.local/bin/onedrive-watch" >/dev/null 2>"$WATCH_PERM_ERR" &
+WATCH_PERM_PID=$!
+for _ in $(seq 1 60); do
+    kill -0 "$WATCH_PERM_PID" 2>/dev/null || break
+    sleep 0.5
+done
+if kill -0 "$WATCH_PERM_PID" 2>/dev/null; then
+    kill "$WATCH_PERM_PID" 2>/dev/null
+    wait "$WATCH_PERM_PID" 2>/dev/null
+    bad "an invalid WATCH_EXCLUDE left the watcher spinning instead of exiting"
+else
+    wait "$WATCH_PERM_PID" 2>/dev/null
+    WATCH_PERM_RC=$?
+    if [ "$WATCH_PERM_RC" -ne 0 ] && grep -qF 'regular expression' "$WATCH_PERM_ERR"; then
+        ok "an invalid WATCH_EXCLUDE reports inotifywait's message and exits non-zero"
+    else
+        bad "invalid WATCH_EXCLUDE: exit $WATCH_PERM_RC, $(head -2 "$WATCH_PERM_ERR" | tr '\n' ' ')"
+    fi
+fi
+
+# The other half of that decision: a tree that is not there any more is the one
+# failure that clears itself. inotifywait exits 1 with nothing on stderr when its
+# directory is removed, so a watcher that counted that as permanent would exit on
+# a tree somebody moved for a moment. Here the tree goes away, comes back, and an
+# edit after it has to reach systemd.
+title "onedrive-watch when the tree comes back"
+WATCH_TRANS="$WORK/watch-transient"
+rm -rf "$WATCH_TRANS"
+mkdir -p "$WATCH_TRANS/cfg/rclone-onedrive-tray" "$WATCH_TRANS/local" "$WATCH_TRANS/cache"
+cat > "$WATCH_TRANS/cfg/rclone-onedrive-tray/config" <<EOF
+LOCAL="$WATCH_TRANS/local"
+UNIT_NAME="zz-watch-trans"
+WATCH_DEBOUNCE="1"
+WATCH_SETTLE="1"
+EOF
+: > "$SYSTEMCTL_CALLS"
+env PATH="$PATH" HOME="$WATCH_TRANS" XDG_CONFIG_HOME="$WATCH_TRANS/cfg" \
+    XDG_CACHE_HOME="$WATCH_TRANS/cache" TMPDIR="$WATCH_TRANS" \
+    "$HOME/.local/bin/onedrive-watch" >/dev/null 2>"$WORK/watch-transient.err" &
+WATCH_TRANS_PID=$!
+sleep 2
+rmdir "$WATCH_TRANS/local"          # the tree vanishes under the watcher
+sleep 3
+mkdir -p "$WATCH_TRANS/local"       # and comes back before its next retry
+sleep 5
+touch "$WATCH_TRANS/local/note.md"
+for _ in $(seq 1 40); do
+    [ -s "$SYSTEMCTL_CALLS" ] && break
+    sleep 0.5
+done
+if kill -0 "$WATCH_TRANS_PID" 2>/dev/null &&
+        grep -q "start .*zz-watch-trans" "$SYSTEMCTL_CALLS" 2>/dev/null; then
+    ok "a directory that goes away and comes back leaves the watcher working"
+else
+    bad "the watcher did not survive a tree that vanished: $(head -2 "$WORK/watch-transient.err" | tr '\n' ' ')"
+fi
+kill "$WATCH_TRANS_PID" 2>/dev/null
+wait "$WATCH_TRANS_PID" 2>/dev/null
+
 # ---------------------------------------------------------------- the checker
 title "onedrive-check"
 check "the checker is installed" test -x "$HOME/.local/bin/onedrive-check"
@@ -841,6 +927,62 @@ touch "$LOCAL_DIR/CON"
 run "a resync reports the bad name and carries on" 0 "reserved name: CON" \
     "$HOME/.local/bin/onedrive-sync" --resync
 rm -f "$LOCAL_DIR/CON" "$LOCAL_DIR/Clash.md" "$LOCAL_DIR/clash.md"
+
+# onedrive-check documents 1 for findings and 2 for a usage or configuration
+# problem -- a LOCAL that does not exist, a config it cannot read. The wrapper
+# treated every non-zero as findings, so a broken configuration was announced as
+# "names or paths OneDrive will refuse were found", which sends a reader through
+# their filenames for a fault that is in their config. The checker's own sentence
+# is the one to repeat; the claim about names belongs to exit 1 alone.
+title "the wrapper reads onedrive-check's exit status"
+CHK="$WORK/check-status"
+rm -rf "$CHK"
+mkdir -p "$CHK/bin" "$CHK/cfg/rclone-onedrive-tray" "$CHK/cache/rclone/bisync" "$CHK/local"
+# A copy of the wrapper beside a stub checker, because the wrapper prefers the
+# checker in its own directory: that is how the installed pair is laid out.
+cp "$HOME/.local/bin/onedrive-sync" "$CHK/bin/"
+cat > "$CHK/bin/onedrive-check" <<'STUB'
+#!/bin/bash
+printf '%s\n' "${CHECK_MSG:-stub checker output}"
+exit "${CHECK_RC:-1}"
+STUB
+cat > "$CHK/rclone" <<'STUB'
+#!/bin/bash
+exit 0
+STUB
+chmod +x "$CHK/bin/onedrive-check" "$CHK/rclone"
+cat > "$CHK/cfg/rclone-onedrive-tray/config" <<EOF
+REMOTE="checkfake:Vault"
+LOCAL="$CHK/local"
+LOG="$CHK/cache/sync.log"
+RCLONE="rclone"
+MAX_DELETE="0"
+RETRIES="1"
+EOF
+chk_env() { env PATH="$CHK:$PATH" XDG_CONFIG_HOME="$CHK/cfg" \
+    XDG_CACHE_HOME="$CHK/cache" "$@"; }
+
+: > "$CHK/cache/sync.log"
+CHECK_OUT="$(chk_env CHECK_RC=1 CHECK_MSG='onedrive-check: reserved name: CON' \
+    "$CHK/bin/onedrive-sync" --resync 2>&1)"; CHECK_WRAPPER_RC=$?
+if [ "$CHECK_WRAPPER_RC" -eq 0 ] &&
+        grep -qF 'names or paths OneDrive will refuse were found' "$CHK/cache/sync.log"; then
+    ok "exit 1 from the checker is reported as names OneDrive will refuse"
+else
+    bad "checker exit 1: wrapper exit $CHECK_WRAPPER_RC, $(grep -m1 WARNING "$CHK/cache/sync.log"); $(tail -1 <<<"$CHECK_OUT")"
+fi
+
+: > "$CHK/cache/sync.log"
+CHECK_OUT="$(chk_env CHECK_RC=2 \
+    CHECK_MSG='onedrive-check: sync directory not found: /nowhere (fix LOCAL and run --resync)' \
+    "$CHK/bin/onedrive-sync" --resync 2>&1)"; CHECK_WRAPPER_RC=$?
+if [ "$CHECK_WRAPPER_RC" -eq 0 ] &&
+        grep -qF 'sync directory not found: /nowhere' "$CHK/cache/sync.log" &&
+        ! grep -qF 'names or paths OneDrive will refuse' "$CHK/cache/sync.log"; then
+    ok "exit 2 is a configuration fault: the checker's sentence, without the claim about names"
+else
+    bad "checker exit 2: wrapper exit $CHECK_WRAPPER_RC, $(grep -m1 WARNING "$CHK/cache/sync.log"); $(tail -1 <<<"$CHECK_OUT")"
+fi
 
 # Three names from the same documented list were invisible to the checker:
 # ".lock" left the stem empty, "desktop.ini" reduced to "desktop", and "_vti_"
@@ -876,15 +1018,24 @@ slug="$(printf '%s' "$CAP/local" | sed -e 's|^/||' -e 's|[/: ]|_|g')"
   done
 } > "$CAP/cache/rclone/bisync/x..$slug.path1.lst"
 # The stub is also asked one question that is not a sync: the wrapper runs
-# `bisync --help` once per --resync run to learn whether this rclone knows
-# --resync-mode. That call is answered here, recorded in CAP_ARGS.help rather
-# than in the argv file, and only when a case sets CAP_BISYNC_HELP, so every
-# other row's recorded command line is exactly what it was.
+# `bisync --help` once per run to learn which of the four newer bisync flags the
+# installed rclone actually has. The answer is what an rclone 1.75.1, the version
+# this stub reports elsewhere, prints; CAP_BISYNC_HELP replaces it whole, so a
+# case can pin an older rclone: nothing printed (the flags are absent), or a list
+# holding only some of them. The call is recorded in CAP_ARGS.help rather than in
+# the argv file, so every row's recorded command line is exactly what it was.
 cat > "$CAP/rclone" <<'STUB'
 #!/bin/bash
 if [ "$1" = bisync ] && [ "$2" = --help ]; then
     [ -n "${CAP_ARGS:-}" ] && printf 'help %s\n' "$*" >> "$CAP_ARGS.help"
-    [ -n "${CAP_BISYNC_HELP:-}" ] && printf '%s\n' "$CAP_BISYNC_HELP"
+    if [ -n "${CAP_BISYNC_HELP+x}" ]; then
+        printf '%s\n' "$CAP_BISYNC_HELP"
+    else
+        printf '%s\n' '      --recover                          Skip --resync and recover from an interrupted run'
+        printf '%s\n' '      --max-lock duration                Consider lock files older than this to be stale (default 2m0s)'
+        printf '%s\n' '      --conflict-resolve string          How to resolve conflicting files'
+        printf '%s\n' '      --conflict-loser string            What to do with the losing file'
+    fi
     exit 0
 fi
 printf '%s\n' "$*" >> "$CAP_ARGS"
@@ -1351,6 +1502,55 @@ else
 fi
 chmod 700 "$RO"
 
+# ---------------------------------------------------------------- the log's clock
+# log_line stamped with an unpinned `date`, so the log carried whatever calendar
+# the machine's locale uses. Measured by building the locale into a scratch
+# directory (no root) and running the wrapper under it: fa_IR writes 1405/07/12
+# where the readers assume 2026, the doctor's `date -d` on such a line reports
+# "last write 226900d ago", and the tray's strptime accepts no stats block at
+# all. The producer is what has to pin it: the readers are the doctor's `date -d`
+# and the tray's strptime, and neither can know which calendar wrote the file.
+title "the log's timestamp is written in the Gregorian calendar"
+LOG_CLOCK_LOCALE="$WORK/log-clock-locale"
+mkdir -p "$LOG_CLOCK_LOCALE"
+if localedef -i fa_IR -f UTF-8 "$LOG_CLOCK_LOCALE/fa_IR.UTF-8" 2>/dev/null &&
+        [ -n "$(LOCPATH="$LOG_CLOCK_LOCALE" LC_ALL=fa_IR.UTF-8 date '+%Y' 2>/dev/null)" ] &&
+        [ "$(LOCPATH="$LOG_CLOCK_LOCALE" LC_ALL=fa_IR.UTF-8 date '+%Y' 2>/dev/null)" != "$(LC_ALL=C date '+%Y')" ]; then
+    # The real thing: the machine's own date, under a locale whose %Y is a
+    # different calendar. Nothing is stubbed here.
+    : > "$CAP/sync.log"
+    cap_config
+    cap_env LOCPATH="$LOG_CLOCK_LOCALE" LC_ALL=fa_IR.UTF-8 \
+        "$HOME/.local/bin/onedrive-sync" >/dev/null 2>&1 || true
+    LOG_CLOCK_HOW="a scratch fa_IR.UTF-8 locale"
+else
+    # No locale sources on this machine. The claim under test is that log_line
+    # pins LC_ALL, so a date that would answer in another calendar unless the
+    # caller pins it stands in for one. The real fa_IR measurement is in
+    # tests/install-flow.sh's history and docs/CHANGELOG.
+    LOG_CLOCK_STUB="$WORK/log-clock-bin"
+    mkdir -p "$LOG_CLOCK_STUB"
+    cat > "$LOG_CLOCK_STUB/date" <<'STUB'
+#!/bin/bash
+if [ "${LC_ALL:-}" = "C" ]; then exec /bin/date "$@"; fi
+printf '1405/07/12 09:43:49\n'
+STUB
+    chmod +x "$LOG_CLOCK_STUB/date"
+    : > "$CAP/sync.log"
+    cap_config
+    cap_env PATH="$LOG_CLOCK_STUB:$CAP:$PATH" \
+        "$HOME/.local/bin/onedrive-sync" >/dev/null 2>&1 || true
+    LOG_CLOCK_HOW="a date stub that answers in another calendar"
+fi
+LOG_CLOCK_WANT="$(LC_ALL=C date '+%Y')"
+LOG_CLOCK_GOT="$(head -1 "$CAP/sync.log" | cut -d/ -f1)"
+if [ "$LOG_CLOCK_GOT" = "$LOG_CLOCK_WANT" ] &&
+        grep -qE "^$LOG_CLOCK_WANT/[0-9]{2}/[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} " "$CAP/sync.log"; then
+    ok "with $LOG_CLOCK_HOW the log's first field is the Gregorian year"
+else
+    bad "the log was stamped '$(head -1 "$CAP/sync.log" | cut -c1-19)' under a different calendar"
+fi
+
 # The sections below read the CAP log, so the config goes back to the plain one.
 cap_config
 
@@ -1369,9 +1569,19 @@ cat > "$ACC/rclone" <<'STUB'
 # bisync appends; copyto and lsf are what onedrive-check-access calls. The
 # remote is a name rclone resolves (accessfake:Vault), not a path this stub can
 # write to, so copyto lands the file in $ACC_REMOTE, which is where an alias
-# remote would have put it.
+# remote would have put it. The capability question the wrapper asks once per
+# run is answered and not recorded: the cases here count the syncs, and a help
+# call is not one.
 case "$1" in
-    bisync) printf '%s\n' "$*" >> "$ACC_ARGS" ;;
+    bisync)
+        if [ "$2" = --help ]; then
+            printf '%s\n' '      --recover                          Skip --resync and recover from an interrupted run'
+            printf '%s\n' '      --max-lock duration                Consider lock files older than this to be stale (default 2m0s)'
+            printf '%s\n' '      --conflict-resolve string          How to resolve conflicting files'
+            printf '%s\n' '      --conflict-loser string            What to do with the losing file'
+            exit 0
+        fi
+        printf '%s\n' "$*" >> "$ACC_ARGS" ;;
     copyto) printf '%s\n' "$*" >> "$ACC_ARGS"
             cp -- "$2" "$ACC_REMOTE/$(basename "$3")" ;;
     lsf)    ls -1 "$ACC_REMOTE" 2>/dev/null || true ;;
@@ -1559,6 +1769,28 @@ check "an access-check abort is not retried" test "$RETRY_COUNT" -eq 1
 retry_case "$RETRY_OLD"
 check "an unknown rclone flag is not retried" test "$RETRY_COUNT" -eq 1
 
+# The hint a rejected flag gets. It named --resilient and --recover whether or
+# not either was the flag rclone refused, and told the reader to get "rclone >=
+# 1.65" -- so a 1.65 install, where --recover is exactly what died, was sent to
+# the version it already had. Reproduced end to end with the release binary:
+# "Fatal error: unknown flag: --recover" then "[oldrclone] this rclone does not
+# know the flags in BISYNC_ARGS; --resilient/--recover need rclone >= 1.65".
+cap_config
+: > "$WORK/cap-args"; : > "$CAP/sync.log"
+OLD_OUT="$(cap_env CAP_STDERR='Error: unknown flag: --recover' CAP_RC=1 \
+    "$HOME/.local/bin/onedrive-sync" 2>&1)"
+if grep -qF '[oldrclone]' <<<"$OLD_OUT" && grep -qF -- '--recover' <<<"$OLD_OUT" &&
+        grep -qF 'rclone 1.66' <<<"$OLD_OUT"; then
+    ok "a rejected flag is named with the rclone version that has it"
+else
+    bad "the oldrclone hint: $(grep -m1 oldrclone <<<"$OLD_OUT")"
+fi
+if grep -qF '1.65' <<<"$OLD_OUT"; then
+    bad "the hint still tells a 1.65 user to get 1.65"
+else
+    ok "and it no longer sends a 1.65 user to the version that failed"
+fi
+
 cap_config
 
 # ------------------------------------------------- the help text and the flags
@@ -1607,7 +1839,16 @@ fi
 # the project's floor is 1.65, where the flag may be absent, so the wrapper asks
 # rclone itself instead of comparing version strings, once per run.
 title "--resync: which copy wins when both sides changed"
-CAP_RESYNC_HELP='      --resync-mode string   During resync, prefer the version that is: path1, path2, newer, older, larger, smaller (default "none")'
+# The four lines before the --resync-mode one are the flags the wrapper's default
+# set needs; a stub that listed only --resync-mode would be an rclone that knows
+# that flag and not the older ones, which no release ever was. Without them the
+# capability probe below would drop them and the "command line is the one it
+# always was" check after (c) would be comparing two different lines.
+CAP_RESYNC_HELP='      --recover                          Skip --resync and recover from an interrupted run
+      --max-lock duration                Consider lock files older than this to be stale (default 2m0s)
+      --conflict-resolve string          How to resolve conflicting files
+      --conflict-loser string            What to do with the losing file
+      --resync-mode string   During resync, prefer the version that is: path1, path2, newer, older, larger, smaller (default "none")'
 
 # (a) the rclone that knows the flag: the newer copy is asked for.
 cap_config
@@ -1634,8 +1875,12 @@ check "and the run warns that the cloud copy replaces the local one" \
 check "and says what to do about it" \
     grep -qF 'copy the local files aside' "$CAP/sync.log"
 
-# (c) a plain run is untouched: no flag, and not even the question, so a
-# scheduled run pays nothing for something only --resync cares about.
+# (c) a plain run is untouched: no --resync-mode flag, and the one capability
+# question the default flag set needs is asked once rather than once per flag.
+# The question is no longer only about --resync: the four flags the default set
+# passes arrived in rclone 1.66, so the wrapper has to ask what this rclone has
+# before it builds the line, on every run. What a scheduled run must not pay is
+# one question per flag.
 cap_config
 : > "$WORK/cap-args"; : > "$WORK/cap-args.help"; : > "$CAP/sync.log"
 cap_env CAP_BISYNC_HELP="$CAP_RESYNC_HELP" \
@@ -1645,13 +1890,91 @@ if grep -qF -- '--resync-mode' "$WORK/cap-args"; then
 else
     ok "a plain run passes no --resync-mode"
 fi
-if [ -s "$WORK/cap-args.help" ]; then
-    bad "a plain run asked rclone whether it knows --resync-mode"
+help_calls="$(grep -c 'help ' "$WORK/cap-args.help" 2>/dev/null || true)"
+if [ "${help_calls:-0}" -le 1 ]; then
+    ok "and it asks the capability question once, not once per flag"
 else
-    ok "and it does not even ask rclone the question"
+    bad "a plain run asked rclone's help $help_calls times"
 fi
 check "and the plain run's command line is the one it always was" \
     test "$(cat "$WORK/cap-args")" = "$(argv_line "$CAP/local" '--max-delete 50')"
+# The other side of that: a run whose flags need no capability answer at all --
+# an explicit BISYNC_ARGS holding none of the four -- still asks rclone nothing.
+cap_config 'BISYNC_ARGS=""'
+: > "$WORK/cap-args"; : > "$WORK/cap-args.help"; : > "$CAP/sync.log"
+cap_env "$HOME/.local/bin/onedrive-sync" >/dev/null 2>&1 || true
+if [ -s "$WORK/cap-args.help" ]; then
+    bad "a run with no extra flags asked rclone the question"
+else
+    ok "and it does not even ask rclone the question"
+fi
+cap_config
+
+# ---------------------------------------- the flags this rclone does not have
+# The default set passes four flags that arrived in rclone 1.66, while the
+# project documents a lower floor and install.sh only warns below 1.65. On a 1.65
+# rclone every run died on rclone's own "unknown flag: --recover", and the hint
+# answered a 1.65 user with "get rclone >= 1.65". The wrapper now asks rclone
+# which of the four it has -- one `bisync --help` call per run -- and adds only
+# those, so the same config syncs on a 1.65 install and says what it left out.
+title "the flags this rclone does not have"
+CAP_HELP_ALL='      --recover                          Skip --resync and recover from an interrupted run
+      --max-lock duration                Consider lock files older than this to be stale (default 2m0s)
+      --conflict-resolve string          How to resolve conflicting files
+      --conflict-loser string            What to do with the losing file'
+CAP_HELP_SOME='      --recover                          Skip --resync and recover from an interrupted run
+      --max-lock duration                Consider lock files older than this to be stale (default 2m0s)
+      --resilient                        Retry on less serious errors'
+CAP_HELP_NONE='      --resilient                        Retry on less serious errors
+      --stats duration                   Interval between printing stats (default 1m0s)'
+
+# (i) an rclone that lists all four: the whole default set, and no NOTICE.
+cap_config
+: > "$WORK/cap-args"; : > "$WORK/cap-args.help"; : > "$CAP/sync.log"
+cap_env CAP_BISYNC_HELP="$CAP_HELP_ALL" "$HOME/.local/bin/onedrive-sync" >/dev/null 2>&1 || true
+if [ "$(cat "$WORK/cap-args")" = "$(argv_line "$CAP/local" '--max-delete 50')" ]; then
+    ok "an rclone that lists all four flags gets the whole default set"
+else
+    bad "all four listed: $(cat "$WORK/cap-args")"
+fi
+if grep -qF 'does not list' "$CAP/sync.log"; then
+    bad "an rclone with every flag was told it was missing one"
+else
+    ok "and the run reports nothing as dropped"
+fi
+
+# (ii) an rclone that lists some of them: those two are not passed.
+cap_config
+: > "$WORK/cap-args"; : > "$WORK/cap-args.help"; : > "$CAP/sync.log"
+cap_env CAP_BISYNC_HELP="$CAP_HELP_SOME" "$HOME/.local/bin/onedrive-sync" >/dev/null 2>&1 || true
+want="bisync $CAP_REMOTE $CAP/local --resilient --recover --max-lock 2m --stats 2s --log-level INFO --log-file $CAP/sync.log --max-delete 50"
+if [ "$(cat "$WORK/cap-args")" = "$want" ]; then
+    ok "the two flags this rclone lacks are left off the command line"
+else
+    bad "some listed"
+    printf '        want: %s\n        got:  %s\n' "$want" "$(cat "$WORK/cap-args")"
+fi
+check "and the NOTICE names exactly the flags it dropped" \
+    grep -qF 'does not list --conflict-resolve, --conflict-loser' "$CAP/sync.log"
+check "and names the rclone version that has them" \
+    grep -qF 'rclone 1.66' "$CAP/sync.log"
+
+# (iii) an rclone that lists none of them: all four are dropped, named, and the
+# capability question was asked once.
+cap_config
+: > "$WORK/cap-args"; : > "$WORK/cap-args.help"; : > "$CAP/sync.log"
+cap_env CAP_BISYNC_HELP="$CAP_HELP_NONE" "$HOME/.local/bin/onedrive-sync" >/dev/null 2>&1 || true
+want="bisync $CAP_REMOTE $CAP/local --resilient --stats 2s --log-level INFO --log-file $CAP/sync.log --max-delete 50"
+if [ "$(cat "$WORK/cap-args")" = "$want" ]; then
+    ok "an rclone with none of the four gets a command line without them"
+else
+    bad "none listed"
+    printf '        want: %s\n        got:  %s\n' "$want" "$(cat "$WORK/cap-args")"
+fi
+check "and the NOTICE names all four, in the order they are passed" \
+    grep -qF 'does not list --recover, --max-lock, --conflict-resolve, --conflict-loser' "$CAP/sync.log"
+check "and the capability question was asked once, not once per flag" \
+    test "$(grep -c 'help ' "$WORK/cap-args.help")" -eq 1
 cap_config
 
 # ---------------------------------------- the stale lock the retry loop hid
@@ -1683,8 +2006,17 @@ DEAD_PID=999999
 # The stub stands in for an rclone that is killed by its first attempt: it leaves
 # a lock naming a dead PID and fails, and every later call fails for as long as
 # that lock is there, which is what real rclone does with a lock it cannot use.
+# The capability question is answered before the attempt counter, so it is not
+# one of the attempts this case counts.
 cat > "$STALE_FX/rclone" <<EOF
 #!/bin/bash
+if [ "\$1" = bisync ] && [ "\$2" = --help ]; then
+    printf '%s\n' '      --recover                          Skip --resync and recover from an interrupted run'
+    printf '%s\n' '      --max-lock duration                Consider lock files older than this to be stale (default 2m0s)'
+    printf '%s\n' '      --conflict-resolve string          How to resolve conflicting files'
+    printf '%s\n' '      --conflict-loser string            What to do with the losing file'
+    exit 0
+fi
 n="\$(cat "$STALE_FX/calls" 2>/dev/null || echo 0)"
 n=\$((n + 1))
 printf '%s\n' "\$n" > "$STALE_FX/calls"
@@ -2007,6 +2339,49 @@ if [ "$DOCTOR_RC" -eq 1 ] && grep -q "RETRY_DELAY" <<<"$DOCTOR_OUT"; then
     ok "RETRY_DELAY with a unit suffix is refused too, and named"
 else
     bad "RETRY_DELAY=60s: exit $DOCTOR_RC, $(grep -m1 config <<<"$DOCTOR_OUT")"
+fi
+
+# The config is read with `.`, and the doctor, the tray and the wrapper all
+# accept a line that starts with `export `. The doctor's two scans for key names
+# did not: they matched from the first character, so `export RETRIES="three"`
+# was not a RETRIES line to them. The wrapper refused the same file, which left
+# the diagnostic certifying a config that nothing would sync with. Measured
+# before the fix: "ok config ... sets REMOTE and LOCAL" and "6 ok, 5 warn,
+# nothing failed", exit 0, against "RETRIES='three' is not a positive integer"
+# from the wrapper.
+doc_fixture export-bad-retries 'export RETRIES="three"'
+DOCTOR_OUT="$(doc_run "$DOC_FX" --quiet --offline 2>&1)"; DOCTOR_RC=$?
+if [ "$DOCTOR_RC" -eq 1 ] && grep -q '^fail config.*RETRIES' <<<"$DOCTOR_OUT"; then
+    ok "an exported RETRIES the wrapper refuses is a failed config check too"
+else
+    bad "export RETRIES=three: exit $DOCTOR_RC, $(grep -m1 config <<<"$DOCTOR_OUT")"
+fi
+
+# The same key again, for its second verdict: the logfile check judged
+# MAX_LOG_BYTES on its own and only warned, so the prefix made the run exit 0
+# while the wrapper refused to sync at all. One key gets one verdict, and it is
+# the failure the wrapper's own refusal implies.
+doc_fixture export-bad-max-log 'export MAX_LOG_BYTES="5MB"'
+DOCTOR_OUT="$(doc_run "$DOC_FX" --quiet --offline 2>&1)"; DOCTOR_RC=$?
+if [ "$DOCTOR_RC" -eq 1 ] && grep -q '^fail config.*MAX_LOG_BYTES' <<<"$DOCTOR_OUT" &&
+        ! grep -q '^warn logfile.*MAX_LOG_BYTES' <<<"$DOCTOR_OUT"; then
+    ok "an exported MAX_LOG_BYTES is one failed verdict, not a warn that exits 0"
+else
+    bad "export MAX_LOG_BYTES=5MB: exit $DOCTOR_RC, $(grep -m1 'logfile\|config' <<<"$DOCTOR_OUT")"
+fi
+
+# The filters guard was the other half of the same bug: it also anchored on the
+# key, and a config whose only FILTERS_FILE line carried the prefix got no
+# mention of the path at all, on this line or any other.
+doc_fixture export-bad-filters
+export_cfg="$DOC_FX/cfg/rclone-onedrive-tray/config"
+sed -i 's|^FILTERS_FILE=|# FILTERS_FILE=|' "$export_cfg"
+printf 'export FILTERS_FILE="/nonexistent/filters.txt"\n' >> "$export_cfg"
+DOCTOR_OUT="$(doc_run "$DOC_FX" --quiet --offline 2>&1)"; DOCTOR_RC=$?
+if [ "$DOCTOR_RC" -eq 1 ] && grep -q '^fail paths.*FILTERS_FILE' <<<"$DOCTOR_OUT"; then
+    ok "an exported FILTERS_FILE that is missing fails the paths check"
+else
+    bad "export FILTERS_FILE: exit $DOCTOR_RC, $(grep -m1 paths <<<"$DOCTOR_OUT")"
 fi
 
 doc_fixture no-config

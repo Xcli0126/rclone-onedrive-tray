@@ -134,13 +134,21 @@ real one.)
 
 ```bash
 rclone backend drives onedrive:          # may itself fail
-# ask Graph directly with the stored token:
+# Ask Graph directly with the stored token. The header goes in on stdin, not in
+# curl's arguments: /proc/<pid>/cmdline is world-readable, so a token on the
+# command line is visible to every user on the machine for the life of the request.
 TOKEN=$(python3 -c "import configparser,json; \
   c=configparser.ConfigParser(); c.read('$HOME/.config/rclone/rclone.conf'); \
   print(json.loads(c['onedrive']['token'])['access_token'])")
-curl -s -H "Authorization: Bearer $TOKEN" https://graph.microsoft.com/v1.0/me/drives
-curl -s -H "Authorization: Bearer $TOKEN" https://graph.microsoft.com/v1.0/me/drive
+printf 'Authorization: Bearer %s\n' "$TOKEN" |
+  curl -s -H @- https://graph.microsoft.com/v1.0/me/drives
+printf 'Authorization: Bearer %s\n' "$TOKEN" |
+  curl -s -H @- https://graph.microsoft.com/v1.0/me/drive
+unset TOKEN
 ```
+
+Do not paste that token, or the output of those commands, anywhere: it is live
+access to the account until it expires.
 
 `/me/drive` returns the default drive with the correct id (for a personal account it looks like
 sixteen hex characters, `0123456789ABCDEF`, and *not* like `b!...`).
@@ -175,11 +183,11 @@ or
 ERROR : Bisync critical error: cannot read prior listing: open ...path2.lst: no such file
 ```
 
-**Cause:** On **rclone < 1.65** an interrupted run invalidates the baseline and the only way out
+**Cause:** On **rclone < 1.66** an interrupted run invalidates the baseline and the only way out (`--resilient` exists from 1.65, `--recover` only from 1.66)
 is a manual `--resync`. On a laptop this is not an edge case: closing the lid mid-sync is
 enough.
 
-**Fix:** Upgrade rclone to 1.65 or newer and run with:
+**Fix:** Upgrade rclone to 1.66 or newer and run with:
 
 ```sh
 --resilient    # retry after less-serious errors instead of demanding --resync
@@ -653,6 +661,10 @@ uniform. `CON` fails loudly, `.lock` uploads and then becomes invisible, and `~$
 normally even though Microsoft documents them as reserved. The checker covers all three groups:
 the device names by their stem (so `CON.txt` is caught), `.lock` and `desktop.ini` by their whole
 name, and `_vti_` as a prefix.
+
+The checker counts a path in bytes rather than characters, so a path with non-ASCII characters is
+measured by what the server sees. Every path in the table above is ASCII, where the two are the
+same number, which is why the limits did not need adjusting when the unit was pinned.
 
 **Fix:** use the checker.
 

@@ -194,7 +194,11 @@ else
             *" $key "*) ;;
             *) unknown="${unknown:+$unknown, }$key" ;;
         esac
-    done < <(sed -n 's/^[[:space:]]*\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' \
+    # The optional `export ` is not decoration: the config is read with `.`, so
+    # the wrapper, the tray and this script all accept `export RETRIES=...`, and
+    # a scan anchored on the key alone did not see such a line at all. A config
+    # the wrapper refused was then certified healthy here.
+    done < <(sed -n 's/^[[:space:]]*\(export[[:space:]]\+\)\?\([A-Za-z_][A-Za-z0-9_]*\)=.*/\2/p' \
                  "$CONFIG_FILE" | sort -u)
     # The three keys onedrive-sync runs require_positive_int on. A value it
     # refuses stops every scheduled run before rclone starts, and its message goes
@@ -234,7 +238,9 @@ else
     paths_msg="$LOCAL exists and is writable"
 fi
 
-if grep -qE '^[[:space:]]*FILTERS_FILE=' "$CONFIG_FILE" 2>/dev/null; then
+# The same optional `export ` as the key scan above: without it a config whose
+# only FILTERS_FILE line carried the prefix got no mention of the path here.
+if grep -qE '^[[:space:]]*(export[[:space:]]+)?FILTERS_FILE=' "$CONFIG_FILE" 2>/dev/null; then
     rules="$(grep -cvE '^[[:space:]]*(#|$)' "$FILTERS_FILE" 2>/dev/null || true)"
     if [ -z "$FILTERS_FILE" ]; then
         paths_msg="$paths_msg; FILTERS_FILE is empty, so no filter rules are applied"
@@ -551,7 +557,12 @@ if [ -e "$LOG" ]; then
     else
         log_size="$(stat -c%s -- "$LOG" 2>/dev/null || echo 0)"
         case "$MAX_LOG_BYTES" in
-            ''|*[!0-9]*) report warn logfile "$LOG is writable, but MAX_LOG_BYTES='$MAX_LOG_BYTES' is not a positive integer, which onedrive-sync refuses to run with; give it a byte count (the default is 5242880) or empty the key" ;;
+            # One key, one verdict. The config check above judges MAX_LOG_BYTES
+            # too, and this branch used to answer the same value with a warn: a
+            # config the wrapper refuses to run with then came out as "nothing
+            # failed", exit 0. The sentence stays, including what to put there;
+            # only the verdict follows the wrapper's.
+            ''|*[!0-9]*) report fail logfile "$LOG is writable, but MAX_LOG_BYTES='$MAX_LOG_BYTES' is not a positive integer, which onedrive-sync refuses to run with; give it a byte count (the default is 5242880) or empty the key" ;;
             *) if [ "$log_size" -gt "$MAX_LOG_BYTES" ]; then
                    report warn logfile "$LOG is writable at $log_size bytes, above MAX_LOG_BYTES=$MAX_LOG_BYTES; the next run rotates it to $LOG.1"
                else

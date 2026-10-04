@@ -121,7 +121,12 @@ if ! log_err="$({ : >>"$LOG"; } 2>&1)"; then
     die "cannot write the log $LOG: $log_err (check that $log_dir is writable, or point LOG somewhere else in $CONFIG_FILE)"
 fi
 
-log_line() { printf '%s %s\n' "$(date '+%Y/%m/%d %H:%M:%S')" "$*" >>"$LOG"; }
+# The stamp is pinned to the C locale on purpose: a locale whose %Y is not
+# Gregorian (fa_IR writes 1405 where this reads 2026) put a calendar in the log
+# that no reader can match. The doctor parses the field with `date -d` and the
+# tray parses it with strptime, and neither can know which calendar wrote the
+# file, so the writer is the only place this can be settled.
+log_line() { printf '%s %s\n' "$(LC_ALL=C date '+%Y/%m/%d %H:%M:%S')" "$*" >>"$LOG"; }
 
 # ---------------------------------------------------------------- mutual exclusion
 # A manual run racing the systemd timer corrupts bisync's .lst listings.
@@ -315,6 +320,78 @@ case " $BISYNC_ARGS " in
 esac
 read -r -a BISYNC_OPTS <<<"$BISYNC_ARGS"
 
+# ------------------------------------------------------ what this rclone has
+# The built-in default set passes four flags that arrived in rclone 1.66:
+# --recover, --max-lock, --conflict-resolve and --conflict-loser. The project
+# documents a lower floor and install.sh only warns below 1.65, while the wrapper
+# handed all four to every rclone. Measured end to end with the 1.65 release
+# binary, a plain run ends:
+#
+#   Fatal error: unknown flag: --recover
+#   [oldrclone] this rclone does not know the flags in BISYNC_ARGS;
+#   --resilient/--recover need rclone >= 1.65 (check: rclone version)
+#
+# -- advice a 1.65 user cannot take, and nothing ever syncs. The answer is asked
+# of rclone itself rather than compared against a version string hand-copied
+# here, one `bisync --help` per run, and the --resync-mode question below reads
+# the same answer, so a run never asks twice.
+RCLONE_BISYNC_HELP=""
+rclone_help_read=0
+read_bisync_help() {
+    [ "$rclone_help_read" -eq 1 ] && return 0
+    rclone_help_read=1
+    RCLONE_BISYNC_HELP="$("$RCLONE" bisync --help 2>/dev/null || true)"
+}
+# The release each capability-gated flag arrived in, for the NOTICE and for the
+# failure hint. Measured against the release binaries: 1.63 lists none of them,
+# 1.64 lists --resilient, 1.65 adds nothing, 1.66 lists all five.
+flag_version() {
+    case "$1" in
+        --resilient) printf '1.64' ;;
+        --recover|--max-lock|--conflict-resolve|--conflict-loser|--resync-mode)
+            printf '1.66' ;;
+        *) printf '' ;;
+    esac
+}
+# Only the built-in default set is filtered: it is this project's own string, and
+# it is the one that names flags a supported rclone may not have. A BISYNC_ARGS
+# the user set is used as written, which is what the key documents.
+if [ "$bisync_args_origin" = default ]; then
+    CAP_FLAGS=" --recover --max-lock --conflict-resolve --conflict-loser "
+    CAP_VALUE_FLAGS=" --max-lock --conflict-resolve --conflict-loser "
+    dropped=""; kept_opts=()
+    cap_i=0
+    while [ "$cap_i" -lt "${#BISYNC_OPTS[@]}" ]; do
+        cap_opt="${BISYNC_OPTS[$cap_i]}"
+        case "$CAP_FLAGS" in
+            *" $cap_opt "*)
+                read_bisync_help
+                if grep -q -- "$cap_opt" <<<"$RCLONE_BISYNC_HELP"; then
+                    kept_opts+=("$cap_opt")
+                    case "$CAP_VALUE_FLAGS" in
+                        *" $cap_opt "*)
+                            [ $((cap_i + 1)) -lt "${#BISYNC_OPTS[@]}" ] &&
+                                kept_opts+=("${BISYNC_OPTS[$((cap_i + 1))]}")
+                            cap_i=$((cap_i + 1)) ;;
+                    esac
+                else
+                    # The flag goes, and with it the value it takes, or rclone
+                    # would receive that value as a positional argument.
+                    dropped="${dropped:+$dropped, }$cap_opt"
+                    case "$CAP_VALUE_FLAGS" in
+                        *" $cap_opt "*) cap_i=$((cap_i + 1)) ;;
+                    esac
+                fi ;;
+            *) kept_opts+=("$cap_opt") ;;
+        esac
+        cap_i=$((cap_i + 1))
+    done
+    BISYNC_OPTS=("${kept_opts[@]}")
+    if [ -n "$dropped" ]; then
+        log_line "NOTICE: this rclone does not list $dropped (rclone 1.66 has them), so this run leaves them out; upgrade rclone to get the recovery and conflict handling they give"
+    fi
+fi
+
 # BISYNC_ARGS is split on whitespace, not by a shell, so a quote in it is a
 # character rclone receives rather than grouping: --exclude "/My Docs/**" arrives
 # as three words, and the stray positional makes rclone bisync print its usage and
@@ -478,8 +555,19 @@ if [ "$resync_wanted" -eq 1 ]; then
     esac
     [ -n "$check_cmd" ] || check_cmd="$(command -v onedrive-check 2>/dev/null || true)"
     if [ -n "$check_cmd" ]; then
-        if ! check_report="$("$check_cmd" 2>&1)"; then
-            log_line "WARNING: names or paths OneDrive will refuse were found before the resync"
+        check_rc=0
+        check_report="$("$check_cmd" 2>&1)" || check_rc=$?
+        if [ "$check_rc" -ne 0 ]; then
+            # onedrive-check documents 1 for findings and 2 for a usage or
+            # configuration problem, and the two want different sentences: a
+            # LOCAL that does not exist announced as bad file names sends the
+            # reader through their filenames for a fault that is in their config.
+            check_first="$(printf '%s\n' "$check_report" | head -1)"
+            case "$check_rc" in
+                1) log_line "WARNING: names or paths OneDrive will refuse were found before the resync" ;;
+                2) log_line "WARNING: onedrive-check stopped on a configuration problem, so the names were not checked: $check_first" ;;
+                *) log_line "WARNING: onedrive-check exited $check_rc before the resync, so the names were not checked: $check_first" ;;
+            esac
             printf '%s\n' "$check_report" >>"$LOG"
             printf '%s\n' "$check_report" >&2
         fi
@@ -496,13 +584,15 @@ if [ "$resync_wanted" -eq 1 ]; then
     #
     # --resync-mode newer keeps the copy that changed last, which is the honest
     # reading of "resync" for a file the user edited on this machine. It is not
-    # in every rclone the project supports (the floor is 1.65), so the capability
-    # is asked of rclone itself rather than compared against a version string,
-    # once per run, here, before the retry loop. On an rclone without it the old
-    # behaviour stays and the log says so: a preview of the files cannot be
-    # promised (that would be a --dry-run guess), and losing local edits silently
-    # is the one thing this must not do.
-    if "$RCLONE" bisync --help 2>/dev/null | grep -q -- '--resync-mode'; then
+    # in every rclone the project supports, so the capability is asked of rclone
+    # itself rather than compared against a version string, once per run, here,
+    # before the retry loop. On an rclone without it the old behaviour stays and
+    # the log says so: a preview of the files cannot be promised (that would be a
+    # --dry-run guess), and losing local edits silently is the one thing this
+    # must not do. read_bisync_help is the same one call the flag filter above
+    # made, so this asks nothing extra when that filter already ran.
+    read_bisync_help
+    if grep -q -- '--resync-mode' <<<"$RCLONE_BISYNC_HELP"; then
         ARGS+=(--resync-mode newer)
         log_line "NOTICE: --resync: this rclone knows --resync-mode, so where a file differs on both sides the newer copy wins"
     else
@@ -583,7 +673,22 @@ hint_for() {
         msg="network problem reaching the remote, so nothing was changed; the next run will retry"
     elif grep -qiE "$RE_OLD" <<<"$t"; then
         tag=oldrclone
-        msg="this rclone does not know the flags in BISYNC_ARGS; --resilient/--recover need rclone >= 1.65 (check: rclone version)"
+        # rclone names the flag it refused ("Error: unknown flag: --recover"),
+        # and the hint used to answer with --resilient/--recover whichever it was
+        # while sending the reader to "rclone >= 1.65" -- the version a 1.65
+        # install already has, and the one whose missing --recover caused the
+        # failure. The flag that was really refused is read back out of rclone's
+        # own line, and the version that has it comes from flag_version.
+        old_flag="$(grep -oiE 'unknown flag: *-{1,2}[A-Za-z0-9-]+|unknown shorthand flag: *-{1,2}[A-Za-z0-9-]+|flag provided but not defined: *-{1,2}[A-Za-z0-9-]+' <<<"$t" |
+            grep -oE -- '-{1,2}[A-Za-z0-9-]+' | tail -1 || true)"
+        old_ver=""; [ -n "$old_flag" ] && old_ver="$(flag_version "$old_flag")"
+        if [ -n "$old_flag" ] && [ -n "$old_ver" ]; then
+            msg="this rclone does not know $old_flag; that flag arrived in rclone $old_ver (check: rclone version)"
+        elif [ -n "$old_flag" ]; then
+            msg="this rclone does not know $old_flag; the flags this wrapper passes need rclone 1.66 (check: rclone version)"
+        else
+            msg="this rclone does not know the flags in BISYNC_ARGS; the ones this wrapper passes need rclone 1.66 (check: rclone version)"
+        fi
     # Before the generic resync patterns: an empty remote is refused with "Bisync
     # critical error" too, and answering it with --resync rebuilds an equally
     # empty baseline, so the next run fails identically. That is the advice loop

@@ -194,3 +194,31 @@ tray-lock-release-inode	bin/onedrive-tray	s|^        ours = (os.stat(LOCK_FILE).
 tray-main-relative-local	bin/onedrive-tray	s|^        local_problem = local_path_problem(cfg.get("LOCAL"))$|        local_problem = ""|	tray
 tray-relative-local-guard	bin/onedrive-tray	s|^        if local_path_problem(self.local):$|        if False:|	tray
 tray-delete-dialog-path	bin/onedrive-tray	s|"again downloads it back.", path=target)|"again downloads it back.")|	tray
+# round eight (agenttray9)
+tray-local-root-refused	bin/onedrive-tray	s#^    if os.path.dirname(root) == root:$#    if False:#	tray
+tray-local-root-guard	bin/onedrive-tray	s#^        if os.path.dirname(root) == root:$#        if False:#	tray
+tray-pause-unarmed-leaves-off	bin/onedrive-tray	s#^                self._set_units("enable", "--now")$#                pass#	tray
+tray-pause-unarmed-silent	bin/onedrive-tray	s#^            return self._pause_lost()$#            return False#	tray
+tray-open-path-silent	bin/onedrive-tray	s#^        if not spawn(\["xdg-open", path\]):$#        if False:#	tray
+tray-subprocess-locale	bin/onedrive-tray	s#encoding="utf-8", errors="replace"#text=True#g	tray
+# round eight (agentsh9)
+doctor-export-keys	bin/onedrive-doctor	s|export\[\[:space:\]\]\\+|ZZexportZZ|	install-flow
+doctor-export-filters-guard	bin/onedrive-doctor	s|)?FILTERS_FILE=|)?ZZFILTERS_FILE=|	install-flow
+doctor-logfile-maxlog-verdict	bin/onedrive-doctor	s|report fail logfile "\$LOG is writable, but MAX_LOG_BYTES|report warn logfile "\$LOG is writable, but MAX_LOG_BYTES|	install-flow
+watch-permanent-failure-exits	bin/onedrive-watch	s|if \[ "\$permanent_fails" -ge "\$MAX_PERMANENT_FAILS" \]; then|if false; then|	install-flow
+watch-inotify-stderr-hidden	bin/onedrive-watch	s|report_error "\${EVENT_ERR:-inotifywait exited \$EVENT_RC without saying why}"|true|	install-flow
+sync-checker-status-collapsed	bin/onedrive-sync	s|2) log_line "WARNING: onedrive-check stopped on a configuration problem, so the names were not checked: \$check_first" ;;|2) log_line "WARNING: names or paths OneDrive will refuse were found before the resync" ;;|	install-flow
+sync-default-set-unfiltered	bin/onedrive-sync	s|if \[ "\$bisync_args_origin" = default \]; then|if false; then|	install-flow
+sync-oldrclone-hint-version	bin/onedrive-sync	s|that flag arrived in rclone \$old_ver|the flags need rclone >= 1.65|	install-flow
+sync-log-locale-unpinned	bin/onedrive-sync	s|LC_ALL=C date '+%Y/%m/%d %H:%M:%S'|date '+%Y/%m/%d %H:%M:%S'|	install-flow
+# round eight (agentinst9)
+install-unit-name-validation	install.sh	s#    ''|\*\[!A-Za-z0-9:_.@-\]\*)#    'zz-never-matches')#	dependency-matrix
+extras-issue-watch-execstart-unquoted	extras/install-issue-watch.sh	s|^ExecStart="\$WATCH_EXEC"$|ExecStart=$BIN_DIR/watch-issues.sh|	dependency-matrix
+setup-skip-folders-hash	setup.sh	s|                '#'\*)            problem="a name starting with # is read as a comment" ;;|                '#'*)            problem="" ;;|	dependency-matrix
+install-enable-hides-reason	install.sh	s#enable_err="$(systemctl --user enable --now "$UNIT_NAME.timer" 2>&1)"#enable_err="$(systemctl --user enable --now "$UNIT_NAME.timer" 2>/dev/null)"#	dependency-matrix
+setup-missing-value-message	setup.sh	s#REMOTE_IN="\${2?--remote needs a value}"#REMOTE_IN="${2:?}"#	dependency-matrix
+setup-unknown-option-status	setup.sh	s#        \*)            usage_error "unknown option: \$1 (try --help)" ;;#        *)            die "unknown option: $1 (try --help)" ;;#	dependency-matrix
+check-locale-byte-length	bin/onedrive-check	s|^export LC_ALL=C$|:|	filters
+install-rclone-probe-flags	install.sh	s|    if \[ "\${#missing_bisync_flags\[@\]}" -gt 0 \]; then|    if false; then|	dependency-matrix
+# the name check keeping the checker own words for a configuration fault
+tray-check-status-fault	bin/onedrive-tray	s|^            if status not in (0, 1):$|            if False:|	tray

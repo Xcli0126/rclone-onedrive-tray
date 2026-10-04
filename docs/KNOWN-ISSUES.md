@@ -107,6 +107,22 @@ test is allowed to touch before anyone starts.
   Where that file is absent or unreadable the line says `pid unknown` and the
   verdict still comes from `flock`, so the check is right and only the pid is
   missing.
+- `tests/floors.txt` budgets one environmental skip for `install-flow`, because its
+  last case needs the NetworkManager hook. The suite has four conditional skips
+  (systemd-analyze absent, a 0500 directory that is still writable, a pid that is
+  already gone, and that hook), and a skip lowers the passed count, so a machine
+  missing two of them reports below the floor and fails CI for a reason unrelated
+  to the change. Fixing it means either counting the four and budgeting honestly or
+  turning the environmental ones into passes with a note.
+- `bin/onedrive-sync` creates `LOCAL` when it is missing (`mkdir -p` before the
+  run), so a typo in the path or an unmounted tree starts syncing into a fresh
+  directory instead of stopping. It is defensible (the doctor recommends the same
+  `mkdir` for that state and nothing is deleted), and it is written down because it
+  is the reason the checker's "sync directory not found" cannot be reached from the
+  wrapper.
+- The untagged failure hint is asymmetric between the languages: English shows the
+  raw log line for a failure with no `[tag]`, while Chinese shows 详见同步日志. Both
+  point at the log, so it is a rough edge rather than a defect.
 
 ### The tray's state is read out of English prose in a shared log
 

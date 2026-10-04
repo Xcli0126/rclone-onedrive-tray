@@ -349,6 +349,17 @@ def local_path_problem(value) -> str:
     if not os.path.isabs(os.path.expanduser(text)):
         return (f'LOCAL="{text}" is not an absolute path; it has to be one, such '
                 f'as "$HOME/OneDrive".')
+    root = os.path.realpath(os.path.expanduser(text))
+    if os.path.dirname(root) == root:
+        # The filesystem root passes the two checks above and is the one absolute
+        # value they cannot describe. It matters because _local_delete_path()
+        # tests "strictly inside the resolved root" with a separator-anchored
+        # prefix, and for "/" that prefix is "/" itself: every top-level
+        # directory is then inside the sync root, so a remote folder named like a
+        # system directory is offered for deletion and the dialog names the real
+        # path. The root has no parent, which is what this asks.
+        return (f'LOCAL="{text}" is the filesystem root; it has to be a directory '
+                f'below it, such as "$HOME/OneDrive".')
     return ""
 
 
@@ -611,15 +622,30 @@ def sibling_script(name: str) -> str:
     return shutil.which(name) or ""
 
 
+def run_script_status(cmd: str, timeout: int = 900):
+    """Run a helper script and return (its exit status, stdout+stderr).
+
+    The status matters because onedrive-check uses 1 for "names were found" and 2
+    for "the config or the command line is wrong", and a caller that only sees
+    zero-or-not has to describe a configuration fault as bad file names. The
+    output is decoded as UTF-8 whatever the desktop locale is, the way every file
+    the tray reads is opened: a helper that prints a folder name must not come
+    back as mojibake on a machine whose locale is not UTF-8.
+    """
+    try:
+        proc = subprocess.run([cmd], capture_output=True,
+                              encoding="utf-8", errors="replace",
+                              timeout=timeout)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return 1, str(exc)
+    return proc.returncode, (proc.stdout + proc.stderr).strip()
+
+
 def run_script(cmd: str, timeout: int = 900):
     """Run a helper script and return (ok, its stdout+stderr). Slow, so every
     caller runs it on a worker thread."""
-    try:
-        proc = subprocess.run([cmd], capture_output=True, text=True,
-                              timeout=timeout)
-    except (OSError, subprocess.SubprocessError) as exc:
-        return False, str(exc)
-    return proc.returncode == 0, (proc.stdout + proc.stderr).strip()
+    status, text = run_script_status(cmd, timeout)
+    return status == 0, text
 
 
 def run_check_access() -> tuple:
@@ -721,6 +747,8 @@ STRINGS = {
         "see the sync log": "请查看同步日志",
         "Sync finished {when}": "同步完成 {when}",
         "Path does not exist: {path}": "路径不存在：{path}",
+        "Could not open {path}: it needs xdg-open, from the xdg-utils package":
+            "无法打开 {path}：需要 xdg-open，来自 xdg-utils 软件包",
         "Automatic sync paused · last {when}": "已暂停自动同步 · 上次 {when}",
         "Automatic sync is off · last {when}": "已关闭自动同步 · 上次 {when}",
         "⚠ Sync failed {when}": "⚠ 同步失败 {when}",
@@ -746,6 +774,7 @@ STRINGS = {
         "onedrive-check is not installed": "没有找到 onedrive-check 脚本",
         "Nothing needs fixing.": "没有需要处理的名字。",
         "These will fail or be renamed:": "下面这些会失败或被改名：",
+        "onedrive-check could not run:": "onedrive-check 没能跑起来：",
         "Close": "关闭",
         "Settings…": "设置…",
         "Settings": "设置",
@@ -1015,10 +1044,17 @@ def sh(cmd: str, timeout: int = 30):
     Used for systemctl, systemd-run and the read-only rclone queries. Callers on
     the GTK main loop must not use this at all: a slow or hung command would
     freeze the tray (see poll() and the handlers behind it).
+
+    The output is decoded as UTF-8 explicitly, the way every file the tray reads
+    is opened. text=True would decode with the ambient locale, and on a desktop
+    whose locale is not UTF-8 that mis-decodes the folder names rclone prints:
+    the menu then labels them with the wrong text and unticking one writes that
+    text into exclude-folders.txt, where it matches no folder the wrapper syncs.
     """
     try:
         res = subprocess.run(cmd, shell=True, capture_output=True,
-                             text=True, timeout=timeout)
+                             encoding="utf-8", errors="replace",
+                             timeout=timeout)
         return res.returncode, res.stdout.strip(), res.stderr.strip()
     except Exception as exc:  # noqa: BLE001
         return 1, "", str(exc)
@@ -1712,6 +1748,12 @@ class Tray:
         if not name or name in (".", "..") or os.path.basename(name) != name:
             return None
         root = os.path.realpath(self.local)
+        # Belt and braces with local_path_problem(), which refuses this value
+        # first: for the filesystem root the separator-anchored prefix below is
+        # "/" itself, so every top-level directory would pass as "inside the
+        # sync root". A root with no parent is never a sync root.
+        if os.path.dirname(root) == root:
+            return None
         target = os.path.realpath(os.path.join(self.local, name))
         # The separator on the end matters: without it a sibling directory such
         # as "/data/OneDrive-old" would pass for the root "/data/OneDrive".
@@ -1786,8 +1828,18 @@ class Tray:
         self.notify(APP_NAME, self.t("Checking file names…"))
 
         def worker():
-            ok, report = run_script(cmd)
-            GLib.idle_add(self._show_check, report, ok)
+            status, report = run_script_status(cmd)
+            # onedrive-check answers 1 for "names were found" and 2 for a
+            # configuration or usage fault; describing the second as file names
+            # sends the user to look at names instead of at the config, so the
+            # fault keeps its own words, which the checker prints.
+            if status not in (0, 1):
+                first = next((line for line in report.splitlines() if line.strip()),
+                             report)
+                GLib.idle_add(self._show_check, report, False,
+                              self.t("onedrive-check could not run:"), first.strip())
+                return
+            GLib.idle_add(self._show_check, report, status == 0)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -2317,6 +2369,14 @@ class Tray:
         would let a local edit start a sync during the pause. Every systemctl
         call happens in a worker: a slow user manager used to freeze the tray
         for the whole pause.
+
+        The resume timer is the only thing that ends the pause, so when arming it
+        fails the pause cannot be kept. That repair happens here, in the worker
+        and before the notification, because it is a systemctl call: the units go
+        back on, which is the same repair _recover_pause_worker() runs when the
+        same call fails at startup. Leaving them off wrote no stamp and left the
+        menu saying automatic sync was off, with a manual Resume now as the only
+        way back.
         """
         def worker():
             self._set_units("stop")
@@ -2328,24 +2388,30 @@ class Tray:
                 f"systemctl --user enable --now "
                 f"{shlex.quote(self.timer)} {shlex.quote(self.watch)}",
                 timeout=30)
+            if err and "Running timer" not in err:
+                self._set_units("enable", "--now")
             GLib.idle_add(self._after_pause, minutes, err)
 
         threading.Thread(target=worker, daemon=True).start()
 
     def _after_pause(self, minutes, err):
         if err and "Running timer" not in err:
-            self.notify(APP_NAME, f"{self.t('Could not schedule the resume')}: {err[:70]}")
-        else:
-            try:
-                os.makedirs(CACHE_DIR, exist_ok=True)
-                with open(PAUSE_STAMP, "w", encoding="utf-8") as fh:
-                    fh.write(str(int(time.time()) + minutes * 60))
-            except OSError:
-                pass
-            key = PAUSE_LABELS.get(minutes, f"{minutes} min")
-            self.notify(APP_NAME, self.t("Paused for {n}", n=self.t(key)))
-            self.auto_seen = "paused"
-            self._units_changed()
+            # One fault, one outcome: this is the sentence the startup recovery
+            # uses for the same failure, and the units are already back on by the
+            # time it is shown. The reason is still reported beside it.
+            self.notify(APP_NAME,
+                        f"{self.t('Could not schedule the resume')}: {err[:70]}")
+            return self._pause_lost()
+        try:
+            os.makedirs(CACHE_DIR, exist_ok=True)
+            with open(PAUSE_STAMP, "w", encoding="utf-8") as fh:
+                fh.write(str(int(time.time()) + minutes * 60))
+        except OSError:
+            pass
+        key = PAUSE_LABELS.get(minutes, f"{minutes} min")
+        self.notify(APP_NAME, self.t("Paused for {n}", n=self.t(key)))
+        self.auto_seen = "paused"
+        self._units_changed()
         self._refresh_checks()
         return False
 
@@ -2458,10 +2524,17 @@ class Tray:
             self.notify(APP_NAME, self.t("Could not start {app}", app=self.open_name))
 
     def open_path(self, path):
-        if os.path.exists(path):
-            spawn(["xdg-open", path])
-        else:
+        if not os.path.exists(path):
             self.notify(APP_NAME, self.t("Path does not exist: {path}", path=path))
+            return
+        # spawn() answers False for a program that is not on PATH at all, which is
+        # what a machine without xdg-utils has: install.sh treats the package as
+        # optional, so both rows are there and open nothing. open_app() checks the
+        # same answer; discarding it here left the two rows silent.
+        if not spawn(["xdg-open", path]):
+            self.notify(APP_NAME, self.t(
+                "Could not open {path}: it needs xdg-open, from the xdg-utils "
+                "package", path=path))
 
     def notify(self, title, body):
         if Notify is None:

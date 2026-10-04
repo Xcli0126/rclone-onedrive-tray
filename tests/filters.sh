@@ -273,4 +273,35 @@ else
 fi
 rm -f "$CHK_TREE/$CHK_MAX"
 
+# The length checks used bash's ${#var}, which counts characters under a UTF-8
+# locale and bytes under C, so the verdict depended on who ran the checker: the
+# same tree came back clean under C.UTF-8 and over-long under C. The limit is a
+# byte limit now, and the message says so, so the two locales have to agree. The
+# fixture is two 80-character CJK directories (240 bytes each, 80 characters):
+# the cloud path is 494 bytes and only 166 characters, so a character count
+# cannot reach the 380 limit while a byte count must.
+CHK_MB_CFG="$WORK/checkmb-cfg/rclone-onedrive-tray"
+CHK_MB_TREE="$WORK/checkmb"
+mkdir -p "$CHK_MB_CFG"
+CHK_MB_DIR="$(printf '長%.0s' {1..80})"
+mkdir -p "$CHK_MB_TREE/$CHK_MB_DIR/$CHK_MB_DIR"
+: > "$CHK_MB_TREE/$CHK_MB_DIR/$CHK_MB_DIR/deep.md"
+printf 'LOCAL="%s"\nREMOTE="onedrive:%s"\n' "$CHK_MB_TREE" "$(printf '日%.0s' {1..4})" \
+    > "$CHK_MB_CFG/config"
+CHK_MB_C="$(env LC_ALL=C XDG_CONFIG_HOME="$WORK/checkmb-cfg" "$CHECKER" 2>&1)"
+CHK_MB_RC_C=$?
+CHK_MB_UTF8="$(env LC_ALL=C.UTF-8 XDG_CONFIG_HOME="$WORK/checkmb-cfg" "$CHECKER" 2>&1)"
+CHK_MB_RC_UTF8=$?
+check "a multi-byte tree over the byte limit is reported under LC_ALL=C" \
+    test "$CHK_MB_RC_C" -eq 1
+check "and the same tree gets the same verdict under LC_ALL=C.UTF-8" \
+    test "$CHK_MB_RC_UTF8" -eq 1
+CHK_MB_LINE_C="$(grep -m1 'cloud path' <<<"$CHK_MB_C")"
+CHK_MB_LINE_UTF8="$(grep -m1 'cloud path' <<<"$CHK_MB_UTF8")"
+if [ -n "$CHK_MB_LINE_C" ] && [ "$CHK_MB_LINE_C" = "$CHK_MB_LINE_UTF8" ]; then
+    ok "and both locales print the same too-long entry, counted in bytes"
+else
+    bad "the too-long entry differs by locale: C='$CHK_MB_LINE_C' C.UTF-8='$CHK_MB_LINE_UTF8'"
+fi
+
 summary

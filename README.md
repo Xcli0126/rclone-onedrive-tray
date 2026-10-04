@@ -8,7 +8,7 @@
 A OneDrive-style tray icon and a self-healing sync loop for Linux desktops, built on `rclone bisync`.
 
 Linux has no official OneDrive client. `rclone bisync` handles the syncing, but rclone labels it
-experimental, it ships without a user interface, and on versions older than 1.65 one interrupted
+experimental, it ships without a user interface, and on versions older than 1.66 one interrupted
 run is enough to break it. Close the laptop lid mid-sync and the next run stops with "Must run
 --resync to recover", then keeps stopping until you run that command by hand.
 
@@ -55,7 +55,8 @@ local can notice them.
 
 The sync wrapper covers what `rclone bisync` leaves to you.
 
-An interrupted run heals by itself. The wrapper passes `--recover` and `--resilient`, so a
+An interrupted run heals by itself. The wrapper passes `--recover` and `--resilient` after
+checking that the installed rclone has them, so a
 suspend or a crash is followed by an ordinary sync instead of a demand for manual work. Killing
 a sync mid-transfer and re-running it recovers in about 18 seconds.
 
@@ -98,7 +99,7 @@ config file drives all of it, so no paths are hard-coded.
 | Component | Needed for | If it is missing |
 |---|---|---|
 | Linux with systemd (user session) | Timer, watcher, timed pause | Nothing syncs on a schedule |
-| [rclone](https://rclone.org/downloads/) 1.65 or newer | Every sync | Nothing syncs. Below 1.65 an interrupted run needs a manual `--resync` |
+| [rclone](https://rclone.org/downloads/) 1.66 or newer | Every sync | Nothing syncs. Below 1.66 an interrupted run needs a manual `--resync` |
 | `python3-gi`, `python3-cairo`, `gir1.2-gtk-3.0` | Tray app and its icons | The tray exits and names the packages. `install.sh` warns and installs the sync half anyway, without an autostart entry, so a server can use the timer |
 | `gir1.2-ayatanaappindicator3-0.1` | Tray icon | Same. The `libayatana-appindicator3-1` runtime library is not enough on its own |
 | `gir1.2-notify-0.7` | Desktop notifications | The tray runs and says so, without notifications |
@@ -114,7 +115,7 @@ sudo apt install rclone python3-gi python3-cairo gir1.2-gtk-3.0 \
 ```
 
 > The rclone version matters more than any other line here. The one in the Ubuntu archive can be
-> years behind, so check `rclone version` first. Below 1.65, download a current build and put the
+> years behind, so check `rclone version` first. Below 1.66, download a current build and put the
 > binary in `/usr/local/bin`, which takes precedence over `/usr/bin`.
 
 Every dependency, including the optional ones and the exact failure each absence causes, is

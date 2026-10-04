@@ -79,10 +79,11 @@ CHECK_FILENAME=""
 
 # Extra arguments handed to `rclone bisync`.
 #   --resilient         retry after less-serious errors instead of demanding --resync
-#   --recover           auto-recover from an interrupted run  (needs rclone >= 1.65)
-#   --max-lock 2m       treat a lock older than 2m as stale    (needs rclone >= 1.65)
+#   --recover           auto-recover from an interrupted run  (needs rclone >= 1.66)
+#   --max-lock 2m       treat a lock older than 2m as stale    (needs rclone >= 1.66)
 #   --conflict-loser num / --conflict-resolve none
 #                       keep BOTH versions of a conflicting file (no data loss)
+#                       (needs rclone >= 1.66)
 #   --stats 2s          emit progress blocks often enough for the tray to show
 #                       a live percentage while a sync is running
 # Do not put --force in here. It bypasses rclone's own delete cap, which would leave

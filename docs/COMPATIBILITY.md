@@ -196,7 +196,7 @@ treat it as unknown rather than supported.
   versions in older long-term releases have not been tried.
 - Non-systemd init systems. Without a user session there is no timer, and the
   scripts will say so rather than pretend.
-- rclone below 1.65. Only the warning path is tested; a sync with such a build
+- rclone below 1.66. Only the warning path is tested; a sync with such a build
   fails on the unknown flags, and the wrapper now names the version problem
   instead of pointing at an empty log.
 - The first full sync of a large remote. It is a single long download, and how

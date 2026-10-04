@@ -7,7 +7,7 @@
 
 一个仿 Windows OneDrive 客户端的 Linux 托盘图标，外加一套会自愈的同步循环，底层是 `rclone bisync`。
 
-Linux 上没有官方 OneDrive 客户端。`rclone bisync` 能承担同步，但 rclone 给它标了 experimental，它没有界面，而且在 1.65 之前的版本里，一次中断就够它罢工。合上笔记本盖子，下一次同步会停在「Must run --resync to recover」，然后在你不手动敲那条命令之前一直停着。
+Linux 上没有官方 OneDrive 客户端。`rclone bisync` 能承担同步，但 rclone 给它标了 experimental，它没有界面，而且在 1.66 之前的版本里，一次中断就够它罢工。合上笔记本盖子，下一次同步会停在「Must run --resync to recover」，然后在你不手动敲那条命令之前一直停着。
 
 这个项目把它包成接近 Windows 客户端的样子：托盘里一个图标，同步失败时弹一条通知，以及一套不用你管的恢复逻辑。
 
@@ -42,7 +42,7 @@ Linux 上没有官方 OneDrive 客户端。`rclone bisync` 能承担同步，但
 
 `rclone bisync` 留给使用者自己处理的部分，由同步包装器补上。
 
-被中断的同步会自己恢复。包装器传了 `--recover` 和 `--resilient`，所以休眠或崩溃之后接着跑的是普通同步，而不是一条要你手动执行的命令。实测把同步在传输中途 `kill -9`，再跑一次，18 秒恢复完成。
+被中断的同步会自己恢复。包装器会先确认本机 rclone 认这两个参数，再传 `--recover` 和 `--resilient`，所以休眠或崩溃之后接着跑的是普通同步，而不是一条要你手动执行的命令。实测把同步在传输中途 `kill -9`，再跑一次，18 秒恢复完成。
 
 残留的锁也会自己清掉。bisync 会在锁文件里写下持有它的进程号。休眠之后那个进程没了，文件还留着，bisync 就会拒绝运行直到锁过期。包装器先查这个进程号还在不在，不在就直接删锁。这一点值得做，因为 `--max-lock` 一旦设得宽松，一次崩溃就能换来一小时的停摆。
 
@@ -63,7 +63,7 @@ Linux 上没有官方 OneDrive 客户端。`rclone bisync` 能承担同步，但
 | 组件 | 用途 | 缺失后果 |
 |---|---|---|
 | 带 systemd（用户会话）的 Linux | 定时器、监听器、定时暂停 | 不会有任何定时同步 |
-| [rclone](https://rclone.org/downloads/) 1.65 或更新 | 所有同步 | 完全无法同步。低于 1.65 时，一次中断就需要人工 `--resync` |
+| [rclone](https://rclone.org/downloads/) 1.66 或更新 | 所有同步 | 完全无法同步。低于 1.66 时，一次中断就需要人工 `--resync` |
 | `python3-gi`、`python3-cairo`、`gir1.2-gtk-3.0` | 托盘程序及其图标 | 托盘直接退出，并打印需要安装的包名。`install.sh` 会给出警告，但仍然把同步那一半装好（只是不写自启动项），所以服务器也能用定时器同步 |
 | `gir1.2-ayatanaappindicator3-0.1` | 托盘图标 | 同上。只装运行库 `libayatana-appindicator3-1` 不够 |
 | `gir1.2-notify-0.7` | 桌面通知 | 托盘照常运行并提示一句，只是没有通知 |
@@ -78,7 +78,7 @@ sudo apt install rclone python3-gi python3-cairo gir1.2-gtk-3.0 \
      gir1.2-ayatanaappindicator3-0.1 gir1.2-notify-0.7 inotify-tools
 ```
 
-> 这一串里 **rclone 的版本最要紧**。Ubuntu 源里的那个可能落后好几年，先用 `rclone version` 确认。低于 1.65 就去官网下新版本，把二进制放进 `/usr/local/bin`，它的优先级高于 `/usr/bin`。
+> 这一串里 **rclone 的版本最要紧**。Ubuntu 源里的那个可能落后好几年，先用 `rclone version` 确认。低于 1.66 就去官网下新版本，把二进制放进 `/usr/local/bin`，它的优先级高于 `/usr/bin`。
 
 完整依赖清单（含可选项，以及每项缺失时的确切表现）见
 [docs/DEPENDENCIES.md](docs/DEPENDENCIES.md)。托盘和同步包装器在缺少依赖时会打印安装命令并退出，

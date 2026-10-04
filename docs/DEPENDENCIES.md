@@ -8,14 +8,14 @@ sudo apt install rclone python3-gi python3-cairo gir1.2-gtk-3.0 \
      gir1.2-ayatanaappindicator3-0.1 gir1.2-notify-0.7 inotify-tools
 ```
 
-Then check that `rclone version` reports 1.65 or newer, because the version in
+Then check that `rclone version` reports 1.66 or newer, because the version in
 some distributions is too old to sync safely.
 
 ## Required
 
 | Dependency | Package | Used by | If it is missing |
 |---|---|---|---|
-| rclone 1.65 or newer | `rclone`, or a current build in `/usr/local/bin` | every sync | Nothing syncs. Below 1.65 `--recover`, `--resilient`, `--max-lock` and `--conflict-resolve` do not exist, so an interrupted run needs a manual `--resync` |
+| rclone 1.66 or newer | `rclone`, or a current build in `/usr/local/bin` | every sync | Nothing syncs. Below 1.66 `--recover`, `--max-lock`, `--conflict-resolve` and `--conflict-loser` do not exist, so every run is refused with an unknown flag |
 | `flock` | `util-linux` (essential) | `onedrive-sync` | The wrapper refuses to start, because running without the lock lets a manual sync and the timer corrupt each other's listings |
 | `bash` 4.4+ | `bash` (essential) | all shell scripts | Arrays used under `set -u` misbehave |
 | systemd, user session | `systemd` | timer, watcher, timed pause | No scheduled sync at all |
@@ -69,7 +69,7 @@ systemctl --user is-system-running
 It is the one dependency that is often present but too old. A distribution that
 ships 1.60 gives you a working program that breaks the first time a laptop
 suspends mid-sync, and the failure looks like a bug in this project rather than
-a version problem. `install.sh` warns when it sees a version below 1.65, and
+a version problem. `install.sh` asks the binary which of those flags it lists and warns when one is missing, and
 `docs/TROUBLESHOOTING.md` explains the recovery.
 
 ## Checking this page

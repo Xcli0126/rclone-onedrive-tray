@@ -280,6 +280,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   directory elsewhere could be offered for deletion; the confirmation named only
   the folder. A relative `LOCAL` is refused with the key named, and the dialog says
   which path it will delete.
+- `install.sh` wrote the config's `UNIT_NAME` into the NetworkManager hook, which
+  runs as root, without the escaping its three neighbouring substitutions use and
+  without validating the value: a name holding `$(...)` was executed when the hook
+  next fired, one holding `&` installed a hook that could never match while the
+  installer reported success, and one holding `|` aborted the install with a raw
+  `sed` error after half the files were written. The value goes through the same
+  escaping and is validated against the rule `setup.sh` already applies to its own
+  input, with a sentence naming the key.
+- `extras/install-issue-watch.sh` wrote an unquoted, unescaped `ExecStart=`, so a
+  prefix holding a space (including a home directory with one) produced a unit
+  systemd split in two, and the issue-watch timer could never start. Nothing in
+  `tests/` ran `extras/` at all, which is how it survived eight rounds; the unit it
+  generates now goes through the same escaping as the installer's units, and a case
+  verifies it with `systemd-analyze`.
+- `onedrive-doctor` certified a config the wrapper refuses to run: its key scan and
+  its filters guard did not accept the `export ` prefix that the tray, the wrapper
+  and the doctor's own `source` accept, so `export RETRIES="three"` printed `ok
+  config` and "nothing failed" with exit 0 while every run died, and
+  `export FILTERS_FILE=/missing` was never checked. Both scans take the prefix now,
+  and `MAX_LOG_BYTES` has one verdict instead of a `fail` in one check and a `warn`
+  in another.
+- `onedrive-watch` threw inotifywait's output away and retried forever, so a
+  permanent failure (an invalid `WATCH_EXCLUDE`, the watch limit) left the unit
+  reporting `active` with an empty journal while realtime sync was dead and the
+  doctor called it healthy. It now writes the tool's own message, distinguishes a
+  permanent failure from a vanished directory, and exits non-zero after repeated
+  permanent failures so `Restart=always` carries it.
+- The project's rclone floor was documented as 1.65, but the four flags its default
+  set always passes arrived in 1.66: on a 1.65 build every run failed with
+  `unknown flag: --recover` and the advice named the version the user already had,
+  while the installer said nothing. Measured against the real 1.64, 1.65 and 1.66
+  releases. The wrapper now asks the binary which of the flags it lists, drops the
+  ones it does not have with a NOTICE naming them and the version that has them, and
+  names the refused flag in its version hint; the installer probes the same way; and
+  the floor is 1.66 everywhere it is written down.
+- The log's timestamp was written with the machine's calendar: under a locale with
+  a non-Gregorian year the doctor reported the log as two hundred thousand days old
+  and the tray's live progress never appeared. The writer pins `LC_ALL=C`, so the
+  numbers mean the same thing to every reader.
+- `onedrive-check` measured path lengths with bash's `${#var}`, which counts
+  characters under a UTF-8 locale and bytes under `C`, so the same tree was clean
+  from a desktop terminal and over-long from systemd or cron. It now counts bytes
+  whatever the caller's locale, and says so in the unit it prints.
+- The tray decoded its subprocesses with the desktop locale while every file it read
+  was pinned to UTF-8: under a GB18030 locale the folder menu was built from
+  mis-decoded names, and unticking one wrote that name into the exclusion list, so
+  the folder kept syncing while the menu said it was left out. Both call sites are
+  pinned to UTF-8.
+- A pause whose resume timer could not be armed left automatic sync switched off
+  with a sentence and no repair, while the recovery path repaired the same fault.
+  It runs the same repair now.
+- `LOCAL="/"` was accepted, and the delete guard's "strictly inside the sync root"
+  test is vacuous at the filesystem root: the menu offered to delete `/etc` and
+  `/usr/bin`, and the confirmation named the path. A sync root that resolves to the
+  filesystem root is refused.
+- `setup.sh` wrote folder names it cannot express into the exclusion list, so a name
+  beginning with `#` became a comment line that both readers skip: the folder kept
+  syncing while the menu showed it as left out. It applies the tray's own checks and
+  warns instead of writing a name that cannot work.
+- "View sync log" and "Open sync folder" did nothing and said nothing when
+  `xdg-open` was missing, although the installer treats it as optional. They report
+  it now, naming the package.
+- `setup.sh` reported a missing option value with a localized bash internal that
+  names no flag, and exited 1 for an unknown option where `install.sh` exits 2. All
+  four flags name themselves, and a usage error is 2 from either script.
+- `install.sh` replaced a failed `systemctl enable` with a guess about the cause and
+  then printed the success summary; it now shows what systemd said and the command
+  that fixes it.
+- The wrapper and the tray announced any non-zero from `onedrive-check` as bad file
+  names, including the configuration faults the checker reports separately. The
+  wrapper passes the checker's own sentence through for a configuration fault.
 
 ### Changed
 

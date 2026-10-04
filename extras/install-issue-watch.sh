@@ -29,11 +29,28 @@ done
 BIN_DIR="$PREFIX/bin"
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 
+# systemd reads ExecStart with its own quoting rules, expands %i, %n and friends
+# inside a unit file, and reads $NAME as a variable reference, with a literal
+# dollar written $$. A path that needs quoting is wrapped in double quotes and
+# its backslashes, quotes, percents and dollars are escaped here, so a prefix
+# like "/home/x/My Files", one holding a % or one holding a $ still starts the
+# right program. install.sh applies the same rule to the units it writes.
+systemd_exec_arg() {  # systemd_exec_arg <path>
+    local text="$1"
+    text="${text//\\/\\\\}"
+    text="${text//\"/\\\"}"
+    text="${text//%/%%}"
+    text="${text//\$/\$\$}"
+    printf '%s' "$text"
+}
+
 say() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 
 mkdir -p "$BIN_DIR" "$UNIT_DIR"
 install -m 0755 "$SRC_DIR/extras/watch-issues.sh" "$BIN_DIR/watch-issues.sh"
 say "installed $BIN_DIR/watch-issues.sh"
+
+WATCH_EXEC="$(systemd_exec_arg "$BIN_DIR/watch-issues.sh")"
 
 cat > "$UNIT_DIR/$UNIT_NAME.service" <<EOF
 [Unit]
@@ -42,7 +59,7 @@ Documentation=https://github.com/Xcli0126/rclone-onedrive-tray
 
 [Service]
 Type=oneshot
-ExecStart=$BIN_DIR/watch-issues.sh
+ExecStart="$WATCH_EXEC"
 EOF
 
 cat > "$UNIT_DIR/$UNIT_NAME.timer" <<'EOF'

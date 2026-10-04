@@ -12,8 +12,8 @@
 # NetworkManager hook installed, because its last case skips on a machine
 # without one and a skip is not a pass. That one case is environmental by
 # design; every other case must pass everywhere.
-dependency-matrix.sh 46
-install-flow.sh 340
-filters.sh 45
+dependency-matrix.sh 66
+install-flow.sh 359
+filters.sh 48
 docs.sh 97
-tray.sh 217
+tray.sh 230
