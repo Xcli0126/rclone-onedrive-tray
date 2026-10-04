@@ -276,6 +276,67 @@ def config_utf8_problem(exc: UnicodeDecodeError, path: str = CONFIG_FILE) -> str
             f"fix the file or run setup.sh.")
 
 
+def shell_value(raw: str) -> str:
+    """One config value, as bash reads it out of the file it sources.
+
+    The file is written by `shell_quote_value()` and read by three programs: this
+    one, `onedrive-sync` with `.`, and the installers with the shared sed reader in
+    `lib/config.sh`. What bash does with each shape is the contract, because the
+    wrapper is the reader whose answer the sync actually uses:
+
+      `"..."`  a backslash escapes the backslash, the double quote, the dollar
+               and the backtick; `$VAR` and `${VAR:-fallback}` expand
+      `'...'`  literal: no escapes and no expansion
+      bare     up to the first unquoted `#` or space, with `$VAR` expanding
+
+    The reader used to strip the quotes and call `os.path.expandvars()`, which is
+    not a shell: a value the writer had escaped came back with the backslashes still
+    in it (`CHECK_FILENAME="a\"b"` read as `a\"b` where bash says `a"b`), and a
+    single-quoted `${HOME}` was expanded although bash leaves it alone. Both are
+    the tray describing a different file than the one the wrapper syncs, LOCAL
+    among them, and LOCAL is the root the folder menu's delete guard checks.
+
+    The one deliberate divergence left is an unquoted backslash-hash (`x\\#y`):
+    bash removes the backslash, this keeps it, and strip_inline_comment() says
+    why.
+    """
+    text = strip_inline_comment(raw).strip()
+    if len(text) >= 2 and text[0] == "'" and text[-1] == "'":
+        return text[1:-1]
+    quoted = len(text) >= 2 and text[0] == '"' and text[-1] == '"'
+    if quoted:
+        text = text[1:-1]
+    out = []
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if quoted and char == "\\" and index + 1 < len(text) and text[index + 1] in '"\\$`':
+            out.append(text[index + 1])
+            index += 2
+            continue
+        if char == "$":
+            match = re.match(r"\$\{(\w+)(:-?)([^}]*)\}", text[index:])
+            if match:
+                name, op, fallback = match.group(1), match.group(2), match.group(3)
+                value = os.environ.get(name, "")
+                # `:-` takes the fallback for an empty value too, `-` only for an
+                # unset one, which is the difference between the two forms.
+                if value == "" and (op == ":-" or name not in os.environ):
+                    value = fallback
+                out.append(value)
+                index += match.end()
+                continue
+            match = re.match(r"\$\{(\w+)\}|\$(\w+)", text[index:])
+            if match:
+                name = match.group(1) or match.group(2)
+                out.append(os.environ.get(name, ""))
+                index += match.end()
+                continue
+        out.append(char)
+        index += 1
+    return "".join(out)
+
+
 def load_config() -> dict:
     """Parse the shell-style KEY="value" config (no shell execution).
 
@@ -286,8 +347,8 @@ def load_config() -> dict:
 
     A value ends at an unquoted `#` that whitespace precedes, decided on the raw
     text after the `=`, so `KEY=#x` keeps its `#` while `KEY=   # x` is empty,
-    both as bash has them. Neither this reader nor the installers undo the
-    escaping the writer applies; see strip_inline_comment.
+    both as bash has them. What the value itself means is shell_value()'s job,
+    and it is the same contract the installers' shared reader keeps.
     """
     cfg: dict[str, str] = {}
     try:
@@ -297,12 +358,6 @@ def load_config() -> dict:
                 if not line or line.startswith("#") or "=" not in line:
                     continue
                 key, _, val = line.partition("=")
-                # Before .strip(): a `#` that directly follows the `=` is the
-                # start of the value and not of a comment, and only the text as it
-                # stands still says whether a space came first.
-                val = strip_inline_comment(val).strip()
-                if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
-                    val = val[1:-1]
                 key = key.strip()
                 # `export REMOTE=...`, with any whitespace around the word, is the
                 # key REMOTE. Splitting on the first `=` alone filed it under
@@ -312,16 +367,7 @@ def load_config() -> dict:
                 if (key.startswith("export")
                         and key[len("export"):len("export") + 1].isspace()):
                     key = key[len("export"):].strip()
-                # ${VAR:-fallback} is bash, and os.path.expandvars below leaves it
-                # literal, so a path written that way (config.example writes three
-                # of them now) would reach the tray as text with the braces still
-                # on it: the log status would be unknown and "View sync log" would
-                # open nothing. Resolve that form first, with the meaning bash gives
-                # it (an unset or empty variable takes the fallback), then expand
-                # the plain $VARs.
-                val = re.sub(r"\$\{(\w+):-([^}]*)\}",
-                             lambda m: os.environ.get(m.group(1)) or m.group(2), val)
-                cfg[key] = os.path.expandvars(val)
+                cfg[key] = shell_value(val)
     except UnicodeDecodeError as exc:
         # One bad byte used to travel out of main() as a traceback, in a process
         # whose autostart entry has Terminal=false, while the shell half sourced

@@ -427,6 +427,92 @@ STUB="$WORK/stubs"; mkdir -p "$STUB"
 printf '#!/bin/bash\nexit 0\n' > "$STUB/systemctl"
 chmod +x "$STUB/systemctl"
 
+# ------------------------------------------------- one file, three readers
+# The config file has three readers: the tray parses it in Python, onedrive-sync
+# sources it with `.` (the shipped example expands variables, so only a shell can
+# read it), and the two installers share the sed reader in lib/config.sh. What bash
+# does with each shape is the contract, because the wrapper is the reader whose
+# answer the sync uses. The tray's parser had drifted from it: a value the writer
+# escaped came back with the backslashes still in it, a single-quoted `${HOME}` was
+# expanded although bash leaves it alone, and an escaped `\$VAR` was expanded too.
+title "one file, three readers"
+READERS="$WORK/readers"
+rm -rf "$READERS"; mkdir -p "$READERS/home"
+cat > "$READERS/config" <<'CFGEOF'
+REMOTE="probe:Vault"
+LOCAL="${HOME}/OneDrive"
+# a comment line
+CHECK_FILENAME="quote\"dollar\$tick\`slash\\end"
+SINGLE='${HOME}/literal'
+ESCAPED="\$HOME/cost"
+FALLBACK="${READERS_UNSET:-fallback}/x"
+EMPTY=""
+UNQUOTED=simple
+HASH=abc#def
+SPACED=abc # a comment
+   export UNIT_NAME="exported-name"
+INTERVAL_MIN=7
+SHOW_ICON="1"
+SHOW_ICON="0"
+CFGEOF
+READER_KEYS="REMOTE LOCAL CHECK_FILENAME SINGLE ESCAPED FALLBACK EMPTY UNQUOTED HASH SPACED UNIT_NAME INTERVAL_MIN SHOW_ICON"
+
+# The shared sed reader, which answers values as written: it does not expand
+# `${VAR}` because the keys it is asked for are a binary name, a unit name, a
+# number and a boolean.
+# shellcheck disable=SC2016  # the script is for the inner bash, and its $1/$2/$3
+#                             # are that shell's arguments, not this one's
+sed_dump="$(env CONFIG_DIR="$READERS" bash -c '
+    . "$1/lib/config.sh"
+    for key in $3; do printf "%s=<%s>\n" "$key" "$(config_value "$key" "$2")"; done' \
+    _ "$SRC_DIR" "$READERS/config" "$READER_KEYS")"
+
+# What the wrapper sees, which is the answer that matters.
+# shellcheck disable=SC2016  # same: ${!key-} is the inner shell's indirect read
+src_dump="$(env HOME="$READERS/home" bash -c '
+    set -a; . "$1"; set +a
+    for key in $2; do printf "%s=<%s>\n" "$key" "${!key-}"; done' \
+    _ "$READERS/config" "$READER_KEYS")"
+
+# The tray's parser, through the same load_config() the tray uses.
+py_dump="$(env HOME="$READERS/home" PYTHONPATH="$SRC_DIR/tests/lib" \
+    python3 - "$SRC_DIR/bin/onedrive-tray" "$READERS/config" "$READER_KEYS" <<'PY'
+import sys
+
+from load_module import load
+
+module = load(sys.argv[1])
+module.CONFIG_FILE = sys.argv[2]
+cfg = module.load_config()
+for key in sys.argv[3].split():
+    print("%s=<%s>" % (key, cfg.get(key, "")))
+PY
+)"
+
+if [ "$src_dump" = "$py_dump" ]; then
+    ok "the tray reads the file exactly as the shell that sources it does"
+else
+    bad "the tray's reader disagrees with bash"
+    diff <(printf '%s\n' "$src_dump") <(printf '%s\n' "$py_dump") |
+        sed 's/^/        /' | head -8
+fi
+# The installers' reader is deliberately narrower: no expansion, and a value it is
+# not asked for cannot drift. Compared on the shapes it is asked for.
+sed_narrow="$(printf '%s\n' "$sed_dump" | grep -vE '^(LOCAL|SINGLE|ESCAPED|FALLBACK)=')"
+src_narrow="$(printf '%s\n' "$src_dump" | grep -vE '^(LOCAL|SINGLE|ESCAPED|FALLBACK)=')"
+if [ "$sed_narrow" = "$src_narrow" ]; then
+    ok "and the installers' shared reader agrees on the values it is asked for"
+else
+    bad "the installers' reader disagrees with bash"
+    diff <(printf '%s\n' "$src_narrow") <(printf '%s\n' "$sed_narrow") |
+        sed 's/^/        /' | head -8
+fi
+# The difference is the documented one, not an accident: a variable in a value the
+# installers read comes back as written.
+# shellcheck disable=SC2016  # the ${VAR} is the text being searched for
+check "and it answers a \${VAR} value as written, which is what it is documented to do" \
+    grep -qxF 'FALLBACK=<${READERS_UNSET:-fallback}/x>' <<<"$sed_dump"
+
 title "install.sh"
 PYSHIM_DIR="$WORK/pycairo-off"; mkdir -p "$PYSHIM_DIR"
 cat > "$PYSHIM_DIR/sitecustomize.py" <<'EOF'

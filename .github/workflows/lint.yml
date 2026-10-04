@@ -17,7 +17,7 @@ jobs:
           # bin/onedrive-check, bin/onedrive-check-access and bin/onedrive-doctor
           # are missing from this list and are checked by hand instead; the two
           # tools under tests/lib are here so they cannot rot unnoticed.
-          shellcheck setup.sh install.sh uninstall.sh \
+          shellcheck setup.sh install.sh uninstall.sh lib/config.sh \
                      bin/onedrive-sync bin/onedrive-watch \
                      tests/dependency-matrix.sh tests/install-flow.sh \
                      tests/filters.sh tests/tray.sh tests/docs.sh \
@@ -27,7 +27,8 @@ jobs:
 
       - name: Shell syntax
         run: |
-          for f in setup.sh install.sh uninstall.sh bin/onedrive-sync bin/onedrive-watch \
+          for f in setup.sh install.sh uninstall.sh lib/config.sh \
+                   bin/onedrive-sync bin/onedrive-watch \
                    tests/dependency-matrix.sh tests/install-flow.sh tests/filters.sh \
                    tests/tray.sh tests/docs.sh tests/lib/harness.sh \
                    tests/lib/mutate.sh tests/lib/coverage.sh \

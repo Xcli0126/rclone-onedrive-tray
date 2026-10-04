@@ -36,6 +36,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The tray read the config file differently from the shell that sources it. A value
+  the writer had escaped came back with the backslashes still in it, a
+  single-quoted `${HOME}` was expanded although bash leaves it alone, and an escaped
+  `\$VAR` was expanded too, so the tray could name a different file than the one the
+  wrapper syncs (`CHECK_FILENAME`, and `LOCAL`, which is what the folder menu's
+  delete guard checks). `shell_value()` reads each shape the way bash does, and
+  `tests/dependency-matrix.sh` now reads one file three ways and compares the
+  answers.
+- `install.sh` and `uninstall.sh` carried a copy each of the `sed` reader for the
+  config file's format, and a copy is how the two drifted apart the last time. They
+  source `lib/config.sh` now. That reader also stopped treating a `#` in an unquoted
+  value as a comment wherever it stands: `KEY=abc#def` came back as `abc` where bash
+  says `abc#def`.
 - Re-authorise claimed the sign-in was done the moment the terminal opened. The
   wait was for the remote to answer again, and the credentials rclone was still
   using answered the first probe, so "Signed in. Syncing now." appeared about a

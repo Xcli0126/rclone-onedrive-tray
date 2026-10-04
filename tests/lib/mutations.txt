@@ -302,3 +302,9 @@ config-badbyte-uncaught	bin/onedrive-tray	s|        raise ConfigFault(config_utf
 # sign-in, so still-valid credentials answered it at once.
 reauth-status-not-waited	bin/onedrive-tray	s|            if os.path.exists(REAUTH_STATUS):|            if True:|	tray
 reauth-terminal-no-status	bin/onedrive-tray	s|>{shlex.quote(REAUTH_STATUS)}"|"|	tray
+# round sixteen: one format with three readers. The tray's parser drifted from
+# bash on escaping, quoting and expansion, and the installers carried a copy each.
+config-reader-no-unescape	bin/onedrive-tray	s|    return "".join(out)|    return raw.strip()|	dependency-matrix
+config-reader-single-quotes	bin/onedrive-tray	s|    if len(text) >= 2 and text\[0\] == "'" and text\[-1\] == "'":|    if False:|	dependency-matrix
+lib-bare-hash-rule	lib/config.sh	s|sed -e 's/\[\[:space:\]\]#.\*\$//' -e 's/\[\[:space:\]\].\*\$//'|sed -e 's/#.*$//'|	dependency-matrix
+install-config-reader-local	install.sh	s|^. "$SRC_DIR/lib/config.sh"$|:|	install-flow

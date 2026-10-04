@@ -81,31 +81,12 @@ say "Checking dependencies"
 missing=()
 optional=()
 
-# Read one config value the way the other three readers do.
-#
-# The tray writes a value with \, ", $ and the backtick escaped inside the quotes
-# (shell_quote_value), and onedrive-sync sources the file. The sed readers in the
-# installers used to take everything up to the FIRST inner quote, so a value the
-# tray wrote came back truncated with nothing said: the entry in
-# docs/KNOWN-ISSUES.md about four parsers of one file format. This reads the whole
-# quoted value, undoes that escaping, and understands the export prefix the tray
-# and the wrapper accept.
-config_value() {  # config_value <KEY> [<file>] -> the value, or "" when absent
-    local key="$1" file="${2:-$CONFIG_DIR/config}" line value
-    line="$(sed -n "s/^[[:space:]]*\(export[[:space:]]\{1,\}\)\{0,1\}${key}=//p" \
-        "$file" 2>/dev/null | tail -1)"
-    [ -n "$line" ] || return 0
-    case "$line" in
-        \"*)
-            value="$(printf '%s\n' "$line" |
-                sed -n 's/^"\(.*\)"[[:space:]]*\(#.*\)\{0,1\}$/\1/p')"
-            # The writer escapes exactly these four; undo them left to right, which
-            # handles a backslash before a quote the way the shell does.
-            printf '%s' "$value" | sed -e 's/\\\(["\\$`]\)/\1/g' ;;
-        *)
-            printf '%s' "${line%%[[:space:]#]*}" ;;
-    esac
-}
+# Read one config value the way the other readers do. The implementation is
+# shared with uninstall.sh: see lib/config.sh. It is sourced rather than defined
+# here because the two scripts used to carry a copy each, and a copy is how the
+# escaping drifted the last time.
+# shellcheck source=lib/config.sh
+. "$SRC_DIR/lib/config.sh"
 
 # config.example documents RCLONE as "the rclone binary to run, by name or by
 # path. Change it to use a build outside PATH", and onedrive-sync and

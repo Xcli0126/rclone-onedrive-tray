@@ -14,19 +14,70 @@ round uses a different model with a different lens, which is how the entries her
 were found in the first place.
 
 ## Open
-### Four parsers for one file format
+### The pause can outlive the tray, and four other systemd problems
 
-`install.sh` and `uninstall.sh` read the config with `sed`, the tray parses it in
-Python, and `onedrive-sync` sources it with `.`. They agree about the escaping now:
-the tray writes `\`, `"`, `$` and the backtick escaped, and both sed readers undo
-exactly that, so a value the tray wrote is read back whole instead of being cut at
-the first inner quote. What is left is the count: a new key has to be taught to all
-four, and `EXCLUDE_FOLDERS_FILE` is read by two of them in different ways.
+Round sixteen's systemd reviewer read the three units, the interval drop-in, the
+transient pause timer and the NetworkManager hook against upstream systemd 259 and
+this machine's man pages. Ten findings came out. Three of them have a fix in that
+reviewer's patch and are listed here with the rest because none is applied yet:
+validating `INTERVAL_MIN`, comparing the whole drop-in value rather than one
+spelling of it, and making the hook ask the timer before it starts a sync.
 
-Cost: a key added to one reader and forgotten in another is invisible until a user
-hits it. The fix worth doing is one reader, which is a new runtime file and pulls
-the installers and the documentation along with it; that is larger than the cost of
-the remaining duplication, so the four stay and the escaping is what had to agree.
+- A pause is stored as "the units are disabled" plus a transient `systemd-run`
+  timer, and only the tray can undo it. With the tray not running (no GTK, the
+  autostart box unticked, a headless machine) a reboot during a pause leaves nothing
+  syncing, forever, and a disabled timer looks like a deliberate off. In the other
+  direction `install.sh` enables both units on every run, so `git pull &&
+  ./install.sh` silently ends a pause. The stamp the tray writes is the only record
+  of which it was, and the poll deletes that stamp when `is-enabled` answers
+  something the code does not know.
+- `INTERVAL_MIN` reaches `OnUnitInactiveSec` unvalidated. A value systemd cannot
+  parse is dropped with a warning and leaves `OnActiveSec=2min` as the timer's only
+  trigger, which fires once per login; `0` asks for `0min`, which is past due the
+  moment it is armed, so the sync re-triggers after every run.
+- The NetworkManager hook starts the sync service on any link-up without asking the
+  timer, so a paused install syncs on every wifi, dock or VPN event.
+- The sync service sets no `TimeoutStopSec`, so the manager's 90 second default
+  applies to a `oneshot` bisync that can run longer: a shutdown or a logout with
+  lingering off can SIGTERM it and SIGKILL it 90 seconds later. The comment in the
+  unit template has the premise backwards, because the manager's default for
+  `Type=oneshot` is no timeout at all, so the directive adds a cap rather than
+  restoring one.
+- Pause and resume re-enable the watcher without reading `WATCH`, so a user who had
+  realtime sync off gets it back after any pause, and the resume timer is recognised
+  by matching the English `Running timer` in `systemd-run`'s stderr, which is the
+  locale-dependent match this project removed from the log readers.
+
+### The panel's state is only in pixels
+
+Round sixteen's accessibility reviewer walked the real menu and the real settings
+dialog with ATK, on a private Broadway display, and measured what a screen reader
+gets. The fix for the first finding is in that reviewer's patch, with a test that
+drives it; these are the rest, and the whole set is one pass of work rather than
+eight.
+
+- The tray's state has no text channel. The AppIndicator is not a `Gtk.Widget`, so
+  it has no ATK object at all: `get_title()` is null in every state and
+  `get_icon_desc()` is the constant "OneDrive" whether the icon is syncing, failed
+  or paused. Six states (syncing with a percentage, error with a reason, paused
+  until a time, automatic sync off, timer unknown, icon hidden) are conveyed by
+  colour and a badge and by nothing else. `set_label`, `set_title` and
+  `set_attention_icon` exist for exactly this and were never called. The patched
+  version publishes the same sentence the status row carries.
+- The one sentence that spells the state out is an insensitive menu item, and GTK's
+  arrow keys skip insensitive items: 20 presses of Down select 13 items and never
+  reach `menu/0` or `menu/1`. The menu's own accessible name is null too.
+- In the settings dialog both spin buttons have accessible name `None` (a reader
+  announces a bare "5.0"), and both combo boxes are named after their current
+  selection, so the Language row is called "English" and the bandwidth row
+  "Unlimited". None of the 15 controls has an ATK relation to its label, and no
+  label carries a mnemonic: the dialog cannot be driven from the keyboard.
+- The dialog has no default action, and all three modal dialogs announce as their
+  message type ("Sign in again?" reads as "Question") with no default button.
+- A successful Save is indistinguishable from Cancel in the accessible tree: the
+  same names, an empty status line, and the window disappears either way.
+- The access-check warning appears as a plain label with no alert node, so nothing
+  announces it.
 
 ### `Tray` is one 900-line class
 
@@ -42,6 +93,18 @@ test is allowed to touch before anyone starts.
 
 ## Accepted, with the reason
 
+- One format, three readers, and the agreement is a test rather than a promise. The
+  entry here used to count four readers of the config file and call the count the
+  remaining cost. What changed is that the two installers share one implementation,
+  `lib/config.sh`, so a change to the format cannot land in one of them and not the
+  other, and the tray's parser is held to what bash does by
+  `tests/dependency-matrix.sh`, which reads one file three ways and compares the
+  answers. The three are there for reasons rather than by accident: the tray parses
+  the file without executing it, because a config it did not write should not run;
+  `onedrive-sync` sources it with `.`, because the shipped example expands variables
+  and only a shell does that; and the installers may not execute a config they are
+  about to replace or remove, which is why they use `sed`. What is left is the
+  count, and a new key still has to be read by whichever of the three wants it.
 - The tools' own report text is English, and that is now the same answer in the
   GUI. `onedrive-check-access`'s report inside the settings window, and
   `onedrive-doctor`'s rows inside the Diagnostics window, are English blocks with

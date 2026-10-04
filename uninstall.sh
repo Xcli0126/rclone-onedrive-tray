@@ -14,6 +14,10 @@
 #
 set -euo pipefail
 
+# This script's own directory, for the shared config reader below. install.sh
+# carries the same variable.
+SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 PREFIX="${PREFIX:-$HOME/.local}"
 XDG_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}"
 PURGE=0
@@ -46,25 +50,11 @@ NM_DISPATCHER_DIR="${NM_DISPATCHER_DIR:-/etc/NetworkManager/dispatcher.d}"
 say()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*" >&2; }
 
-# Recover the unit base name from the config (may differ from the default).
-# The same reader install.sh uses: the tray escapes \, ", $ and the backtick
-# inside the quotes, and this script used to stop at the first inner quote, so a
-# name the tray wrote was looked for truncated. See docs/KNOWN-ISSUES.md, "Four
-# parsers for one file format".
-config_value() {  # config_value <KEY> [<file>] -> the value, or "" when absent
-    local key="$1" file="${2:-$CONFIG_DIR/config}" line value
-    line="$(sed -n "s/^[[:space:]]*\(export[[:space:]]\{1,\}\)\{0,1\}${key}=//p" \
-        "$file" 2>/dev/null | tail -1)"
-    [ -n "$line" ] || return 0
-    case "$line" in
-        \"*)
-            value="$(printf '%s\n' "$line" |
-                sed -n 's/^"\(.*\)"[[:space:]]*\(#.*\)\{0,1\}$/\1/p')"
-            printf '%s' "$value" | sed -e 's/\\\(["\\$`]\)/\1/g' ;;
-        *)
-            printf '%s' "${line%%[[:space:]#]*}" ;;
-    esac
-}
+# Recover the unit base name from the config (may differ from the default). The
+# reader is install.sh's, from lib/config.sh, so a change to the format cannot land
+# in one of the two scripts and not the other.
+# shellcheck source=lib/config.sh
+. "$SRC_DIR/lib/config.sh"
 
 UNIT_NAME="onedrive-sync"
 if [ -f "$CONFIG_DIR/config" ]; then
