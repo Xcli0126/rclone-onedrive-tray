@@ -92,6 +92,15 @@ fi
 KNOWN_SURVIVORS=" check-name-limit "
 survived=0
 known=0
+
+# An id in the list above that names no row would excuse nothing and hide the typo
+# that made it name nothing, so each one has to be a row in the table.
+for known_id in $KNOWN_SURVIVORS; do
+    grep -q "^${known_id}	" "$TABLE" || {
+        echo "KNOWN_SURVIVORS names $known_id, which is not a row in $TABLE" >&2
+        exit 1
+    }
+done
 caught=0
 skipped=0
 unresolved=0

@@ -550,15 +550,15 @@ no include-list mode.
 
 ### The service is killed half way through
 
-**Cause:** `Type=oneshot` services default to `TimeoutStartSec=90s`. A first full sync of a big
-folder easily takes longer.
+**Cause:** not a start timeout. A `Type=oneshot` service has no `TimeoutStartSec` of its own, so the
+number in the unit is a cap this project adds rather than a default it raises. What can stop a run
+part way through is the stop timeout, when a logout, a shutdown or a reboot stops the service.
 
-**Fix:**
+**Fix:** the unit sets one for that reason. Raise it if 300 seconds is not enough for your tree:
 
 ```ini
 [Service]
-Type=oneshot
-TimeoutStartSec=1800
+TimeoutStopSec=600
 ```
 
 ### `systemctl is-active` never returns `active`

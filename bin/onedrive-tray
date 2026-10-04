@@ -484,8 +484,16 @@ def write_atomic(path: str, text: str) -> None:
     """
     directory = os.path.dirname(os.path.abspath(path)) or "."
     if os.path.exists(path):
-        # O_WRONLY without O_TRUNC: a permission check, not a write.
-        os.close(os.open(path, os.O_WRONLY))
+        # O_WRONLY without O_TRUNC: a permission check, not a write. O_NONBLOCK
+        # is for the same reason read_excluded_folders() checks S_ISREG: the
+        # target is a config path, and a fifo there blocks this open until a
+        # reader appears. Every caller is on the GTK main loop - the folder
+        # menu's "toggled" handler reaches this one through
+        # write_excluded_folders() - so blocking here freezes the icon with no
+        # error. With the flag a fifo with no reader raises ENXIO instead, and
+        # the callers already report an OSError. On a regular file it changes
+        # nothing.
+        os.close(os.open(path, os.O_WRONLY | os.O_NONBLOCK))
     fd, tmp = tempfile.mkstemp(dir=directory,
                                prefix="." + os.path.basename(path) + ".")
     try:
@@ -810,6 +818,7 @@ STRINGS = {
         "Paused until {when}": "已暂停，{when} 自动恢复",
         "Paused for {n}": "已暂停 {n}",
         "Could not pause automatic sync: {why}": "无法暂停自动同步：{why}",
+        "Could not resume automatic sync: the pause stamp is still there": "无法恢复自动同步：暂停标记仍未被删除",
         "Could not change the login setting": "无法修改开机自启动设置",
         "Could not start {app}": "无法启动 {app}",
         "Folders to sync": "同步的文件夹",
@@ -2764,10 +2773,33 @@ class Tray:
         return False
 
     def resume_now(self):
-        self._clear_stamp()
+        """Start syncing again, whatever stopped it, and say only what happened.
+
+        The stamp is the pause, so clearing it is all a pause needs. A timer the
+        user turned off is a different state, and this item is the only way back
+        from the menu: it used to run `enable --now`, and dropping that made the
+        notification a lie in that state, because the menu went back to "Automatic
+        sync is off" a moment later. The stamp is checked afterwards, because
+        clearing it is an unlink and a stamp that survived one would keep turning
+        every run away while the notification said sync was back.
+        """
+        def worker():
+            self._clear_stamp()
+            _, out, _ = self._sc("is-enabled", self.timer)
+            if out.splitlines()[0].strip() != "enabled":
+                self._set_units("enable", "--now")
+            GLib.idle_add(self._after_resume)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _after_resume(self):
         self.auto_seen = "on"
         self._units_changed()
-        self.notify(APP_NAME, self.t("Automatic sync resumed"))
+        if os.path.exists(PAUSE_STAMP):
+            self.notify(APP_NAME, self.t(
+                "Could not resume automatic sync: the pause stamp is still there"))
+        else:
+            self.notify(APP_NAME, self.t("Automatic sync resumed"))
         self._refresh_checks()
         return False
 
@@ -2795,19 +2827,28 @@ class Tray:
     def _recover_pause_worker(self):
         due = self._pause_due()
         if due is None:
-            return
-        if due <= time.time():
-            # The pause is over and the stamp is all that is left of it.
-            GLib.idle_add(self._pause_over)
+            # No stamp. A timer that is off with no stamp is a deliberate off, and
+            # nothing here has an opinion about it.
             return
         _, out, _ = self._sc("is-enabled", self.timer)
-        if out.splitlines()[0].strip() == "enabled":
-            # The new shape: the units were never touched, so there is nothing to
-            # repair. The stamp alone keeps the pause.
+        disabled = out.splitlines()[0].strip() != "enabled"
+        if due > time.time():
+            # The pause is in force. The shape this version writes leaves the units
+            # alone, so there is nothing to repair; the shape an older one wrote
+            # left them disabled and armed a transient timer that a reboot took with
+            # it, so they go back on and the pause continues from the stamp.
+            if disabled:
+                self._set_units("enable", "--now")
             GLib.idle_add(self._pause_rearmed)
             return
-        self._set_units("enable", "--now")
-        GLib.idle_add(self._pause_rearmed)
+        # The pause has run out. Dropping the stamp ends it, and if the units are
+        # still disabled then an older pause is why: leaving them that way is the
+        # "nothing syncs again, forever" failure this whole shape was changed to
+        # remove, and a reboot is exactly what makes it reachable here, because the
+        # reboot is what took the old resume timer away.
+        GLib.idle_add(self._pause_over)
+        if disabled:
+            self._set_units("enable", "--now")
 
     def _pause_over(self):
         """The stamp has expired: drop it, so nothing claims a pause."""

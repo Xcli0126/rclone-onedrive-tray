@@ -21,10 +21,17 @@
 # `set -euo pipefail` caller keeps its own options.
 #
 # What this reader does NOT do is expand `${VAR}`: it answers the value as written.
-# The scripts here read a binary name, a unit name, a number and a boolean, and
-# none of those is a path a person writes with a variable in it. `onedrive-sync`
-# sources the file and the tray expands the same forms, so a *path* key is still
-# expanded everywhere it is used.
+# Its three callers read a binary name, a unit name, a number and a boolean with it,
+# and none of those is a path a person writes with a variable in it. setup.sh also
+# carries path keys through it - LOG, FILTERS_FILE, EXCLUDE_FOLDERS_FILE,
+# OPEN_APP_CMD, CHECK_FILENAME - and for those "as written" is the wrong answer to
+# write back: a config holding
+# `LOG="${XDG_CACHE_HOME:-$HOME/.cache}/sync.log"` comes back as
+# `LOG="\${XDG_CACHE_HOME:-\$HOME/.cache}/sync.log"`, which the wrapper then reads
+# as a literal directory name. `onedrive-sync` sources the file and the tray
+# expands the same forms, so a *path* key is expanded everywhere it is used
+# except in the wizard's copy of it; that is the open entry in
+# docs/KNOWN-ISSUES.md, not something this reader can decide on its own.
 #
 # The tray writes a value with \, ", $ and the backtick escaped inside the quotes
 # (shell_quote_value), and the sed below undoes exactly that, left to right, which

@@ -353,8 +353,9 @@ sudo loginctl enable-linger "$USER"
 定时器用 `OnUnitInactiveSec` 而不是 `OnUnitActiveSec`，它按「上一轮跑完之后固定间隔」排下一轮。
 从启动时刻计时的话，一次慢同步就会和下一轮重叠，而重叠运行会破坏 bisync 的状态文件。
 
-`TimeoutStartSec=1800` 是因为 systemd 对 `Type=oneshot` 的默认超时只有 90 秒。首次同步大目录远超
-这个时间，会被从中间砍死。
+`TimeoutStartSec=1800` 是 unit 自己加的上限，不是把默认值调大：`Type=oneshot` 服务本身没有启动超时，
+这条指令用来防止卡死的 bisync 一直占着定时器的下一个 tick。更容易碰上的是停止超时：
+`TimeoutStopSec=300` 让注销或关机时正在跑的 rclone 收到 SIGTERM 后有时间写完 listings。
 
 `flock` 的存在是因为「定时同步正在跑时点立即同步」不是什么理论上的竞态。你第一次不耐烦就会碰上，
 而这一对文件之后就只剩 `--resync` 一条路。

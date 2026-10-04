@@ -14,6 +14,50 @@ round uses a different model with a different lens, which is how the entries her
 were found in the first place.
 
 ## Open
+### What the pause redesign left
+
+The meta-review of the pause commit found, in its interim report, that the migration
+did not repair what it was for (fixed, with a case that drives the shape where the
+units are still disabled), that "Resume now" announced a resume it had not done
+(fixed), and that the pause commit wrote four corrupted lines into
+`tests/lib/mutations.txt` (removed). What is left:
+
+- `onedrive-doctor` has no pause awareness at all. A paused install is reported as
+  `ok log last write 0s ago; no failure hint in it` and `ok systemd enabled/active`,
+  exit 0, which reads as a healthy machine rather than one that is deliberately not
+  syncing; before the redesign the disabled timer made it a warning. The tray shows
+  the pause, the wrapper says it in the log, and the third reader says nothing.
+  Which row and which verdict is a product call, so it is not guessed at here.
+- The stamp has two grammars. The wrapper's shell rejects `" 1791117608 "`,
+  `"+1791117608"`, `"1_791117288"` and Arabic-Indic digits, and a value of more than
+  nineteen digits makes `[ -gt ]` print an error and read as "the pause ran out", so
+  the stamp is deleted and the run syncs with bash's complaint on stderr; the tray's
+  `int()` accepts the underscores and raises `OverflowError` on the long value, which
+  nothing catches. One grammar, written once, is the fix.
+- Three pages and a stub still describe the old design: `README.md`'s settings table,
+  `README.zh-CN.md` in two places, `docs/FEATURE-PARITY.md`,
+  `docs/COMPATIBILITY.md`, `docs/DEPENDENCIES.md`, the comment above
+  `recover_pause()` in the tray, and the `systemd-run` markers in `tests/tray.sh`
+  that no code reads any more.
+- The mutation row `tray-setunits-invalidate` survives now: `_auto_state` reads the
+  stamp before it reads `timer_state`, so the `_units_changed()` inside `_set_units`
+  is no longer load-bearing and nothing notices its removal. A full sweep is red for
+  that reason, which the `KNOWN_SURVIVORS` mechanism can excuse only if the row is a
+  decision rather than a line nobody needs. Measured: `s|        elif due is not
+  None:|        elif False:|` is caught (288 passed, 3 failed), so the tray half of
+  the pause can have a row after all, and the previous round's claim that sed could
+  not express one was wrong.
+- "Sync now" during a pause is a silent no-op: the wrapper exits 0 without invoking
+  rclone and writes no result line, so the menu gives no sign that the request was
+  refused. Under the old design the units were stopped, so the request started them
+  and really synced. Either the item says it is paused, or the wrapper's refusal is
+  what the tray reports.
+- The stamp is written with a truncating `open(..., "w")` although `write_atomic()`
+  exists two hundred lines above, and an empty read is "not a time", so a pause
+  written while the file is being truncated is deleted and the run syncs.
+- The pause check sits before the log rotation, so an install that spends its life
+  paused never rotates its log, and the file the cap exists for grows without it.
+
 ### What the last meta-review found in the newest commits
 
 Round nineteen's meta-review audited the two commits before it, and found eleven

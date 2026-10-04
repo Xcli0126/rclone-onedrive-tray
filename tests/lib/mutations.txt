@@ -326,11 +326,19 @@ doctor-log-dir-not-a-file	bin/onedrive-doctor	s|    if \[ ! -f "$LOG" \]; then| 
 # round twenty: a pause is the stamp and nothing else. The wrapper turns a run
 # away while it is in force, and the tray touches no unit to write it.
 sync-pause-ignored	bin/onedrive-sync	s|            if \[ "$pause_due" -gt "$(date +%s)" \]; then|            if false; then|	install-flow
-                with open(PAUSE_STAMP, "w", encoding="utf-8") as fh:|	tray
-            due = int(time.time()) + minutes \* 60|        def worker():
-            self._set_units("stop")
-            due = int(time.time()) + minutes * 60|	tray
 # The tray half of the pause has no row: the mutation that reintroduces a unit
 # call has to insert a line, and the harness's sed could not express it. The
 # rewritten pause scenarios assert the calls directly, and the old code fails
 # them, which is the check the row would have made.
+# round twenty-one: the all-zero spellings of INTERVAL_MIN, the blocking open on
+# the config path's write side, and a character device told apart from a fifo.
+install-interval-zero-spellings	install.sh	s|    \*)$|    *0)$|	install-flow
+doctor-device-log-not-a-file	bin/onedrive-doctor	s|    if \[ ! -f "$LOG" \] && \[ ! -c "$LOG" \]; then|    if [ ! -f "$LOG" ]; then|	install-flow
+# The write side of the config-path guard (O_NONBLOCK on write_atomic's
+# permission open) has no row: making a fifo config freeze the tray needs a
+# clock inside the tray driver, and a suite that hangs without one is a worse
+# instrument than the missing row. The guard is there for the freeze the
+# reviewer measured, and the read side's case is what pins the rule.
+# round twenty-one, the migration half: an expired pause left by the version that
+# disabled the units has to put them back, or nothing syncs again.
+tray-migration-leaves-units-off	bin/onedrive-tray	s|^        if disabled:$|        if False:|	tray

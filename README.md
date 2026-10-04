@@ -444,8 +444,10 @@ The timer uses `OnUnitInactiveSec`, not `OnUnitActiveSec`. It schedules the next
 interval after the previous one finishes. Measuring from the start instead lets a slow sync
 overlap the next one, and overlapping runs corrupt bisync's state files.
 
-`TimeoutStartSec=1800` is there because systemd's default for `Type=oneshot` is 90 seconds. A
-first sync of a large folder runs far longer, and would be killed part way through.
+`TimeoutStartSec=1800` is a cap the unit adds, not a raised default: a `Type=oneshot` service has no
+start timeout of its own, so this is what stops a bisync that hangs from holding the timer's next
+tick off forever. `TimeoutStopSec=300` is the other half, and it is the one that matters on a
+shutdown: rclone gets SIGTERM and 300 seconds to end the run and write its listings.
 
 The `flock` exists because "Sync now" during a scheduled run is not a theoretical race. It
 happens the first time you get impatient, and the pair ends up needing `--resync`.

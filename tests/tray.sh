@@ -1768,14 +1768,14 @@ def scenario_pause_recovery():
     case = os.environ.get("TRAY_PAUSE_CASE", "new")
     stamp = MODULE.PAUSE_STAMP
     os.makedirs(os.path.dirname(stamp), exist_ok=True)
-    due = int(time.time()) + (-60 if case == "expired" else 900)
+    due = int(time.time()) + (-60 if case.startswith("expired") else 900)
     with open(stamp, "w", encoding="utf-8") as fh:
         fh.write(str(due))
 
     # The stub answers `is-enabled` for the timer from this marker, and a pair
     # paused by the old version is one whose timer is disabled.
     marker = os.path.join(os.environ["TRAY_CALLS"], "timer-disabled")
-    if case == "old":
+    if case in ("old", "expired-old"):
         open(marker, "w").close()
     elif os.path.exists(marker):
         os.remove(marker)
@@ -1786,7 +1786,7 @@ def scenario_pause_recovery():
     clear_calls()
     try:
         tray = MODULE.Tray(CFG)
-        if case == "expired":
+        if case.startswith("expired"):
             wait_for(lambda: not os.path.exists(stamp) or shown, 8.0)
         else:
             wait_for(lambda: getattr(tray, "auto_seen", None) == "paused", 8.0)
@@ -4800,6 +4800,22 @@ if d["stamp_left"]:
     raise SystemExit(1)
 if "paused" in d["pause_label"].lower():
     print("the menu still claims a pause: %r" % (d["pause_label"],))
+    raise SystemExit(1)
+'
+fi
+
+# The state the migration exists for: a pause written by the version that disabled
+# the units and armed a transient resume timer, with that timer gone because the
+# machine rebooted. Dropping the stamp and leaving the units disabled is the
+# "nothing syncs again, forever" failure the redesign was for, and this is the one
+# path where it is reachable.
+if run_driver pause-recovery TRAY_PAUSE_CASE=expired-old; then
+    check "an expired pause left by an older version gets its units back" json_py '
+if d["stamp_left"]:
+    print("the expired stamp is still there")
+    raise SystemExit(1)
+if not any("enable --now ztraytest.timer" in x for x in d["enabled"]):
+    print("the units stayed disabled after the pause ran out: %r" % (d["enabled"],))
     raise SystemExit(1)
 '
 fi

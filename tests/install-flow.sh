@@ -651,10 +651,13 @@ check "systemd accepts $UNIT-watch.service" \
 # dropped directive: dropping OnUnitInactiveSec leaves OnActiveSec=2min as the
 # timer's only trigger, which fires once and then stays disabled, so a machine with
 # INTERVAL_MIN="abc" syncs once per login while the timer still reports active. A
-# zero is parsed and means "as soon as the last run finished", which is a loop.
+# zero is parsed and means "as soon as the last run finished", which is a loop, and
+# zero has more than one spelling: `systemd-analyze timespan` reads 0, 00 and 000
+# as the same value, so `00` is in this list and a guard written for the string "0"
+# would leave it through.
 title "an INTERVAL_MIN systemd cannot use"
 BAD_INTERVAL_HOME="$WORK/bad-interval"
-for bad in abc 0 -5 5.5; do
+for bad in abc 0 00 -5 5.5; do
     rm -rf "$BAD_INTERVAL_HOME"
     mkdir -p "$BAD_INTERVAL_HOME/.config/rclone-onedrive-tray"
     cat > "$BAD_INTERVAL_HOME/.config/rclone-onedrive-tray/config" <<EOF
@@ -690,6 +693,22 @@ UNIT_NAME="zz-alt-probe"
 INTERVAL_MIN="5"
 WATCH="0"
 EOF
+# A trailing comment and trailing whitespace are not part of the value either: the
+# strip is what keeps `45min   # the wizard wrote this` from being compared as
+# "45min # the wizard wrote this" and rewritten with the comment still on it.
+printf '[Timer]\nOnUnitInactiveSec=45min   # the wizard wrote this\n' \
+    > "$DROPIN_ALT/.config/systemd/user/zz-alt-probe.timer.d/interval.conf"
+ALT_OUT="$(env HOME="$DROPIN_ALT" XDG_CONFIG_HOME="$DROPIN_ALT/.config" \
+    XDG_CACHE_HOME="$DROPIN_ALT/.cache" XDG_DATA_HOME="$DROPIN_ALT/.data" \
+    bash "$SRC_DIR/install.sh" --prefix "$DROPIN_ALT/.local" --no-start 2>&1)"
+if grep -qxF 'OnUnitInactiveSec=5min' \
+        "$DROPIN_ALT/.config/systemd/user/zz-alt-probe.timer.d/interval.conf" &&
+        grep -qF 'timer drop-in said "45min"' <<<"$ALT_OUT"; then
+    ok "a drop-in with a trailing comment is read without it and brought in line"
+else
+    bad "commented drop-in: $(tr '\n' ' ' < "$DROPIN_ALT/.config/systemd/user/zz-alt-probe.timer.d/interval.conf" 2>/dev/null)"
+fi
+
 printf '[Timer]\nOnUnitInactiveSec=30\n' \
     > "$DROPIN_ALT/.config/systemd/user/zz-alt-probe.timer.d/interval.conf"
 ALT_OUT="$(env HOME="$DROPIN_ALT" XDG_CONFIG_HOME="$DROPIN_ALT/.config" \
@@ -3108,10 +3127,26 @@ doc_fixture log-is-a-directory
 rm -f "$DOC_FX/cache/sync.log"; mkdir -p "$DOC_FX/cache/sync.log"
 DOCTOR_OUT="$(doc_run "$DOC_FX" --offline 2>&1)"; DOCTOR_RC=$?
 if [ "$DOCTOR_RC" -eq 1 ] && grep -q '^fail logfile.*not a regular file' <<<"$DOCTOR_OUT" &&
-        ! grep -q '^ok logfile' <<<"$DOCTOR_OUT"; then
+        ! grep -qE '^ok +logfile' <<<"$DOCTOR_OUT"; then
     ok "a LOG that is a directory fails the logfile row instead of reading as writable"
 else
     bad "LOG is a directory: exit $DOCTOR_RC, $(grep -m1 logfile <<<"$DOCTOR_OUT")"
+fi
+
+# And the other side of that rule: a character device is not a regular file either,
+# and it is what the wrapper can append to. onedrive-sync opens the log with
+# `: >>"$LOG"`, which /dev/null and /dev/stderr are for, and its only other use of
+# the path is the rotation guard `[ -f "$LOG" ]`, which skips what it cannot size.
+# A row that fails every non-regular file turned a working install into exit 1.
+# `report()` pads with printf '%-4s %-9s %s\n', so the verdict is followed by at
+# least one space: `^ok logfile` matches nothing, which is why these two cases use
+# `^ok +logfile` and the negative above was dead as written.
+doc_fixture log-is-a-device 'LOG="/dev/null"'
+DOCTOR_OUT="$(doc_run "$DOC_FX" --offline 2>&1)"; DOCTOR_RC=$?
+if [ "$DOCTOR_RC" -eq 0 ] && grep -qE '^ok +logfile' <<<"$DOCTOR_OUT"; then
+    ok "a LOG the wrapper can append to is not failed for being a device"
+else
+    bad "LOG=/dev/null: exit $DOCTOR_RC, $(grep -m1 logfile <<<"$DOCTOR_OUT")"
 fi
 
 doc_fixture no-config

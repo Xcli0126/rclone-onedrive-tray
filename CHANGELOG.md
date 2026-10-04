@@ -36,6 +36,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The migration that repairs a pause left by the older design did not repair the
+  state it exists for. When that pause's time had passed, the stamp was dropped with
+  the units still disabled and nothing else was done, so the machine was left
+  exactly as the redesign was meant to prevent: nothing syncing, and a disabled
+  timer that looks like a deliberate off. An expired pause now puts the units back,
+  and the test for it drives that shape rather than the one where they were already
+  on. "Resume now" had the same shape of problem in the other direction: it cleared
+  the stamp and announced "Automatic sync resumed" without enabling a timer the user
+  had switched off, so the menu went back to "Automatic sync is off" a moment later.
+  It enables what is off and, if the stamp cannot be removed, says that instead of
+  announcing a resume that did not happen.
+- `INTERVAL_MIN="00"` slid past the validation written for `"0"`: the guard tested
+  the string, and systemd reads `0min`, `00min` and `000min` as the same zero, so the
+  unit shipped a timer counting down from nothing, which is the sync loop the
+  validation exists to close. Every all-zero spelling is refused now.
+- The write side of the config-path guard stopped where the read side did not:
+  `write_atomic()` opened the target for writing with no `O_NONBLOCK`, and a fifo
+  there blocks that open until a reader appears. Every caller is on the GTK main
+  loop, so an `EXCLUDE_FOLDERS_FILE` fifo froze the icon with no error, which is the
+  freeze the same series of fixes guarded the reads against.
+- A character device is not a regular file either, and the rule added for the log
+  did not tell them apart: `LOG=/dev/null` is a working install, because the wrapper
+  appends to its log and its only other use of the path is a rotation guard that
+  skips what it cannot size, and the row called it a failure. A directory and a fifo
+  still fail it, which is what the wrapper does with them.
 - A pause could outlive the tray and leave a machine doing nothing, and the shape of
   the feature is what made that possible: a pause was "the units are stopped and
   disabled" plus a transient `systemd-run` timer that turned them back on, and a

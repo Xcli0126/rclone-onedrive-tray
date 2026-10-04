@@ -325,13 +325,21 @@ INTERVAL_MIN="${INTERVAL_MIN:-5}"
 # refuses an interval under a minute and setup.sh --interval refuses anything
 # that is not a whole number; this is the third entry point into the same file,
 # and a hand edit or a value carried over from an old config reaches it.
+#
+# Zero has more than one spelling to systemd: `systemd-analyze timespan` reads
+# 0min, 00min and 000min as the same zero, so testing for the string "0" left
+# 00 and 000 through with the timer still counting down from nothing. The test
+# for every all-zero spelling is the one setup.sh --interval already uses: a
+# digit that is not a zero.
 case "$INTERVAL_MIN" in
     ''|*[!0-9]*)
         warn "INTERVAL_MIN in $CONFIG_DIR/config is not a whole number of minutes (\"$INTERVAL_MIN\"); using 5"
         INTERVAL_MIN=5 ;;
-    0)
-        warn "INTERVAL_MIN in $CONFIG_DIR/config must be at least 1; using 5"
-        INTERVAL_MIN=5 ;;
+    *)
+        [ -n "${INTERVAL_MIN//0/}" ] || {
+            warn "INTERVAL_MIN in $CONFIG_DIR/config must be at least 1; using 5"
+            INTERVAL_MIN=5
+        } ;;
 esac
 
 sed -e "s|%SYNC_SCRIPT%|$(sed_replacement "$(systemd_exec_arg "$BIN_DIR/onedrive-sync")")|g" \

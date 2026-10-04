@@ -666,14 +666,20 @@ while [ ! -d "$probe_dir" ] && [ "$probe_dir" != / ] && [ "$probe_dir" != . ]; d
     probe_dir="$(dirname "$probe_dir")"
 done
 if [ -e "$LOG" ]; then
-    if [ ! -f "$LOG" ]; then
+    if [ ! -f "$LOG" ] && [ ! -c "$LOG" ]; then
         # A directory passes -e and -w, and stat then answers 4096 bytes for it,
         # so this row said "writable, 4096 of 5242880 bytes" and the summary said
         # nothing failed while the wrapper refused the same path with "cannot
         # write the log ...: Is a directory". A fifo passes both too, and the
-        # wrapper blocks writing it. One path, one verdict: what the wrapper will
-        # do is what this row says.
-        report fail logfile "$LOG is not a regular file, so onedrive-sync cannot write it and stops before it syncs; point LOG at a file or remove the path in $CONFIG_FILE"
+        # wrapper blocks on the append it opens the log with. One path, one
+        # verdict: what the wrapper will do is what this row says.
+        #
+        # A character device is the exception, and it is not a regular file
+        # either: onedrive-sync opens the log by appending to it, which is what
+        # /dev/null is for, and its only other use of the path is the rotation
+        # guard `[ -f "$LOG" ]`, which simply skips a file it cannot size. So
+        # LOG=/dev/null is a working install, and this row failed it.
+        report fail logfile "$LOG is not a regular file, so onedrive-sync cannot open it as a log (a directory makes it stop before it syncs and a fifo blocks it); point LOG at a file or remove the path in $CONFIG_FILE"
     elif [ ! -w "$LOG" ]; then
         report fail logfile "$LOG is not writable, so onedrive-sync stops before it syncs; fix its owner or point LOG somewhere else in $CONFIG_FILE"
     else
