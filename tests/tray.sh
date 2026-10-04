@@ -99,6 +99,9 @@ case "\$1" in
     # marker file is all a scenario needs to ask for one.
     lsf)   [ -f "$WORK/calls/rclone-lsf-fail" ] && exit 1
            [ -f "$WORK/calls/folders" ] && cat "$WORK/calls/folders" ;;
+    # A remote that takes seconds to answer. The re-authorise scenario uses this
+    # to hold one sign-in in flight while a second activation arrives.
+    lsd)   [ -f "$WORK/calls/slow-lsd" ] && sleep 3 ;;
 esac
 exit 0
 STUB
@@ -2312,9 +2315,9 @@ def scenario_poll_cost():
         counts["parse"] += 1
         return real_parse(text)
 
-    def apply_state(self, syncing, timer_state):
+    def apply_state(self, syncing, timer_state, generation=None):
         counts["apply"] += 1
-        return real_apply(self, syncing, timer_state)
+        return real_apply(self, syncing, timer_state, generation)
 
     cfg = dict(CFG)
     cfg["LOG"] = os.path.join(os.path.dirname(cfg["LOG"]), "poll-cost.log")
@@ -2714,6 +2717,393 @@ def scenario_settings_enabled():
     return data
 
 
+# The child half of scenario_lock_race(). It does what acquire_lock() does, in
+# the one ordering no API can be asked to produce on request: the open happens
+# before the other tray releases, and the flock happens after. fcntl.flock is the
+# only place that ordering can be held still, so the hook parks there.
+LOCK_RACE_CHILD = r'''
+import fcntl
+import importlib.machinery
+import importlib.util
+import json
+import os
+import sys
+import time
+
+sys.dont_write_bytecode = True
+
+tray_path, work = sys.argv[1], sys.argv[2]
+loader = importlib.machinery.SourceFileLoader("tray_lock_child", tray_path)
+spec = importlib.util.spec_from_loader("tray_lock_child", loader)
+module = importlib.util.module_from_spec(spec)
+loader.exec_module(module)
+
+
+def marker(name):
+    return os.path.join(work, name)
+
+
+calls = []
+real_flock = fcntl.flock
+
+
+def parked_flock(handle, op):
+    calls.append(op)
+    if len(calls) == 1:
+        # The path has been opened and this process is about to flock it. Hold
+        # here until the other tray has released and unlinked the file, which is
+        # the window the defect lives in.
+        open(marker("b-parked"), "w").close()
+        deadline = time.time() + 20.0
+        while not os.path.exists(marker("a-released")):
+            if time.time() > deadline:
+                break
+            time.sleep(0.005)
+    return real_flock(handle, op)
+
+
+module.fcntl.flock = parked_flock
+lock = module.acquire_lock()
+with open(marker("b-result"), "w", encoding="utf-8") as fh:
+    json.dump({"acquired": lock is not None, "flock_calls": len(calls)}, fh)
+# Hold whatever was taken until the other process has tried. Leaving is what a
+# tray that quits does, and it drops the flock.
+deadline = time.time() + 20.0
+while not os.path.exists(marker("p-tried")):
+    if time.time() > deadline:
+        break
+    time.sleep(0.005)
+'''
+
+
+def scenario_stale_state():
+    """An answer computed before a pause must not delete the pause.
+
+    unit_states() runs in a worker, so its answer can land after the tray has
+    paused the units itself. The answer still says "enabled", _auto_state() reads
+    that as automatic sync being on, and the pause stamp goes with it: the row
+    then says sync is on for up to ENABLED_EVERY ticks and "Automatic sync is
+    off" for the rest of the pause, and recover_pause() has nothing to restore
+    after a restart. The answer is held back until the pause has landed, which is
+    the ordering the reviewer reproduced; the control run, with nothing held
+    back, is the pause-survives-poll scenario above.
+    """
+    import threading
+
+    tray = build()
+    started = threading.Event()
+    release = threading.Event()
+
+    def held():
+        if not started.is_set():
+            # What the units said before the pause: enabled, nothing active.
+            started.set()
+            release.wait(10.0)
+            return False, "enabled"
+        # Every later poll sees the units as pause_for() left them.
+        return False, "off"
+
+    real_states = tray.unit_states
+    tray.unit_states = held
+    try:
+        parked = wait_for(started.is_set, 12.0)
+        with open(os.path.join(os.environ["TRAY_CALLS"], "timer-disabled"), "w"):
+            pass
+        # A clean slate for the stamp: the pause-survives-poll scenario before
+        # this one leaves its own behind, and a stamp that is already there would
+        # make the wait below return before pause_for() has written anything.
+        try:
+            os.remove(MODULE.PAUSE_STAMP)
+        except OSError:
+            pass
+        tray.pause_for(30)
+        stamped = wait_for(lambda: os.path.exists(MODULE.PAUSE_STAMP), 8.0)
+        # The stale answer lands now, and the polls after it are the window it
+        # used to poison.
+        release.set()
+        pump(7.0)
+        return {"parked": parked,
+                "stamped": stamped,
+                "stamp_left": os.path.exists(MODULE.PAUSE_STAMP),
+                "auto_seen": getattr(tray, "auto_seen", None),
+                "pause_label": tray.item_pause.get_label() or "",
+                "timer_state": getattr(tray, "timer_state", None)}
+    finally:
+        tray.unit_states = real_states
+        release.set()
+        try:
+            os.remove(os.path.join(os.environ["TRAY_CALLS"], "timer-disabled"))
+        except OSError:
+            pass
+
+
+def scenario_stale_state_cache():
+    """A stale answer must not become the cache the next tick reuses either.
+
+    Clearing the cache in _units_changed() does nothing about the answer a worker
+    has already been handed, and unit_states() writes that answer into the cache
+    itself. Dropping it in _apply_state() keeps it off the screen; this is the
+    other half, where the next tick reads it back as though the units had not
+    moved. sh is replaced here so the pause lands in the middle of the ask, which
+    is the ordering a slow systemctl produces on its own.
+    """
+    tray = build()
+    wait_for(lambda: not tray.state_busy, 8.0)
+    tray.timer_state = None
+    state = {"bumped": False}
+    real_sh = MODULE.sh
+
+    def fake_sh(cmd, timeout=30):
+        if "is-active" in cmd and not state["bumped"]:
+            # The tray pauses while systemctl is being asked: the answer this
+            # call is about to produce describes the units as they were.
+            state["bumped"] = True
+            tray._units_changed()
+            return 0, "inactive\n", ""
+        if "is-enabled" in cmd:
+            return 0, "enabled\n", ""
+        return real_sh(cmd, timeout=timeout)
+
+    MODULE.sh = fake_sh
+    try:
+        active, timer = tray.unit_states()
+    finally:
+        MODULE.sh = real_sh
+    return {"bumped": state["bumped"], "active": active, "timer": timer,
+            "cached": getattr(tray, "timer_state", None)}
+
+
+def scenario_reauth_twice():
+    """A second activation while a sign-in is in flight starts nothing.
+
+    rclone's config file has no cross-process locking, so two concurrent
+    `rclone config reconnect` runs are last-writer-wins over the same remote's
+    credentials, and the first one to finish fires "Signed in. Syncing now."
+    while the other terminal is still open. A slow `rclone lsd` is what keeps the
+    first flow in flight long enough for the second activation to arrive.
+    """
+    tray = build()
+    clear_calls()
+    slow = os.path.join(os.environ["TRAY_CALLS"], "slow-lsd")
+    with open(slow, "w"):
+        pass
+    asked = {}
+    real = MODULE.Gtk.MessageDialog
+    MODULE.Gtk.MessageDialog = fake_message_dialog(
+        asked, MODULE.Gtk.ResponseType.OK)
+    item = find_at(tray.menu, "Re-authorise OneDrive…")
+    try:
+        item.activate()
+        parked = wait_for(
+            lambda: any(line.startswith("terminal ")
+                        and "config reconnect" in line for line in call_lines()),
+            8.0)
+        data = {"parked": parked,
+                "busy_while_busy": bool(getattr(tray, "reauth_busy", False)),
+                "insensitive_while_busy": not item.get_sensitive()}
+        # The row, which GTK refuses to activate while it is insensitive, and the
+        # handler directly, so that the flag is what has to stop the second flow.
+        item.activate()
+        tray.on_reauth()
+        pump(0.5)
+        data["spawns"] = sum(
+            1 for line in call_lines()
+            if line.startswith("terminal ") and "config reconnect" in line)
+        data["lsd_calls"] = sum(1 for line in call_lines() if " lsd " in line)
+        # The flow ends when the slow listing answers.
+        data["finished"] = wait_for(
+            lambda: not getattr(tray, "reauth_busy", True), 15.0)
+        data["busy_after"] = bool(getattr(tray, "reauth_busy", False))
+        data["sensitive_after"] = item.get_sensitive()
+    finally:
+        MODULE.Gtk.MessageDialog = real
+        try:
+            os.remove(slow)
+        except OSError:
+            pass
+    return data
+
+
+def scenario_lock_inode():
+    """release_lock() removes only the file it locked, and a second take works.
+
+    os.remove(LOCK_FILE) was unconditional, so a tray on its way out deleted
+    whatever was at the path, including a lock another process had just created
+    and was holding. The path is replaced by a different inode here, which is
+    what a second tray creates when it takes the lock at the same moment.
+    """
+    first = MODULE.acquire_lock()
+    data = {"first": first is not None}
+    if first is None:
+        return data
+    try:
+        os.remove(MODULE.LOCK_FILE)
+        with open(MODULE.LOCK_FILE, "w", encoding="utf-8") as fh:
+            fh.write("another lock\n")
+        MODULE.release_lock(first)
+        data["path_kept"] = os.path.exists(MODULE.LOCK_FILE)
+        data["content"] = read_text(MODULE.LOCK_FILE)
+    finally:
+        try:
+            os.remove(MODULE.LOCK_FILE)
+        except OSError:
+            pass
+    second = MODULE.acquire_lock()
+    data["second"] = second is not None
+    if second is not None:
+        MODULE.release_lock(second)
+    data["removed_after_release"] = not os.path.exists(MODULE.LOCK_FILE)
+    return data
+
+
+def scenario_lock_race():
+    """A lock taken while another tray releases it is not a second lock.
+
+    acquire_lock() opens the path and then flocks it. A process that opens before
+    the release unlinks and flocks after the release closes holds an unlinked
+    inode: the next process creates a fresh file and locks that one, and two
+    trays run at once. The interleave is forced by LOCK_RACE_CHILD, whose flock
+    is the point the release lands on - the ordering the reviewer measured 29
+    times in 419 acquisitions.
+    """
+    import subprocess
+
+    work = os.path.dirname(os.environ["TRAY_RECORDS"])
+    child_path = os.path.join(work, "lock-race-child.py")
+    with open(child_path, "w", encoding="utf-8") as fh:
+        fh.write(LOCK_RACE_CHILD)
+    for name in ("b-parked", "b-result", "a-released", "p-tried"):
+        try:
+            os.remove(os.path.join(work, name))
+        except OSError:
+            pass
+
+    holder = MODULE.acquire_lock()
+    if holder is None:
+        return {"holder": False}
+    child = subprocess.Popen([sys.executable, child_path, sys.argv[2], work],
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             text=True, cwd=work)
+    try:
+        parked = wait_for(
+            lambda: os.path.exists(os.path.join(work, "b-parked")), 20.0)
+        # The one release, with the child parked between its open and its flock.
+        MODULE.release_lock(holder)
+        with open(os.path.join(work, "a-released"), "w"):
+            pass
+        # Wait for the child to settle before asking, so which of the two takes
+        # the lock is decided by the protocol and not by this timing.
+        settled = wait_for(
+            lambda: os.path.exists(os.path.join(work, "b-result")), 20.0)
+        second = MODULE.acquire_lock()
+        with open(os.path.join(work, "p-tried"), "w"):
+            pass
+    finally:
+        try:
+            child.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            child.wait()
+    try:
+        child_result = json.loads(
+            read_text(os.path.join(work, "b-result")) or "{}")
+    except ValueError:
+        child_result = {}
+    data = {"holder": True, "parked": parked, "settled": settled,
+            "child_acquired": bool(child_result.get("acquired")),
+            "child_flock_calls": child_result.get("flock_calls", 0),
+            "second_acquired": second is not None}
+    if second is not None:
+        MODULE.release_lock(second)
+    return data
+
+
+def scenario_relative_local():
+    """A LOCAL that is not absolute is refused, by main() and by the guard.
+
+    setup.sh writes LOCAL verbatim and a hand edit can leave it relative. The
+    delete guard then resolves it against the tray process's own working
+    directory - not the directory rclone syncs - so isdir, realpath and the
+    prefix check all pass against a tree that has nothing to do with the sync
+    pair, and the confirmation names only the folder.
+    """
+    import subprocess
+
+    home = os.environ["TRAY_RELATIVE_LOCAL_HOME"]
+    os.makedirs(os.path.join(home, "rclone-onedrive-tray"), exist_ok=True)
+    config = os.path.join(home, "rclone-onedrive-tray", "config")
+    with open(config, "w", encoding="utf-8") as fh:
+        fh.write('REMOTE="traytest-remote:"\n'
+                 'LOCAL="OneDrive"\n'
+                 'UNIT_NAME="ztraytest"\n'
+                 'UI_LANG="en"\n')
+
+    # The sentence main() uses, called the way main() calls it. getattr, so that
+    # an older tray answers "" here rather than taking the scenario down.
+    check = getattr(MODULE, "local_path_problem", None)
+    data = {"problem": check("OneDrive") if check else ""}
+
+    # The guard, run from a directory where a same-named decoy exists: with a
+    # relative LOCAL this is the path it used to hand to shutil.rmtree.
+    decoy = os.path.join(WORK, "relative-local-decoy")
+    os.makedirs(os.path.join(decoy, "OneDrive", "Documents"), exist_ok=True)
+
+    class Bare:
+        local = "OneDrive"
+
+    here = os.getcwd()
+    try:
+        os.chdir(decoy)
+        data["guard"] = MODULE.Tray._local_delete_path(Bare(), "Documents")
+        data["decoy_path"] = os.path.join(os.path.realpath(decoy), "OneDrive",
+                                          "Documents")
+    finally:
+        os.chdir(here)
+
+    # And the real main(), which has to refuse before it builds a window.
+    env = dict(os.environ)
+    env["XDG_CONFIG_HOME"] = home
+    try:
+        proc = subprocess.run([sys.executable, sys.argv[2]], env=env,
+                              capture_output=True, text=True, timeout=25)
+        data.update({"refused": True, "exit_code": proc.returncode,
+                     "stderr": proc.stderr})
+    except subprocess.TimeoutExpired as exc:
+        error = exc.stderr or ""
+        if isinstance(error, bytes):
+            error = error.decode("utf-8", "replace")
+        data.update({"refused": False, "exit_code": None, "stderr": error})
+    return data
+
+
+def scenario_local_delete_path():
+    """The delete confirmation names the directory it will remove.
+
+    The guard resolves LOCAL against whatever directory the tray happens to run
+    in, and the dialog named only the folder, so a wrong root was invisible until
+    the tree was gone. The confirmation is answered Cancel, so what is under the
+    dialog is what this measures.
+    """
+    tray = build()
+    name = "ordinary"
+    target = os.path.join(tray.local, name)
+    os.makedirs(target, exist_ok=True)
+    MODULE.write_excluded_folders(tray.exclude_file, [name])
+    asked = {}
+    real = MODULE.Gtk.MessageDialog
+    MODULE.Gtk.MessageDialog = fake_message_dialog(
+        asked, MODULE.Gtk.ResponseType.CANCEL)
+    try:
+        tray._offer_local_delete(name)
+    finally:
+        MODULE.Gtk.MessageDialog = real
+    return {"asked": bool(asked),
+            "title": asked.get("text", ""),
+            "body": asked.get("body", ""),
+            "target": os.path.realpath(target),
+            "kept": os.path.isdir(target)}
+
+
 SCENARIOS = {
     "menus": scenario_menus,
     "diagnostics": scenario_diagnostics,
@@ -2734,7 +3124,14 @@ SCENARIOS = {
     "openapp": scenario_openapp,
     "lock-hold": scenario_lock_hold,
     "lock-second": scenario_lock_second,
+    "lock-inode": scenario_lock_inode,
+    "lock-race": scenario_lock_race,
     "reauth": scenario_reauth,
+    "reauth-twice": scenario_reauth_twice,
+    "stale-state": scenario_stale_state,
+    "stale-state-cache": scenario_stale_state_cache,
+    "relative-local": scenario_relative_local,
+    "local-delete-path": scenario_local_delete_path,
     "settings-view": scenario_settings_view,
     "settings-bandwidth": scenario_settings_bandwidth,
     "settings-markers": scenario_settings_markers,
@@ -3849,6 +4246,27 @@ if d["local_listing"] != ["a", "link-to-outside", "link-to-sibling", "self-link"
     raise SystemExit(1)
 '
 fi
+# The guard resolves LOCAL against the tray process's own directory, so the path
+# it returns is the one thing that says which root the delete is aimed at. The
+# dialog used to name only the folder.
+if run_driver local-delete-path; then
+    check "the delete confirmation names the directory it will remove" json_py '
+if not d["asked"]:
+    print("no confirmation was put on screen at all")
+    raise SystemExit(1)
+if d["target"] not in d["body"]:
+    print("body=%r target=%r" % (d["body"], d["target"]))
+    raise SystemExit(1)
+'
+    check "and still names the folder, and Cancel deletes nothing" json_py '
+if "ordinary" not in d["title"]:
+    print("title=%r" % (d["title"],))
+    raise SystemExit(1)
+if not d["kept"]:
+    print("the folder was deleted by a cancelled confirmation")
+    raise SystemExit(1)
+'
+fi
 
 title "A quoted OPEN_APP_CMD"
 cat > "$WORK/stubs/probing-stub" <<STUB
@@ -3921,6 +4339,42 @@ else
     wait "$HOLDER" 2>/dev/null
 fi
 
+# The lock file carries no state; the flock is the lock. Removing it is what made
+# two trays possible: a process that opens the path before the release unlinks it
+# and flocks it after the release closes holds an inode nobody else will ever
+# open, so the next process creates a fresh file and locks that one instead.
+if run_driver lock-inode; then
+    check "a release keeps a lock file it did not lock" json_py '
+if not d["first"]:
+    print("the lock could not be taken at all")
+    raise SystemExit(1)
+if not d["path_kept"] or d["content"].strip() != "another lock":
+    print("the file at the lock path was removed: kept=%r content=%r"
+          % (d["path_kept"], d["content"]))
+    raise SystemExit(1)
+'
+    check "and the next tray can still take the lock afterwards" json_py '
+if not d["second"] or not d["removed_after_release"]:
+    print("second=%r removed_after_release=%r"
+          % (d["second"], d["removed_after_release"]))
+    raise SystemExit(1)
+'
+fi
+if run_driver lock-race; then
+    check "a lock taken across a release is not a second lock" json_py '
+if not d["holder"] or not d["parked"] or not d["settled"]:
+    print("the interleave never happened: %r" % (d,))
+    raise SystemExit(1)
+if not d["child_acquired"]:
+    print("the second process never took a lock, so nothing was measured: %r"
+          % (d,))
+    raise SystemExit(1)
+if d["second_acquired"]:
+    print("two processes hold the lock at once: %r" % (d,))
+    raise SystemExit(1)
+'
+fi
+
 title "Signing in again"
 if run_driver reauth; then
     check "the confirm dialog names the remote and offers both buttons" \
@@ -3931,6 +4385,33 @@ if run_driver reauth; then
         json_expr "any(x.startswith('terminal ') and 'config reconnect' in x for x in d['calls'])"
     check "a completed sign-in starts a sync" \
         json_expr "d['started'] and any('start --no-block ztraytest.service' in x for x in d['calls'])"
+fi
+# Every other worker in the class has a guard; this one had none, so two
+# activations started two `rclone config reconnect` terminals and two pollers,
+# and the first one to finish said "Signed in. Syncing now." while the other was
+# still open. rclone's config file has no cross-process locking, so the two are
+# last-writer-wins over the same remote's credentials.
+if run_driver reauth-twice; then
+    check "a second activation starts no second sign-in" json_py '
+if not d["parked"]:
+    print("the first flow was never in flight, so nothing was measured")
+    raise SystemExit(1)
+if d["spawns"] != 1 or d["lsd_calls"] != 1:
+    print("spawns=%r lsd_calls=%r" % (d["spawns"], d["lsd_calls"]))
+    raise SystemExit(1)
+'
+    check "and the row is out of action while the flow runs" json_py '
+if not d["busy_while_busy"] or not d["insensitive_while_busy"]:
+    print("busy=%r sensitive=%r"
+          % (d["busy_while_busy"], d["insensitive_while_busy"]))
+    raise SystemExit(1)
+'
+    check "and it comes back when the flow is over" json_py '
+if not d["finished"] or d["busy_after"] or not d["sensitive_after"]:
+    print("finished=%r busy_after=%r sensitive_after=%r"
+          % (d["finished"], d["busy_after"], d["sensitive_after"]))
+    raise SystemExit(1)
+'
 fi
 
 title "Strings and translations"
@@ -4381,6 +4862,196 @@ if problems:
     raise SystemExit(1)
 PY
 
+title "A write that cannot finish"
+# The four files the tray rewrites are read back by other programs - onedrive-sync
+# sources the config, the menu reads the exclusion list - and open(path, "w")
+# empties one before a byte of the new text is known to fit. A kernel file-size
+# limit is the smallest honest way to make a write stop part way: the reviewer
+# used `ulimit -f 8` and left the 8.6 KB config at 8192 bytes, mid-word, with
+# MAX_LOG_BYTES, RCLONE, RETRIES and RETRY_DELAY destroyed. Each writer is driven
+# under the limit against a target that already has content, and what is left on
+# disk afterwards is what the assertions read.
+atomic_fixture() {
+    env -i PATH="$WORK/stubs:/usr/bin:/bin" HOME="$WORK" TMPDIR="$WORK/cache" \
+        XDG_RUNTIME_DIR="$WORK/run" \
+        XDG_CONFIG_HOME="$WORK/atomic-config" XDG_CACHE_HOME="$WORK/cache" \
+        XDG_DATA_HOME="$WORK/data" XDG_STATE_HOME="$WORK/state" \
+        LANG=C.UTF-8 LC_ALL=C.UTF-8 \
+        python3 - "$TRAY" "$WORK/atomic" <<'PY'
+import importlib.machinery
+import importlib.util
+import json
+import os
+import resource
+import signal
+import sys
+
+sys.dont_write_bytecode = True
+
+tray_path, work = sys.argv[1], sys.argv[2]
+os.makedirs(work, exist_ok=True)
+loader = importlib.machinery.SourceFileLoader("tray_atomic", tray_path)
+spec = importlib.util.spec_from_loader("tray_atomic", loader)
+module = importlib.util.module_from_spec(spec)
+loader.exec_module(module)
+
+# Every writer's new content is longer than this, so each one stops part way.
+LIMIT = 100
+
+
+def under_limit(call):
+    """Run `call` under a file-size limit; report what it raised and answered.
+
+    `raised` is the OSError that escaped the call, `result` is what the call
+    returned when it handled the fault itself.
+    """
+    # The kernel raises SIGXFSZ as well as failing the write, and its default
+    # action kills the process: a killed process proves nothing about the file.
+    previous = signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+    soft, hard = resource.getrlimit(resource.RLIMIT_FSIZE)
+    raised, result = "", None
+    try:
+        resource.setrlimit(resource.RLIMIT_FSIZE, (LIMIT, hard))
+        try:
+            result = call()
+        except OSError as exc:
+            raised = str(exc)
+        finally:
+            resource.setrlimit(resource.RLIMIT_FSIZE, (soft, hard))
+    finally:
+        signal.signal(signal.SIGXFSZ, previous)
+    return {"raised": raised, "result": result}
+
+
+def text_of(path):
+    with open(path, encoding="utf-8") as fh:
+        return fh.read()
+
+
+def temp_files(directory):
+    return sorted(name for name in os.listdir(directory)
+                  if name.startswith("."))
+
+
+data = {}
+
+# 1. the config: the file install.sh hands the user, and the one the wrapper
+#    sources before anything else.
+config = os.path.join(work, "config")
+config_body = ('REMOTE="traytest-remote:"\n'
+               'LOCAL="/nonexistent/local"\n'
+               'MAX_LOG_BYTES="5242880"\n'
+               'RCLONE="rclone"\n'
+               'RETRIES="3"\n'
+               'RETRY_DELAY="5"\n')
+config_body += "".join("# padding line %04d\n" % index for index in range(400))
+with open(config, "w", encoding="utf-8") as fh:
+    fh.write(config_body)
+data["config"] = under_limit(
+    lambda: module.update_config_file(config, {"RETRIES": "9"}))
+data["config_kept"] = text_of(config) == config_body
+data["config_leftovers"] = temp_files(work)
+
+# 2. the exclusion list the folder menu and onedrive-sync share.
+exclude = os.path.join(work, "exclude-folders.txt")
+exclude_body = ("# Folders not kept on this machine, one per line.\n"
+                "# Edited by the tray. The cloud keeps them either way.\n"
+                + "Archive\n" * 40)
+with open(exclude, "w", encoding="utf-8") as fh:
+    fh.write(exclude_body)
+data["exclude"] = under_limit(
+    lambda: module.write_excluded_folders(exclude, ["Archive", "Scratch"]))
+data["exclude_kept"] = text_of(exclude) == exclude_body
+data["exclude_leftovers"] = temp_files(work)
+
+# 3. the timer drop-in the interval lives in.
+dropin = module.timer_dropin_path("ztraytest")
+os.makedirs(os.path.dirname(dropin), exist_ok=True)
+dropin_body = ("# Set by the tray's settings dialog.\n[Timer]\n"
+               "OnUnitInactiveSec=5min\n")
+with open(dropin, "w", encoding="utf-8") as fh:
+    fh.write(dropin_body)
+data["dropin"] = under_limit(
+    lambda: module.write_timer_dropin("ztraytest", 15))
+data["dropin_kept"] = text_of(dropin) == dropin_body
+data["dropin_leftovers"] = temp_files(os.path.dirname(dropin))
+
+# 4. the autostart entry.
+autostart = module.AUTOSTART
+os.makedirs(os.path.dirname(autostart), exist_ok=True)
+autostart_body = ("[Desktop Entry]\nType=Application\nName=old entry\n"
+                  "Exec=/usr/bin/onedrive-tray\nTerminal=false\n")
+with open(autostart, "w", encoding="utf-8") as fh:
+    fh.write(autostart_body)
+data["autostart"] = under_limit(lambda: module.write_autostart(True))
+data["autostart_kept"] = text_of(autostart) == autostart_body
+data["autostart_leftovers"] = temp_files(os.path.dirname(autostart))
+
+# 5. and a write that does finish has to arrive as one file. Editing the target
+#    in place is what leaves a reader able to see half of it, so the whole point
+#    is that the old file is replaced rather than rewritten: a new inode at the
+#    path is the observable half of that.
+before = os.stat(config).st_ino
+module.update_config_file(config, {"RETRIES": "4"})
+data["config_replaced"] = os.stat(config).st_ino != before
+data["config_now"] = text_of(config)
+data["config_leftovers_after"] = temp_files(work)
+
+print(json.dumps(data))
+PY
+}
+if atomic_fixture > "$LAST_JSON" 2>"$DRIVER_ERR"; then
+    check "a config write that cannot finish keeps the old content" json_py '
+if not d["config"]["raised"]:
+    print("the failing write reported success")
+    raise SystemExit(1)
+if not d["config_kept"]:
+    print("the config was left truncated")
+    raise SystemExit(1)
+'
+    check "a write that finishes replaces the file with no litter" json_py '
+if not d["config_replaced"]:
+    print("the config was edited in place, so a reader can see half of it")
+    raise SystemExit(1)
+leftovers = sorted(set(d["config_leftovers"] + d["exclude_leftovers"]
+                       + d["dropin_leftovers"] + d["autostart_leftovers"]
+                       + d["config_leftovers_after"]))
+if leftovers:
+    print("temporary files left behind: %r" % (leftovers,))
+    raise SystemExit(1)
+if "RETRIES=\"4\"" not in d["config_now"]:
+    print("the replacement lost the change: %r" % (d["config_now"][:200],))
+    raise SystemExit(1)
+'
+    check "the exclusion list reports the failure and keeps its content" json_py '
+if d["exclude"]["result"][0]:
+    print("the failed write was reported as ok: %r" % (d["exclude"]["result"],))
+    raise SystemExit(1)
+if not d["exclude_kept"]:
+    print("the exclusion list was left truncated")
+    raise SystemExit(1)
+'
+    check "the timer drop-in reports the failure and keeps its content" json_py '
+if not d["dropin"]["result"]:
+    print("the failed write reported success: %r" % (d["dropin"],))
+    raise SystemExit(1)
+if not d["dropin_kept"]:
+    print("the timer drop-in was left truncated")
+    raise SystemExit(1)
+'
+    check "the autostart entry reports the failure and keeps its content" json_py '
+if not d["autostart"]["result"]:
+    print("the failed write reported success: %r" % (d["autostart"],))
+    raise SystemExit(1)
+if not d["autostart_kept"]:
+    print("the autostart entry was left truncated")
+    raise SystemExit(1)
+'
+else
+    bad "the write fixture could not be run"
+    sed -n '1,6p' "$DRIVER_ERR" | sed 's/^/        /'
+fi
+
 title "A systemd action that fails"
 : > "$WORK/calls/systemctl-fail"
 if run_driver settings-fail XDG_CONFIG_HOME="$SETTINGS_HOME"; then
@@ -4627,6 +5298,36 @@ if "Traceback" in d["stderr"] or "KeyError" in d["stderr"]:
 '
 fi
 
+title "A LOCAL that is not absolute"
+# LOCAL is written verbatim by setup.sh and by hand, and nothing checked it. When
+# it is relative the delete guard resolves it against the tray process's own
+# working directory, not the directory rclone syncs: isdir, realpath and the
+# prefix check all pass against a tree outside the sync pair, and the
+# confirmation named only the folder. The scenario plants a decoy of the same
+# name in a directory of its own and runs the guard from there.
+if run_driver relative-local TRAY_RELATIVE_LOCAL_HOME="$WORK/relative-home"; then
+    check "the refusal names LOCAL and the value it holds" json_py '
+if "LOCAL" not in d["problem"] or "OneDrive" not in d["problem"]:
+    print("the sentence names neither the key nor the value: %r" % (d["problem"],))
+    raise SystemExit(1)
+'
+    check "main() exits 1 on a relative LOCAL instead of starting" json_py '
+if d["exit_code"] != 1:
+    print("refused=%r exit_code=%r stderr=%r"
+          % (d["refused"], d["exit_code"], d["stderr"][:300]))
+    raise SystemExit(1)
+if "LOCAL" not in d["stderr"] or "OneDrive" not in d["stderr"]:
+    print("stderr: %r" % (d["stderr"],))
+    raise SystemExit(1)
+'
+    check "and the delete guard refuses the wrong root" json_py '
+if d["guard"] is not None:
+    print("the guard returned %r, which is under the process own directory %r"
+          % (d["guard"], d["decoy_path"]))
+    raise SystemExit(1)
+'
+fi
+
 title "A config that is not valid UTF-8"
 # load_config() caught OSError only, so one bad byte raised UnicodeDecodeError out
 # of main() and the tray died with a traceback, in a process whose autostart entry
@@ -4695,6 +5396,50 @@ if d["auto_seen"] != "paused":
     raise SystemExit(1)
 if "Paused until" not in d["pause_label"]:
     print("pause label: %r" % (d["pause_label"],))
+    raise SystemExit(1)
+'
+fi
+# The other ordering, and the one the cache alone could not help with: the
+# is-enabled answer is computed before the pause and delivered after it. It still
+# says "enabled", which reads as automatic sync being on, and the stamp is thrown
+# away by the answer rather than by the cache.
+title "An answer that arrives after the pause"
+if run_driver stale-state; then
+    check "the pause survives an answer computed before it" json_py '
+if not d["parked"]:
+    print("no state query was ever in flight, so nothing was measured")
+    raise SystemExit(1)
+if not d["stamped"]:
+    print("pause_for never wrote the stamp")
+    raise SystemExit(1)
+if not d["stamp_left"]:
+    print("the answer from before the pause deleted the stamp (timer_state=%r)"
+          % (d["timer_state"],))
+    raise SystemExit(1)
+'
+    check "and the menu still says when the pause comes back" json_py '
+if d["auto_seen"] != "paused":
+    print("auto_seen=%r, so the tray stopped believing its own pause"
+          % (d["auto_seen"],))
+    raise SystemExit(1)
+if "Paused until" not in d["pause_label"]:
+    print("pause label: %r" % (d["pause_label"],))
+    raise SystemExit(1)
+'
+fi
+# And the answer must not survive in the cache: the tick after the pause would
+# read it back as the units' current state, for as long as ENABLED_EVERY ticks.
+if run_driver stale-state-cache; then
+    check "a stale answer does not become the cached state" json_py '
+if not d["bumped"]:
+    print("the units never moved during the ask, so nothing was measured")
+    raise SystemExit(1)
+if d["timer"] != "enabled":
+    print("the ask did not produce the stale answer: %r" % (d["timer"],))
+    raise SystemExit(1)
+if d["cached"] is not None:
+    print("the stale answer was cached as %r, so the next tick reuses it"
+          % (d["cached"],))
     raise SystemExit(1)
 '
 fi

@@ -136,16 +136,22 @@ fi
 # ---------------------------------------------------------------- stale locks
 # bisync's lock file records the owner PID. After a suspend/power loss the lock
 # survives; if its owner is gone we can drop it immediately instead of waiting
-# for --max-lock to expire.
-for lck in "$RCLONE_CACHE"/bisync/*.lck; do
-    [ -e "$lck" ] || continue
-    held_pid=$(grep -o '"PID"[[:space:]]*:[[:space:]]*"[0-9]\+"' "$lck" 2>/dev/null |
-        grep -o '[0-9]\+' | head -1)
-    if [ -n "$held_pid" ] && ! kill -0 "$held_pid" 2>/dev/null; then
-        rm -f "$lck"
-        log_line "NOTICE: removed stale lock (owner pid $held_pid is gone): $(basename "$lck")"
-    fi
-done
+# for --max-lock to expire. It is a function because rclone can also die in the
+# middle of a run (the OOM killer, a kill, a crash) and leave the lock behind for
+# every attempt that follows, where only the retry loop can clear it.
+sweep_stale_locks() {
+    local lck held_pid
+    for lck in "$RCLONE_CACHE"/bisync/*.lck; do
+        [ -e "$lck" ] || continue
+        held_pid=$(grep -o '"PID"[[:space:]]*:[[:space:]]*"[0-9]\+"' "$lck" 2>/dev/null |
+            grep -o '[0-9]\+' | head -1)
+        if [ -n "$held_pid" ] && ! kill -0 "$held_pid" 2>/dev/null; then
+            rm -f "$lck"
+            log_line "NOTICE: removed stale lock (owner pid $held_pid is gone): $(basename "$lck")"
+        fi
+    done
+}
+sweep_stale_locks
 
 # ---------------------------------------------------------------- log rotation
 if [ -f "$LOG" ] && [ "$(stat -c%s "$LOG" 2>/dev/null || echo 0)" -gt "$MAX_LOG_BYTES" ]; then
@@ -217,13 +223,28 @@ elif [ "$MAX_DELETE" -gt 0 ] 2>/dev/null; then
     pair_total="${pair_total//[^0-9]/}"
     if [ -n "$pair_total" ] && [ "$pair_total" -gt 0 ]; then
         max_delete_pct=$(( MAX_DELETE * 100 / pair_total ))
+        # rclone takes a whole percentage (measured: --max-delete 0.5 is refused
+        # with "parsing \"0.5\" as int64 failed"), so a count below one percent of
+        # the pair cannot be expressed as one, and flooring to 0% would refuse
+        # every deletion instead. The cap is one percent, which allows MORE files
+        # than the count said: measured on rclone 1.75.1, MAX_DELETE=1 over a
+        # 397-file pair passed --max-delete 1%, three deletions went through with
+        # rc 0, and the run tripped at five ("Safety abort: too many deletes
+        # (>1%, 5 of 397)"). The count is therefore reported for what it really
+        # is, with the number of files the percentage allows, rather than repeated
+        # as if it still held. The number is rounded down, because rclone trips
+        # when the deletions exceed the percentage, so that is the largest count
+        # which cannot trip it.
         [ "$max_delete_pct" -lt 1 ] && max_delete_pct=1
+        max_delete_files=$(( max_delete_pct * pair_total / 100 ))
         if [ "$max_delete_pct" -ge 100 ]; then
             # The configured count is at least the whole pair, so the faithful
             # translation allows everything, including the deletions rclone
             # would have blocked on its own.
             max_delete_pct=100
             log_line "NOTICE: MAX_DELETE=$MAX_DELETE is at least the $pair_total known files, so no delete cap is in effect"
+        elif [ "$max_delete_files" -ne "$MAX_DELETE" ]; then
+            log_line "NOTICE: delete cap MAX_DELETE=$MAX_DELETE of about $pair_total files = --max-delete ${max_delete_pct}%; rclone takes a whole percentage, so this allows about $max_delete_files deletion(s), not $MAX_DELETE"
         else
             log_line "NOTICE: delete cap MAX_DELETE=$MAX_DELETE of about $pair_total files = --max-delete ${max_delete_pct}%"
         fi
@@ -465,6 +486,28 @@ if [ "$resync_wanted" -eq 1 ]; then
     fi
     # The flag is already in ARGS: the option loop added it. This used to add it
     # again, which put "--resync --resync" on rclone's command line.
+    #
+    # Which copy wins when a file differs on both sides. rclone documents
+    # --resync as "equivalent to --resync-mode path1", and Path1 here is the
+    # REMOTE, so the cloud copy replaces the local one: measured on rclone 1.75.1,
+    # a local file edited after the cloud copy was replaced by it, rc 0, no
+    # *.conflict* file, and the local revision gone. A replacement is not a
+    # delete, so the delete cap never looks at it either.
+    #
+    # --resync-mode newer keeps the copy that changed last, which is the honest
+    # reading of "resync" for a file the user edited on this machine. It is not
+    # in every rclone the project supports (the floor is 1.65), so the capability
+    # is asked of rclone itself rather than compared against a version string,
+    # once per run, here, before the retry loop. On an rclone without it the old
+    # behaviour stays and the log says so: a preview of the files cannot be
+    # promised (that would be a --dry-run guess), and losing local edits silently
+    # is the one thing this must not do.
+    if "$RCLONE" bisync --help 2>/dev/null | grep -q -- '--resync-mode'; then
+        ARGS+=(--resync-mode newer)
+        log_line "NOTICE: --resync: this rclone knows --resync-mode, so where a file differs on both sides the newer copy wins"
+    else
+        log_line "WARNING: --resync: this rclone has no --resync-mode, so where a file differs on both sides the cloud copy replaces the local one; upgrade rclone to get the newer copy preferred, or copy the local files aside before this run"
+    fi
     log_line "NOTICE: --resync requested, rebuilding baseline"
 fi
 
@@ -485,10 +528,17 @@ RE_ACCESS='access test failed|check file check failed'
 # and this said "authorisation may have expired" for 90 minutes.
 RE_NETWORK='lookup .*:53|dial tcp|no such host|Temporary failure in name resolution|server misbehaving|couldn.t fetch token|connection reset|connection refused|i/o timeout|: EOF|unexpected EOF|no route to host|network is unreachable|TLS handshake|proxyconnect|context deadline exceeded'
 RE_OLD='unknown flag|flag provided but not defined|unknown shorthand flag'
+# Measured on rclone 1.75.1 against an empty remote: "Empty prior Path1 listing.
+# Cannot sync to an empty directory: <lst>", followed by "Bisync critical error:
+# empty prior Path1 listing: <lst>". The second line is also a "critical error",
+# so before this class existed the generic resync pattern below answered it with
+# "run: onedrive-sync --resync", which rebuilds an equally empty baseline and
+# fails the same way on the next run.
+RE_EMPTY='Empty prior Path1 listing'
 RE_RESYNC='must run --resync|resync required|prior listings|critical error'
 # A genuine refusal from Microsoft.
 RE_AUTH='invalid_grant|401 Unauthorized|403 Forbidden|invalid_token|token expired|AADSTS'
-ALL_HINTS="$RE_LOCK|$RE_MAXDELETE|$RE_ACCESS|$RE_NETWORK|$RE_OLD|$RE_RESYNC|$RE_AUTH"
+ALL_HINTS="$RE_LOCK|$RE_MAXDELETE|$RE_ACCESS|$RE_NETWORK|$RE_OLD|$RE_EMPTY|$RE_RESYNC|$RE_AUTH"
 
 hint_for() {
     local t tag msg newest
@@ -534,6 +584,13 @@ hint_for() {
     elif grep -qiE "$RE_OLD" <<<"$t"; then
         tag=oldrclone
         msg="this rclone does not know the flags in BISYNC_ARGS; --resilient/--recover need rclone >= 1.65 (check: rclone version)"
+    # Before the generic resync patterns: an empty remote is refused with "Bisync
+    # critical error" too, and answering it with --resync rebuilds an equally
+    # empty baseline, so the next run fails identically. That is the advice loop
+    # the README's no-account trial walks into.
+    elif grep -qiE "$RE_EMPTY" <<<"$t"; then
+        tag=emptyremote
+        msg="the remote side is empty, which rclone refuses on an incremental run; put one file on either side, or add one and run onedrive-sync --resync, then the scheduled runs continue"
     elif grep -qiE "$RE_RESYNC" <<<"$t"; then
         tag=resync
         msg="sync baseline is invalid; run: onedrive-sync --resync"
@@ -561,6 +618,11 @@ trap 'rm -f "$ERRS"' EXIT
 PERMANENT_TAGS=" auth access maxdelete oldrclone "
 
 for i in $(seq 1 "$RETRIES"); do
+    # Again at the top of every attempt: an attempt that was killed leaves its
+    # lock behind with a dead owner, and without this the remaining attempts fail
+    # on a lock the sweep above would have removed, spending their RETRY_DELAY to
+    # report the same [lock] failure (the tag is not in PERMANENT_TAGS).
+    sweep_stale_locks
     : >"$ERRS"
     "$RCLONE" "${ARGS[@]}" 2>"$ERRS"
     rc=$?

@@ -3,7 +3,7 @@
 # onedrive-doctor: is this install healthy, and if not, which part is wrong.
 #
 # Why this exists: answering that by hand means running systemctl, journalctl,
-# pgrep and tail and reading four outputs to find the one line that matters.
+# flock and tail and reading four outputs to find the one line that matters.
 # Those are the checks below, one line each so the left edge can be scanned:
 # ok, warn, fail.
 #
@@ -324,9 +324,13 @@ RE_MAXDELETE='too many deletes|excessive deletes|deletion limit'
 RE_ACCESS='access test failed|check file check failed'
 RE_NETWORK='lookup .*:53|dial tcp|no such host|Temporary failure in name resolution|server misbehaving|couldn.t fetch token|connection reset|connection refused|i/o timeout|: EOF|unexpected EOF|no route to host|network is unreachable|TLS handshake|proxyconnect|context deadline exceeded'
 RE_OLD='unknown flag|flag provided but not defined|unknown shorthand flag'
+# The empty-remote refusal, measured on rclone 1.75.1: "Empty prior Path1
+# listing. Cannot sync to an empty directory". It also ends in "Bisync critical
+# error", so it has to be asked about before RE_RESYNC below.
+RE_EMPTY='Empty prior Path1 listing'
 RE_RESYNC='must run --resync|resync required|prior listings|critical error'
 RE_AUTH='invalid_grant|401 Unauthorized|403 Forbidden|invalid_token|token expired|AADSTS'
-ALL_HINTS="$RE_LOCK|$RE_MAXDELETE|$RE_ACCESS|$RE_NETWORK|$RE_OLD|$RE_RESYNC|$RE_AUTH"
+ALL_HINTS="$RE_LOCK|$RE_MAXDELETE|$RE_ACCESS|$RE_NETWORK|$RE_OLD|$RE_EMPTY|$RE_RESYNC|$RE_AUTH"
 
 classify_hint() {  # classify_hint <text> -> a tag, or none
     local t="$1"
@@ -342,6 +346,7 @@ classify_hint() {  # classify_hint <text> -> a tag, or none
     elif grep -qiE "$RE_AUTH" <<<"$t"; then printf 'auth'
     elif grep -qiE "$RE_NETWORK" <<<"$t"; then printf 'network'
     elif grep -qiE "$RE_OLD" <<<"$t"; then printf 'oldrclone'
+    elif grep -qiE "$RE_EMPTY" <<<"$t"; then printf 'emptyremote'
     elif grep -qiE "$RE_RESYNC" <<<"$t"; then printf 'resync'
     else printf 'none'; fi
 }
@@ -397,7 +402,7 @@ else
     case "$tag" in
         auth) report fail log "${log_age}a refused or expired sign-in is in the log${hint_age}; re-authorise from the tray's 'Re-authorise OneDrive' item, or run: rclone config reconnect ${REMOTE%%:*}:." ;;
         network) report warn log "${log_age}the newest failure hint${hint_age} is a network problem, which the next run retries; the sign-in is not what failed${newest_hint:+: $(printf '%s\n' "$newest_hint" | head -1 | cut -c1-160)}" ;;
-        lock|maxdelete|access|resync|oldrclone) report warn log "${log_age}a [$tag] failure is in the log${hint_age}; tail the log for the full message: $LOG" ;;
+        lock|maxdelete|access|resync|oldrclone|emptyremote) report warn log "${log_age}a [$tag] failure is in the log${hint_age}; tail the log for the full message: $LOG" ;;
         *)
             if [ "$cleared" -eq 1 ]; then
                 report ok log "${log_age}every failure hint in it was followed by a sync that worked"
@@ -475,17 +480,58 @@ case "${WATCH,,}" in
         ;;
 esac
 
-# The interpreter and the script, not the bare name: pgrep -f matches the whole
-# command line, so 'onedrive-tray' also matched the log tail this project's own
-# documentation tells a user to run (tail -f .../rclone-onedrive-tray/sync.log) and
-# the fuser recipe in TROUBLESHOOTING.md. The tray is a python3 script, and
-# docs/UPDATING.md already spells the pattern this way.
-tray_pid="$(timeout 5 pgrep -f 'python3 .*/onedrive-tray' 2>/dev/null | head -1 || true)"
+# The tray is found by the fact it publishes about itself, not by scanning the
+# machine's process list. It takes an exclusive flock on its own lock file for
+# its whole life (bin/onedrive-tray, acquire_lock) in this install's runtime
+# directory, so that lock answers "is a tray running for THIS install", and
+# nothing else has to be guessed.
+#
+# The probe this replaces was `timeout 5 pgrep -f` over the
+# interpreter-and-script pattern 'python3 .*/onedrive-tray': the `timeout`
+# process's own command line holds that pattern, so the probe
+# matched itself, and pgrep is machine-wide, so another install's tray matched
+# too. Measured in a sandbox with no tray at all, the doctor printed
+# "ok tray running (pid N)", with two different, already-dead pids on
+# consecutive runs, and the two "no tray process" branches below it were dead
+# code. flock -n on a held lock fails, which is the whole test.
+tray_lock_dir="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}"
+tray_lock="$tray_lock_dir/rclone-onedrive-tray.lock"
+tray_running=0; tray_unknown=0; tray_pid=""
+if [ -e "$tray_lock" ]; then
+    if have flock; then
+        if exec 8<"$tray_lock" 2>/dev/null; then
+            flock -n 8 2>/dev/null || tray_running=1
+            exec 8<&-
+        else
+            tray_unknown=1
+        fi
+    else
+        # The flock check above already failed the run; saying "no tray" here
+        # would be a second, invented answer.
+        tray_unknown=1
+    fi
+fi
+# A pid for the line, read from the kernel: /proc/locks names the holder of a
+# FLOCK by pid, and for this lock that is the tray. When it cannot be read the
+# word is "unknown" rather than a guess.
+if [ "$tray_running" -eq 1 ]; then
+    tray_inode="$(stat -c %i -- "$tray_lock" 2>/dev/null || true)"
+    if [ -n "$tray_inode" ] && [ -r /proc/locks ]; then
+        # The device field is major:minor:inode in hex, and a tmpfs minor such as
+        # "2e" is why this is not [0-9]+: on /tmp the all-digits form matched
+        # nothing and the pid came out unknown.
+        tray_pid="$(grep -E "FLOCK[[:space:]]+ADVISORY[[:space:]]+WRITE[[:space:]]+[0-9]+[[:space:]]+[0-9a-fA-F]+:[0-9a-fA-F]+:$tray_inode[[:space:]]" \
+            /proc/locks 2>/dev/null | head -1 | tr -s ' ' | cut -d' ' -f5 || true)"
+    fi
+    case "$tray_pid" in ''|*[!0-9]*) tray_pid="unknown" ;; esac
+fi
 icons_dir="$DATA_DIR/icons"
-if [ -n "$tray_pid" ] && [ -d "$icons_dir" ]; then
+if [ "$tray_running" -eq 1 ] && [ -d "$icons_dir" ]; then
     report ok tray "running (pid $tray_pid), icons in $icons_dir"
-elif [ -n "$tray_pid" ]; then
+elif [ "$tray_running" -eq 1 ]; then
     report warn tray "running (pid $tray_pid) but $icons_dir is missing; the tray draws the icons there at start, so check for a cairo or permission problem"
+elif [ "$tray_unknown" -eq 1 ]; then
+    report warn tray "$tray_lock exists but could not be tested with flock, so whether a tray is running could not be told"
 elif [ -d "$icons_dir" ]; then
     report warn tray "no tray process, but $icons_dir exists; that is normal over SSH or without a desktop session"
 else

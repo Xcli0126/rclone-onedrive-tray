@@ -1,8 +1,10 @@
 # rclone-onedrive-tray configuration
 # ---------------------------------
 # Shell-style KEY="value" assignments. Read by both `onedrive-sync` (bash, via
-# `.`) and `onedrive-tray` (python, via a tiny parser). Variable expansion such
-# as $HOME works in both.
+# `.`) and `onedrive-tray` (python, via a tiny parser). A plain $VAR is expanded
+# by both, and the three path keys further down use the shell's
+# ${VAR:-fallback} form, so a machine with the XDG directories redirected
+# resolves them the way the scripts do.
 #
 # After changing REMOTE, LOCAL, FILTERS_FILE or BISYNC_ARGS you must rebuild the
 # sync baseline once:   onedrive-sync --resync
@@ -28,12 +30,15 @@ INTERVAL_MIN="5"
 # wiped-out folder propagating to the cloud.
 #
 # The number is a count of files, and it is translated into what rclone actually
-# reads, a percentage of the pair: 100 of a 750-file folder becomes
-# --max-delete 13%. Two consequences are worth knowing.
+# reads, a whole percentage of the pair: 100 of a 750-file folder becomes
+# --max-delete 13%. Three consequences are worth knowing.
 #
 # 0 refuses every deletion. A number at least as large as the whole folder means
 # no cap at all, and the log says so, because rclone's own default of 50% only
-# applies when the flag is absent. Raise this if you legitimately delete large
+# applies when the flag is absent. And a count below one percent of the pair
+# cannot be expressed as a percentage: MAX_DELETE=1 over a 397-file pair becomes
+# --max-delete 1%, which allows about 3 deletions, and the log names the number
+# the percentage really allows. Raise this if you legitimately delete large
 # folders; docs/TROUBLESHOOTING.md covers the translation and how to recover from
 # a trip.
 MAX_DELETE="100"
@@ -99,7 +104,11 @@ BISYNC_ARGS="--resilient --recover --max-lock 2m --conflict-resolve none --confl
 BW_LIMIT=""
 
 # rclone filter rules, one per line (rclone --filters-file syntax).
-FILTERS_FILE="$HOME/.config/rclone-onedrive-tray/filters.txt"
+#
+# The three path keys below follow the XDG base directories, the same way every
+# script resolves them, so a machine with XDG_CONFIG_HOME or XDG_CACHE_HOME
+# redirected (the README's trial does both) finds the files this install wrote.
+FILTERS_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/rclone-onedrive-tray/filters.txt"
 
 # Names of top-level folders to leave off this machine, one per line, relative to
 # REMOTE. This is what the tray's "Folders to sync" menu edits and what setup.sh
@@ -110,11 +119,11 @@ FILTERS_FILE="$HOME/.config/rclone-onedrive-tray/filters.txt"
 # lost and nothing is freed either. The tray offers to delete the local copy
 # separately when you untick one. Toggling needs no --resync. Empty or missing
 # means sync all of it.
-EXCLUDE_FOLDERS_FILE="$HOME/.config/rclone-onedrive-tray/exclude-folders.txt"
+EXCLUDE_FOLDERS_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/rclone-onedrive-tray/exclude-folders.txt"
 
 # ------------------------------------------------------------------ tray
 # Where the sync log is written. Also rotated by onedrive-sync at 5 MB.
-LOG="$HOME/.cache/rclone-onedrive-tray/sync.log"
+LOG="${XDG_CACHE_HOME:-$HOME/.cache}/rclone-onedrive-tray/sync.log"
 
 # Optional: an application the tray can launch from its menu, e.g. "obsidian".
 # Leave empty to hide the menu entry.

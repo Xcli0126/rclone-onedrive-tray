@@ -45,9 +45,17 @@ UNIT_DIR="$XDG_CONFIG_HOME/systemd/user"
 CALLS="$WORK/rclone-calls"
 SYSTEMCTL_CALLS="$WORK/systemctl-calls"
 
-# The one thing this suite must not do for real is talk to a remote.
+# The one thing this suite must not do for real is talk to a remote. bisync
+# --help is the wrapper's one-off question about --resync-mode, and this stub
+# answers it the way the rclone version it reports would: the flag exists. It is
+# answered here rather than recorded, because the recorded lines are the syncs
+# and the cases below count them.
 cat > "$WORK/stubs/rclone" <<EOF
 #!/bin/bash
+if [ "\$1" = bisync ] && [ "\$2" = --help ]; then
+    printf '%s\\n' '      --resync-mode string   During resync, prefer the version that is: path1, path2, newer, older, larger, smaller'
+    exit 0
+fi
 case "\$1" in
     version)     echo "rclone v1.75.1" ;;
     listremotes) echo "probefake:" ;;
@@ -283,6 +291,77 @@ if grep -qxF '# no exclusions' "$KEEP_FILTERS" && [ ! -s "$KEEP_EXCLUDES" ]; the
     ok "and --filters none replaced the filters while the empty list was cleared"
 else
     bad "the flags did not replace the files: filters='$(head -1 "$KEEP_FILTERS")' excludes=$(wc -c < "$KEEP_EXCLUDES") bytes"
+fi
+
+# ------------------------------------------------- the settings a re-run keeps
+# INTERVAL_MIN and WATCH were written out of the template unconditionally, so the
+# documented re-run that passes only --remote/--local/--unit-name reset a changed
+# interval to 5 and turned realtime sync back on, while every key beside them went
+# through carry(). Measured by a reviewer: INTERVAL_MIN="15" and WATCH="0" became
+# "5" and "1". The flags still own both keys when they are given.
+title "the interval and realtime settings a re-run is not asked about"
+CARRY_HOME="$WORK/carry-home"
+CARRY_CFG="$CARRY_HOME/.config/rclone-onedrive-tray/config"
+rm -rf "$CARRY_HOME"; mkdir -p "$CARRY_HOME"
+wizard_run() {  # wizard_run [extra setup.sh arguments...]
+    env HOME="$CARRY_HOME" XDG_CONFIG_HOME="$CARRY_HOME/.config" \
+        XDG_CACHE_HOME="$CARRY_HOME/.cache" \
+    bash "$SRC_DIR/setup.sh" --remote "$REMOTE" --local "$CARRY_HOME/OneDrive" \
+        --filters none --unit-name zz-carry-probe --yes --no-install "$@"
+}
+run "the first run writes the interval and realtime the flags asked for" 0 "Wrote" \
+    wizard_run --interval 9 --watch yes
+check "and the interval is the flag's value" grep -qxF 'INTERVAL_MIN="9"' "$CARRY_CFG"
+check "and realtime sync is on" grep -qxF 'WATCH="1"' "$CARRY_CFG"
+# The settings window, or an editor, changes them between runs.
+sed -i 's/^INTERVAL_MIN=.*/INTERVAL_MIN="15"/; s/^WATCH=.*/WATCH="0"/' "$CARRY_CFG"
+run "a re-run that passes only remote, local and unit-name finishes" 0 "Wrote" \
+    wizard_run
+check "and the interval the file had is still there" \
+    grep -qxF 'INTERVAL_MIN="15"' "$CARRY_CFG"
+check "and realtime sync is still off" grep -qxF 'WATCH="0"' "$CARRY_CFG"
+# The other half: the flags still own both keys when they are passed.
+run "a re-run that does pass both flags changes them" 0 "Wrote" \
+    wizard_run --interval 11 --watch yes
+check "and the interval follows the flag again" grep -qxF 'INTERVAL_MIN="11"' "$CARRY_CFG"
+check "and so does realtime sync" grep -qxF 'WATCH="1"' "$CARRY_CFG"
+
+# ------------------------------------------------- the shipped config and XDG
+# install.sh copies config/config.example verbatim when no config exists, and the
+# example hardcoded $HOME/.config and $HOME/.cache while every script resolves
+# those through ${XDG_CONFIG_HOME:-$HOME/.config} and
+# ${XDG_CACHE_HOME:-$HOME/.cache}. On a machine with the XDG directories
+# redirected (the README's no-account trial sets both) the installed config then
+# pointed at paths nothing created: the filters were silently not applied, and the
+# doctor failed the paths check on a file that could never appear.
+title "the shipped config follows the XDG directories"
+XDG5="$WORK/xdg-example"
+xdg_example_paths() {  # the three path keys as bash resolves them from the example
+    "$@" bash -c 'set -u; . "$1"; printf "%s\n%s\n%s\n" "$FILTERS_FILE" "$EXCLUDE_FOLDERS_FILE" "$LOG"' \
+        _ "$SRC_DIR/config/config.example"
+}
+XDG5_GOT="$(xdg_example_paths env HOME="$XDG5/home" XDG_CONFIG_HOME="$XDG5/config" \
+    XDG_CACHE_HOME="$XDG5/cache")"
+XDG5_WANT="$XDG5/config/rclone-onedrive-tray/filters.txt
+$XDG5/config/rclone-onedrive-tray/exclude-folders.txt
+$XDG5/cache/rclone-onedrive-tray/sync.log"
+if [ "$XDG5_GOT" = "$XDG5_WANT" ]; then
+    ok "the three path keys resolve inside the redirected XDG directories"
+else
+    bad "the example's paths do not follow the reconfigured XDG directories"
+    printf '        want: %s\n        got:  %s\n' "$XDG5_WANT" "$XDG5_GOT"
+fi
+# And with the XDG variables unset, the usual state of a desktop session, the
+# same three lines fall back to the paths the file documents.
+XDG5_GOT="$(xdg_example_paths env -u XDG_CONFIG_HOME -u XDG_CACHE_HOME HOME="$XDG5/home")"
+XDG5_WANT="$XDG5/home/.config/rclone-onedrive-tray/filters.txt
+$XDG5/home/.config/rclone-onedrive-tray/exclude-folders.txt
+$XDG5/home/.cache/rclone-onedrive-tray/sync.log"
+if [ "$XDG5_GOT" = "$XDG5_WANT" ]; then
+    ok "and with XDG unset they fall back to \$HOME/.config and \$HOME/.cache"
+else
+    bad "the fallback paths are not the documented ones"
+    printf '        want: %s\n        got:  %s\n' "$XDG5_WANT" "$XDG5_GOT"
 fi
 
 # The first-sync prompt is written "(Y/n)" and was tested with = "y", so the
@@ -792,8 +871,18 @@ slug="$(printf '%s' "$CAP/local" | sed -e 's|^/||' -e 's|[/: ]|_|g')"
       printf -- '-        1 - - 2026-01-01T00:00:00.000000000+0000 "f%s.txt"\n' "$i"
   done
 } > "$CAP/cache/rclone/bisync/x..$slug.path1.lst"
+# The stub is also asked one question that is not a sync: the wrapper runs
+# `bisync --help` once per --resync run to learn whether this rclone knows
+# --resync-mode. That call is answered here, recorded in CAP_ARGS.help rather
+# than in the argv file, and only when a case sets CAP_BISYNC_HELP, so every
+# other row's recorded command line is exactly what it was.
 cat > "$CAP/rclone" <<'STUB'
 #!/bin/bash
+if [ "$1" = bisync ] && [ "$2" = --help ]; then
+    [ -n "${CAP_ARGS:-}" ] && printf 'help %s\n' "$*" >> "$CAP_ARGS.help"
+    [ -n "${CAP_BISYNC_HELP:-}" ] && printf '%s\n' "$CAP_BISYNC_HELP"
+    exit 0
+fi
 printf '%s\n' "$*" >> "$CAP_ARGS"
 [ -n "${CAP_STDERR:-}" ] && printf '%s\n' "$CAP_STDERR" >&2
 exit "${CAP_RC:-0}"
@@ -873,6 +962,17 @@ cap_case() {  # cap_case <value> -> prints the --max-delete the stub recorded
 check "MAX_DELETE=0 refuses every deletion" test "$(cap_case 0)" = 0
 check "MAX_DELETE=100 over 200 files is 50 percent" test "$(cap_case 100)" = 50
 check "a count the size of the folder becomes 100" test "$(cap_case 200)" = 100
+# rclone takes a whole percentage (measured: --max-delete 0.5 is refused with
+# "parsing \"0.5\" as int64 failed"), so a count below one percent of the pair has
+# no exact translation: MAX_DELETE=1 over 200 files becomes --max-delete 1%, which
+# allows two deletions. Measured on rclone 1.75.1 with a 397-file pair,
+# --max-delete 1% let three deletions through with rc 0 and the run tripped at
+# five ("Safety abort: too many deletes (>1%, 5 of 397)"). The count is therefore
+# translated as before and the log says what the percentage really allows.
+check "MAX_DELETE=1 over 200 files still passes the smallest percentage" \
+    test "$(cap_case 1)" = 1
+check "and the log says how many deletions that percentage really allows" \
+    grep -qF 'allows about 2 deletion(s), not 1' "$CAP/sync.log"
 if [ -z "$(cap_case -1)" ]; then
     ok "an unusable count leaves rclone's own default in place"
 else
@@ -1492,6 +1592,168 @@ else
     bad "--force --resync: $resync_count --resync on the command line, NOTICE $(grep -c 'NOTICE: --resync requested' "$CAP/sync.log" || true)"
 fi
 
+# ------------------------------------------------- --resync: which copy wins
+# rclone documents --resync as "equivalent to --resync-mode path1", and the
+# wrapper passes the remote first, so Path1 is the cloud: where a file differs on
+# both sides the cloud copy replaces the local one. Measured on rclone 1.75.1, a
+# local file edited hours after the cloud copy was replaced by the cloud copy,
+# rc 0, no *.conflict* file, and the local revision gone. There is no conflict
+# copy and the delete cap does not apply, because a replacement is not a delete.
+# rclone 1.75.1 has --resync-mode newer, which keeps the copy that changed last;
+# the project's floor is 1.65, where the flag may be absent, so the wrapper asks
+# rclone itself instead of comparing version strings, once per run.
+title "--resync: which copy wins when both sides changed"
+CAP_RESYNC_HELP='      --resync-mode string   During resync, prefer the version that is: path1, path2, newer, older, larger, smaller (default "none")'
+
+# (a) the rclone that knows the flag: the newer copy is asked for.
+cap_config
+: > "$WORK/cap-args"; : > "$WORK/cap-args.help"; : > "$CAP/sync.log"
+cap_env CAP_BISYNC_HELP="$CAP_RESYNC_HELP" \
+    "$HOME/.local/bin/onedrive-sync" --resync >/dev/null 2>&1 || true
+check "an rclone that knows --resync-mode is asked for the newer copy" \
+    grep -qF -- '--resync-mode newer' "$WORK/cap-args"
+check "and the run says which copy wins on this rclone" \
+    grep -qF 'the newer copy wins' "$CAP/sync.log"
+
+# (b) the rclone that does not: path1 keeps winning, and the run has to say so
+# before it starts rather than silently replacing local edits.
+cap_config
+: > "$WORK/cap-args"; : > "$WORK/cap-args.help"; : > "$CAP/sync.log"
+cap_env "$HOME/.local/bin/onedrive-sync" --resync >/dev/null 2>&1 || true
+if grep -qF -- '--resync-mode' "$WORK/cap-args"; then
+    bad "an rclone without --resync-mode was handed the flag anyway"
+else
+    ok "an rclone without --resync-mode is not handed the flag"
+fi
+check "and the run warns that the cloud copy replaces the local one" \
+    grep -qF 'the cloud copy replaces the local one' "$CAP/sync.log"
+check "and says what to do about it" \
+    grep -qF 'copy the local files aside' "$CAP/sync.log"
+
+# (c) a plain run is untouched: no flag, and not even the question, so a
+# scheduled run pays nothing for something only --resync cares about.
+cap_config
+: > "$WORK/cap-args"; : > "$WORK/cap-args.help"; : > "$CAP/sync.log"
+cap_env CAP_BISYNC_HELP="$CAP_RESYNC_HELP" \
+    "$HOME/.local/bin/onedrive-sync" >/dev/null 2>&1 || true
+if grep -qF -- '--resync-mode' "$WORK/cap-args"; then
+    bad "a plain run was handed --resync-mode"
+else
+    ok "a plain run passes no --resync-mode"
+fi
+if [ -s "$WORK/cap-args.help" ]; then
+    bad "a plain run asked rclone whether it knows --resync-mode"
+else
+    ok "and it does not even ask rclone the question"
+fi
+check "and the plain run's command line is the one it always was" \
+    test "$(cat "$WORK/cap-args")" = "$(argv_line "$CAP/local" '--max-delete 50')"
+cap_config
+
+# ---------------------------------------- the stale lock the retry loop hid
+# rclone's bisync lock records the owner's PID. When rclone dies mid-run (the OOM
+# killer, a kill, a crash) the lock survives with a dead PID, and the sweep that
+# drops such a lock ran once, before the retry loop: every remaining attempt
+# failed on a lock the sweep's own test (kill -0) would have removed. Measured
+# with rclone 1.75.1: attempt 1 SIGKILLed four seconds in, then "attempt 2/3
+# failed (rc=1) [lock] a sync lock is still held" and the same for attempt 3,
+# wrapper exit 1. The lock tag is not in PERMANENT_TAGS, so the doomed attempts
+# also spent their RETRY_DELAY.
+title "a lock left by a killed run is swept before the next attempt"
+STALE_FX="$WORK/stale-lock"
+rm -rf "$STALE_FX"
+mkdir -p "$STALE_FX/cfg/rclone-onedrive-tray" "$STALE_FX/cache/rclone/bisync" \
+         "$STALE_FX/local" "$STALE_FX/tmp"
+cat > "$STALE_FX/cfg/rclone-onedrive-tray/config" <<EOF
+REMOTE="lockfake:Vault"
+LOCAL="$STALE_FX/local"
+LOG="$STALE_FX/sync.log"
+RCLONE="rclone"
+MAX_DELETE="0"
+RETRIES="3"
+RETRY_DELAY="1"
+EOF
+# The PID the dead run's lock names. The case checks that it is really gone
+# before it relies on it.
+DEAD_PID=999999
+# The stub stands in for an rclone that is killed by its first attempt: it leaves
+# a lock naming a dead PID and fails, and every later call fails for as long as
+# that lock is there, which is what real rclone does with a lock it cannot use.
+cat > "$STALE_FX/rclone" <<EOF
+#!/bin/bash
+n="\$(cat "$STALE_FX/calls" 2>/dev/null || echo 0)"
+n=\$((n + 1))
+printf '%s\n' "\$n" > "$STALE_FX/calls"
+printf '%s\n' "\$*" >> "$STALE_FX/argv"
+if [ "\$n" -eq 1 ]; then
+    printf '{"PID": "$DEAD_PID"}\n' > "$STALE_FX/cache/rclone/bisync/killed-run.lck"
+    printf 'prior lock file found: the run that wrote it is gone\n' >&2
+    exit 1
+fi
+if [ -e "$STALE_FX/cache/rclone/bisync/killed-run.lck" ]; then
+    printf 'prior lock file found\n' >&2
+    exit 1
+fi
+exit 0
+EOF
+chmod +x "$STALE_FX/rclone"
+
+stale_env() {
+    env PATH="$STALE_FX:$PATH" XDG_CONFIG_HOME="$STALE_FX/cfg" \
+        XDG_CACHE_HOME="$STALE_FX/cache" TMPDIR="$STALE_FX/tmp" "$@"
+}
+
+if kill -0 "$DEAD_PID" 2>/dev/null; then
+    skip "pid $DEAD_PID is in use here, so a lock naming a dead owner cannot be built"
+else
+    : > "$STALE_FX/calls"; : > "$STALE_FX/argv"; rm -f "$STALE_FX/sync.log"
+    STALE_OUT="$(stale_env "$HOME/.local/bin/onedrive-sync" 2>&1)"; STALE_RC=$?
+    # rc 0 is what tells "the sweep before attempt 2 cleared it" apart from
+    # "attempt 2 failed for some other reason": any other failure is still a
+    # non-zero run, and the two checks below then say which attempt failed.
+    if [ "$STALE_RC" -eq 0 ] && [ "$(cat "$STALE_FX/calls")" -eq 2 ]; then
+        ok "the run succeeds once the lock its first attempt left behind is swept"
+    else
+        bad "the run ended rc=$STALE_RC after $(cat "$STALE_FX/calls" 2>/dev/null || echo 0) attempt(s)"
+        printf '%s\n' "$STALE_OUT" | head -3 | sed 's/^/        /'
+    fi
+    check "and the sweep before attempt 2 is what removed it" \
+        grep -qF "removed stale lock (owner pid $DEAD_PID is gone)" "$STALE_FX/sync.log"
+    check "and the first attempt's failure really was the lock" \
+        grep -qF "[lock]" "$STALE_FX/sync.log"
+    if grep -qF "ERROR: attempt 2" "$STALE_FX/sync.log"; then
+        bad "attempt 2 failed as well, so the lock was still there"
+    else
+        ok "and attempt 2 was not a failure at all"
+    fi
+fi
+
+# ------------------------------------------------------- an empty remote side
+# Measured on rclone 1.75.1 against an empty remote, an incremental run ends:
+#   ERROR : Empty prior Path1 listing. Cannot sync to an empty directory: <lst>
+#   ERROR : Bisync critical error: empty prior Path1 listing: <lst>
+# and the second line matches the generic "critical error" class, so the wrapper
+# answered "sync baseline is invalid; run: onedrive-sync --resync". A resync
+# rebuilds an equally empty baseline, so the next run fails identically and the
+# user is in a loop being told to repeat the thing that does not fix it. The
+# README's no-account trial creates exactly this pair.
+title "an empty remote side is its own failure"
+EMPTY_SIDE_ERR='2026/10/04 08:05:45 ERROR : Empty prior Path1 listing. Cannot sync to an empty directory: /home/u/.cache/rclone/bisync/probefake_Vault..home_u_OneDrive.path1.lst
+2026/10/04 08:05:45 ERROR : Bisync critical error: empty prior Path1 listing: /home/u/.cache/rclone/bisync/probefake_Vault..home_u_OneDrive.path1.lst'
+run "the empty side is named as its own class" 1 "[emptyremote]" \
+    cap_env CAP_STDERR="$EMPTY_SIDE_ERR" CAP_RC=1 "$HOME/.local/bin/onedrive-sync"
+run "and the message says the remote side is the empty one" 1 \
+    "the remote side is empty" \
+    cap_env CAP_STDERR="$EMPTY_SIDE_ERR" CAP_RC=1 "$HOME/.local/bin/onedrive-sync"
+EMPTY_SIDE_OUT="$(cap_env CAP_STDERR="$EMPTY_SIDE_ERR" CAP_RC=1 \
+    "$HOME/.local/bin/onedrive-sync" 2>&1)"
+if grep -qF 'sync baseline is invalid' <<<"$EMPTY_SIDE_OUT"; then
+    bad "an empty remote side still sends the user to a plain --resync"
+else
+    ok "and it does not send the user to a plain --resync"
+fi
+cap_config
+
 # ---------------------------------------------------------------- the doctor
 # A sync that breaks is first taken to onedrive-doctor, so the diagnostic gets
 # its own sandbox here: a fixture tree, stubs for rclone and systemctl, and a
@@ -1509,8 +1771,11 @@ DOC_TIMER_ACTIVE="active"
 mkdir -p "$DOC_STUBS" "$DOC_TOOLS" "$DOC_NOFLOCK"
 
 # Every tool the doctor may call, symlinked so a case can cut one of them out.
-# bash is in the list because the shebang looks it up through this PATH.
-for tool in bash sed grep head cut tail date stat mktemp tr timeout flock pgrep \
+# bash is in the list because the shebang looks it up through this PATH. pgrep is
+# deliberately absent: the tray is found by its own lock, not by scanning the
+# machine's process list, and a doctor that reached for pgrep again would fail
+# these cases on a PATH that cannot answer it.
+for tool in bash sed grep head cut tail date stat mktemp tr timeout flock \
             rm dirname basename sort cat; do
     tool_path="$(command -v "$tool" 2>/dev/null || true)"
     [ -n "$tool_path" ] || continue
@@ -1551,32 +1816,6 @@ esac
 exit 0
 STUB
 chmod +x "$DOC_STUBS/rclone" "$DOC_STUBS/systemctl"
-# The tray check asks pgrep for onedrive-tray, and no fixture ever had one, so
-# its "running (pid ...)" line was never printed. This stub answers only when a
-# case sets DOC_TRAY_PID, which leaves every other fixture's tray verdict alone.
-#
-# It matches the way pgrep does, with an unanchored ERE over the command line,
-# because the pattern is what decides whether a log tail whose path holds the
-# name is read as a tray. DOC_TRAY_CMDS is a newline-separated list of command
-# lines the case wants to exist; each match is answered with a pid counting up
-# from 8001, so a case can tell which of them the doctor settled on.
-cat > "$DOC_STUBS/pgrep" <<'STUB'
-#!/bin/bash
-pattern=""
-for arg in "$@"; do pattern="$arg"; done
-if [ -n "${DOC_TRAY_CMDS:-}" ]; then
-    pid=8000
-    while IFS= read -r line; do
-        [ -n "$line" ] || continue
-        pid=$((pid + 1))
-        if [[ "$line" =~ $pattern ]]; then printf '%s\n' "$pid"; fi
-    done <<<"$DOC_TRAY_CMDS"
-    exit 0
-fi
-[ -n "${DOC_TRAY_PID:-}" ] && printf '%s\n' "$DOC_TRAY_PID"
-exit 0
-STUB
-chmod +x "$DOC_STUBS/pgrep"
 DOCTOR_TMP="$WORK/doctor-tmp"
 mkdir -p "$DOCTOR_TMP"
 
@@ -1589,10 +1828,10 @@ doc_fixture() {
     local d="$DOC/$1" extra="${2:-}"
     mkdir -p "$d/home" "$d/cfg/rclone-onedrive-tray" "$d/cache/rclone/bisync" \
              "$d/cache/rclone-onedrive-tray" "$d/data/rclone-onedrive-tray/icons" \
-             "$d/local" "$d/bin" "$d/tmp"
+             "$d/local" "$d/bin" "$d/tmp" "$d/run"
     printf '*.tmp\n' > "$d/cfg/rclone-onedrive-tray/filters.txt"
-    cp "$DOC_STUBS/rclone" "$DOC_STUBS/systemctl" "$DOC_STUBS/pgrep" "$d/bin/"
-    chmod +x "$d/bin/rclone" "$d/bin/systemctl" "$d/bin/pgrep"
+    cp "$DOC_STUBS/rclone" "$DOC_STUBS/systemctl" "$d/bin/"
+    chmod +x "$d/bin/rclone" "$d/bin/systemctl"
     cat > "$d/cfg/rclone-onedrive-tray/config" <<EOF
 REMOTE="docfake:Vault"
 LOCAL="$d/local"
@@ -1609,19 +1848,19 @@ EOF
 }
 
 # doc_run <fixture> [doctor arguments...] -- the TMPDIR is inside the fixture so
-# the read-only case below would notice a temporary file left behind.
+# the read-only case below would notice a temporary file left behind, and so is
+# XDG_RUNTIME_DIR, which is where the tray's own lock lives: the real one from the
+# session this suite runs in must not be part of the experiment.
 doc_run() {
     local d="$1"; shift
     local path="$d/bin:$DOC_TOOLS"
     [ -n "$DOC_PATH_OVERRIDE" ] && path="$DOC_PATH_OVERRIDE"
     env HOME="$d/home" XDG_CONFIG_HOME="$d/cfg" XDG_CACHE_HOME="$d/cache" \
-        XDG_DATA_HOME="$d/data" TMPDIR="$d/tmp" PATH="$path" \
+        XDG_DATA_HOME="$d/data" XDG_RUNTIME_DIR="$d/run" TMPDIR="$d/tmp" PATH="$path" \
         DOC_TIMER_ENABLED="$DOC_TIMER_ENABLED" DOC_TIMER_ACTIVE="$DOC_TIMER_ACTIVE" \
         DOC_WATCH_ENABLED="${DOC_WATCH_ENABLED:-disabled}" \
         DOC_WATCH_ACTIVE="${DOC_WATCH_ACTIVE:-inactive}" \
         DOC_LSD_RC="${DOC_LSD_RC:-0}" DOC_LSD_ERR="${DOC_LSD_ERR:-}" \
-        DOC_TRAY_PID="${DOC_TRAY_PID:-}" \
-        DOC_TRAY_CMDS="${DOC_TRAY_CMDS:-}" \
         "$DOCTOR_BIN" "$@"
 }
 
@@ -1648,31 +1887,89 @@ run "a clean config: the ok line names the file and both keys" 0 \
     "$DOC_FX/cfg/rclone-onedrive-tray/config sets REMOTE and LOCAL" \
     doc_run "$DOC_FX" --offline
 
-# The tray check prints its one distinctive line only when pgrep finds a tray,
-# and no fixture ever had one, so the line could be replaced with anything. The
-# stub pgrep answers for this case alone, through DOC_TRAY_PID.
-doc_fixture tray-running
-DOC_TRAY_PID=8123
-run "a running tray: the ok line names the pid and the icon directory" 0 \
-    "running (pid 8123), icons in $DOC_FX/data/rclone-onedrive-tray/icons" \
-    doc_run "$DOC_FX" --offline
-DOC_TRAY_PID=""
+# The tray check has to name a tray for THIS install. The old probe was
+# `timeout 5 pgrep -f 'python3 .*/onedrive-tray'`: the `timeout` process's own
+# command line holds that pattern, so the probe matched itself, and pgrep is
+# machine-wide, so another install's tray matched as well. Measured in a sandbox
+# with no tray at all, the doctor printed "ok tray running (pid N)" with two
+# different, already-dead pids on consecutive runs, and the two "no tray process"
+# branches below were unreachable. The fact the tray publishes itself is an
+# exclusive flock on its lock file, held for its whole life, under this install's
+# own XDG_RUNTIME_DIR (bin/onedrive-tray, acquire_lock), so that lock is the
+# probe and pgrep is not needed at all.
+#
+# tray_lock_holder <fixture> -- hold that lock the way the tray does, print the
+# holder's pid, and leave it running; the caller kills it. --close keeps the
+# lock's file description out of the `sleep` child, so killing the holder really
+# releases the lock, which is what the tray's own death does. The output is
+# redirected because a background job inside a command substitution keeps the
+# substitution's pipe open until it exits.
+tray_lock_holder() {
+    flock -o -x "$1/run/rclone-onedrive-tray.lock" sleep 30 >/dev/null 2>&1 &
+    printf '%s' "$!"
+}
+# tray_lock_release <pid> -- stop a holder and wait for the lock to go with it.
+tray_lock_release() {
+    kill "$1" 2>/dev/null
+    wait "$1" 2>/dev/null
+}
 
-# The tray check reads the whole command line, so the pattern decides whether the
-# log tail this project's own documentation tells a user to run is mistaken for a
-# tray. Both command lines are offered to the stub at once: only the second is a
-# tray, and the pid it answers for is what says which one was found.
+doc_fixture tray-running
+TRAY_HOLDER="$(tray_lock_holder "$DOC_FX")"
+sleep 0.3
+run "a running tray: the ok line names the pid and the icon directory" 0 \
+    "running (pid $TRAY_HOLDER), icons in $DOC_FX/data/rclone-onedrive-tray/icons" \
+    doc_run "$DOC_FX" --offline
+# The icon directory is the other half of the running branch.
+rm -rf "$DOC_FX/data/rclone-onedrive-tray/icons"
+run "a running tray with no icon directory is a warning that names it" 0 \
+    "running (pid $TRAY_HOLDER) but $DOC_FX/data/rclone-onedrive-tray/icons is missing" \
+    doc_run "$DOC_FX" --offline
+tray_lock_release "$TRAY_HOLDER"
+
+# With no lock there is no tray for this install, in both of the branches the
+# always-matching probe made dead code: with and without the icon directory.
+doc_fixture tray-absent-with-icons
+run "no lock with the icon directory there: no tray process, and why that is normal" 0 \
+    "no tray process, but $DOC_FX/data/rclone-onedrive-tray/icons exists" \
+    doc_run "$DOC_FX" --offline
+doc_fixture tray-absent
+rm -rf "$DOC_FX/data/rclone-onedrive-tray/icons"
+run "no lock and no icon directory: no tray process, and where to start it" 0 \
+    "no tray process and no $DOC_FX/data/rclone-onedrive-tray/icons" \
+    doc_run "$DOC_FX" --offline
+
+# The lock is the question and flock is what asks it, so a machine without flock
+# must not be told there is no tray: the answer is that it could not be told.
+doc_fixture tray-lock-untestable
+: > "$DOC_FX/run/rclone-onedrive-tray.lock"
+DOC_PATH_OVERRIDE="$DOC_FX/bin:$DOC_NOFLOCK"
+run "a lock flock cannot test is not reported as no tray" 1 \
+    "could not be told" doc_run "$DOC_FX" --offline
+DOC_PATH_OVERRIDE=""
+
+# The two cases below were written against the machine-wide scan, and they still
+# hold for the lock: what a process's command line says no longer decides
+# anything. The second one runs a real process that looks like another install's
+# tray, so a doctor that went back to scanning would report it.
 title "the tray probe finds a tray, not its name in any command line"
 doc_fixture tray-or-tail
-DOC_TRAY_CMDS='tail -f /home/u/.cache/rclone-onedrive-tray/sync.log
-python3 /home/u/.local/bin/onedrive-tray'
+TRAY_HOLDER="$(tray_lock_holder "$DOC_FX")"
+sleep 0.3
 run "the log tail is skipped and the tray behind it is the one reported" 0 \
-    "running (pid 8002), icons in $DOC_FX/data/rclone-onedrive-tray/icons" \
+    "running (pid $TRAY_HOLDER), icons in $DOC_FX/data/rclone-onedrive-tray/icons" \
     doc_run "$DOC_FX" --offline
-DOC_TRAY_CMDS='tail -f /home/u/.cache/rclone-onedrive-tray/sync.log'
+tray_lock_release "$TRAY_HOLDER"
 run "and a tail on its own is not a tray" 0 "no tray process" \
     doc_run "$DOC_FX" --offline
-DOC_TRAY_CMDS=""
+doc_fixture tray-foreign
+bash -c 'exec -a "python3 /home/u/.local/bin/onedrive-tray" sleep 20' &
+FOREIGN_TRAY=$!
+sleep 0.3
+run "and another install's tray is not this install's" 0 "no tray process" \
+    doc_run "$DOC_FX" --offline
+kill "$FOREIGN_TRAY" 2>/dev/null
+wait "$FOREIGN_TRAY" 2>/dev/null
 
 # The three keys onedrive-sync runs require_positive_int on. A value it refuses
 # stops every scheduled run before rclone starts.
@@ -1780,6 +2077,10 @@ doc_class '2026/10/01 20:05:00 CRITICAL: prior lock file found in ~/.cache/rclon
 doc_class '2026/10/01 20:05:00 ERROR : Safety abort: too many deletes (>50%, 150 of 200) on Path1' maxdelete
 doc_class '2026/10/01 20:05:00 ERROR : Access test failed: Path1 count 1, Path2 count 0 - RCLONE_TEST' access
 doc_class '2026/10/01 20:05:00 ERROR : Bisync aborted. Must run --resync to recover.' resync
+# rclone's refusal of an empty remote also ends in "Bisync critical error", so it
+# has to be its own class: the generic [resync] answer tells the user to run the
+# one command that rebuilds an equally empty baseline.
+doc_class '2026/10/04 08:05:45 ERROR : Bisync critical error: empty prior Path1 listing: /home/u/.cache/rclone/bisync/a..b.path1.lst' emptyremote
 doc_class '2026/10/01 20:05:00 ERROR : unknown flag: --resilient' oldrclone
 
 # A network blip lands on top of the refusal that is the actual reason nothing

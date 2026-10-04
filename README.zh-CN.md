@@ -103,7 +103,7 @@ cd rclone-onedrive-tray
 
 `--yes` **故意不触发首次同步**。那一步会把云端全部拉下来且不能中断，所以它应该由你决定，而不是"一路回车"的副作用。
 
-所有东西都装进你的家目录，两个脚本都不会调用 `sudo`。
+所有东西都装进你的家目录，两个脚本都不会调用 `sudo`。下面这些是默认位置，每一项都跟随对应的 `XDG_*` 变量：设了 `XDG_CONFIG_HOME=/somewhere`，三条配置路径都会跟着搬过去。
 
 ```
 ~/.local/bin/onedrive-sync, onedrive-tray, onedrive-watch, onedrive-check,
@@ -146,6 +146,8 @@ chmod 700 "$XDG_RUNTIME_DIR"
 mkdir -p "$XDG_CONFIG_HOME/rclone" /tmp/trial/cloud /tmp/trial/local
 export RCLONE_CONFIG="$XDG_CONFIG_HOME/rclone/rclone.conf"
 rclone config create trial alias remote /tmp/trial/cloud
+# 先放一个文件进去：远端一侧为空时，rclone 会拒绝每一次增量同步
+echo "hello from the cloud" > /tmp/trial/cloud/hello.txt
 
 ./setup.sh --remote trial: --local /tmp/trial/local --unit-name trial-sync --yes
 ```
@@ -294,7 +296,7 @@ onedrive-doctor               # 一次性回答：这套安装是否正常，哪
 systemctl --user list-timers onedrive-sync.timer
 systemctl --user start onedrive-sync.service     # 立即同步
 journalctl --user -u onedrive-sync.service -f
-tail -f ~/.cache/rclone-onedrive-tray/sync.log
+tail -f "${XDG_CACHE_HOME:-$HOME/.cache}/rclone-onedrive-tray/sync.log"
 onedrive-tray --settings      # 只打开设置窗口，有没有托盘都行
 onedrive-tray --hide-icon     # 用 --show-icon 调回来
 ```

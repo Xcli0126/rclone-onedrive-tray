@@ -27,6 +27,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -300,6 +301,15 @@ def load_config() -> dict:
                 if (key.startswith("export")
                         and key[len("export"):len("export") + 1].isspace()):
                     key = key[len("export"):].strip()
+                # ${VAR:-fallback} is bash, and os.path.expandvars below leaves it
+                # literal, so a path written that way (config.example writes three
+                # of them now) would reach the tray as text with the braces still
+                # on it: the log status would be unknown and "View sync log" would
+                # open nothing. Resolve that form first, with the meaning bash gives
+                # it (an unset or empty variable takes the fallback), then expand
+                # the plain $VARs.
+                val = re.sub(r"\$\{(\w+):-([^}]*)\}",
+                             lambda m: os.environ.get(m.group(1)) or m.group(2), val)
                 cfg[key] = os.path.expandvars(val)
     except UnicodeDecodeError as exc:
         # One bad byte used to travel out of main() as a traceback, in a process
@@ -320,6 +330,26 @@ def load_config() -> dict:
     for key, value in SETTINGS_DEFAULTS.items():
         cfg.setdefault(key, value)
     return cfg
+
+
+def local_path_problem(value) -> str:
+    """Why `value` cannot be the LOCAL in the config, or "" when it can be.
+
+    LOCAL is written by setup.sh and by hand, and nothing used to check it. A
+    relative one is the dangerous case: the delete guard resolves it against
+    whatever directory the tray process happens to run in - systemd starts the
+    tray with no WorkingDirectory, so that is the user's home - and isdir,
+    realpath and the prefix check then all pass against a tree rclone never syncs.
+    The sentence names the key and the value, so the edit to make is in the text.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return ('LOCAL is not set; it has to be an absolute path, such as '
+                '"$HOME/OneDrive".')
+    if not os.path.isabs(os.path.expanduser(text)):
+        return (f'LOCAL="{text}" is not an absolute path; it has to be one, such '
+                f'as "$HOME/OneDrive".')
+    return ""
 
 
 def truthy(value) -> bool:
@@ -346,6 +376,74 @@ def shell_quote_value(value) -> str:
 
 
 KEY_RE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=")
+
+
+def write_atomic(path: str, text: str) -> None:
+    """Write `text` to `path` so a write that cannot finish destroys nothing.
+
+    The four files the tray rewrites are read back by other programs: onedrive-sync
+    sources the config with `.`, and the folder menu and the wrapper both read the
+    exclusion list. `open(path, "w")` empties the file before a single byte of the
+    new content is known to fit, so a full disk, an OOM kill or a power loss in
+    that window leaves it truncated. The reviewer's reproducer under a kernel
+    file-size limit left the 8.6 KB config at 8192 bytes, mid-word, with
+    MAX_LOG_BYTES, RCLONE, RETRIES and RETRY_DELAY gone, and onedrive-sync then
+    dies on a file it can no longer source.
+
+    The new content goes beside the target, is flushed and fsynced, and only then
+    replaces the target with one rename, so a reader sees either the whole old
+    file or the whole new one. Anything that goes wrong removes the temporary file
+    and raises OSError, which is what every caller here already handles.
+
+    The target's own permission is checked first, because that is the one thing a
+    rename does not need: the directory decides whether os.replace() may happen,
+    so a read-only config would otherwise stop being read-only.
+    """
+    directory = os.path.dirname(os.path.abspath(path)) or "."
+    if os.path.exists(path):
+        # O_WRONLY without O_TRUNC: a permission check, not a write.
+        os.close(os.open(path, os.O_WRONLY))
+    fd, tmp = tempfile.mkstemp(dir=directory,
+                               prefix="." + os.path.basename(path) + ".")
+    try:
+        try:
+            mode = os.stat(path).st_mode & 0o7777
+        except OSError:
+            # A file that is not there yet keeps the mode a plain open() would
+            # have given it under this process's umask.
+            mask = os.umask(0)
+            os.umask(mask)
+            mode = 0o666 & ~mask
+        try:
+            os.chmod(tmp, mode)
+        except OSError:
+            pass
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+        tmp = None
+    finally:
+        if tmp is not None:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+    # The rename has to reach the disk too, or a power loss can leave the
+    # directory entry pointing at the file that was replaced. Best effort: a
+    # filesystem that will not open or fsync its directory is not a reason to
+    # fail a write that did land.
+    try:
+        dir_fd = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    except OSError:
+        return
+    try:
+        os.fsync(dir_fd)
+    except OSError:
+        pass
+    finally:
+        os.close(dir_fd)
 
 
 def update_config_file(path: str, changes: dict) -> list:
@@ -386,8 +484,7 @@ def update_config_file(path: str, changes: dict) -> list:
     out = "\n".join(lines)
     if trailing is not None or not out.endswith("\n"):
         out += "\n"
-    with open(path, "w", encoding="utf-8") as fh:
-        fh.write(out)
+    write_atomic(path, out)
     return appended
 
 
@@ -413,8 +510,8 @@ def write_timer_dropin(unit: str, minutes: int) -> str:
             return "the interval must be at least 1 minute"
         path = timer_dropin_path(unit)
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as fh:
-            fh.write("# Set by the tray's settings dialog. A drop-in, so a later\n"
+        write_atomic(path,
+                     "# Set by the tray's settings dialog. A drop-in, so a later\n"
                      "# install.sh can rewrite the unit file without losing it.\n"
                      "[Timer]\n"
                      f"OnUnitInactiveSec={minutes}min\n")
@@ -483,8 +580,7 @@ def write_autostart(enable: bool) -> str:
     try:
         if enable:
             os.makedirs(os.path.dirname(AUTOSTART), exist_ok=True)
-            with open(AUTOSTART, "w", encoding="utf-8") as fh:
-                fh.write(autostart_contents())
+            write_atomic(AUTOSTART, autostart_contents())
             os.chmod(AUTOSTART, 0o644)
         elif os.path.exists(AUTOSTART):
             os.remove(AUTOSTART)
@@ -556,9 +652,14 @@ STRINGS = {
         "Cancel": "取消",
         "Rebuild": "重建",
         "The next run compares both sides from scratch and rebuilds the baseline. "
-        "On a large folder it takes a while and must not be interrupted.": (
+        "On a large folder it takes a while and must not be interrupted. Where a "
+        "file changed on both sides the copy that changed last wins, and on an "
+        "older rclone the cloud copy replaces the local one, so copy local edits "
+        "aside first.": (
             "仅在同步持续失败、或你确实批量删除了大量文件后使用。\n\n"
-            "重建会把两边的文件按当前状态重新对齐，过程中请勿关机。"),
+            "重建会把两边的文件按当前状态重新对齐，过程中请勿关机。两侧都改动过的文件"
+            "只会保留一个版本：rclone 支持 --resync-mode 时保留改动较新的那份，"
+            "否则云端那份会覆盖本机那份，请先把本机的改动另存一份。"),
         "Syncing…": "正在同步…",
         "systemd did not start the sync: {why}": "systemd 未能启动同步：{why}",
         "systemd could not start the sync ({why}); running onedrive-sync directly":
@@ -587,10 +688,11 @@ STRINGS = {
         "{name} will sync": "「{name}」将同步到本地",
         "{name} will not sync": "「{name}」不再同步，云端不受影响",
         "Delete the local copy of {name}?": "要删除「{name}」的本地副本吗？",
-        "The folder stays in OneDrive. Only the copy on this machine is deleted, "
-        "and ticking the folder again downloads it back.": (
-            "这个文件夹已不再同步。它仍然完整保留在云端，重新勾选即可恢复。\n\n"
-            "本地副本留着会占空间，而且在里面改的东西不会同步到任何地方。"),
+        "This deletes {path}. The folder stays in OneDrive: only the "
+        "copy on this machine is removed, and ticking the folder "
+        "again downloads it back.": (
+            "将删除 {path}。这个文件夹仍完整保留在云端，只有本机的副本会被删掉，"
+            "重新勾选即可下载回来。"),
         "Keep local copy": "保留本地副本",
         "Delete local copy": "删除本地副本",
         "Local copy deleted": "本地副本已删除",
@@ -629,6 +731,7 @@ STRINGS = {
         "lock": "有同步锁未释放；若反复出现请删除 ~/.cache/rclone/bisync/*.lck",
         "maxdelete": "待删除文件超过 MAX_DELETE；若确属正常的大批量删除，请运行 onedrive-sync --force",
         "network": "网络或 DNS 暂时不可用，稍后自动重试",
+        "emptyremote": "远端一侧是空的，rclone 拒绝增量同步；在任意一侧放一个文件，或在放入文件后重新建立基线（onedrive-sync --resync），随后的定时同步即可继续",
         "resync": "同步基线失效，请运行 onedrive-sync --resync",
         "oldrclone": "rclone 版本过旧，不认识 BISYNC_ARGS 里的参数；--resilient/--recover 需要 1.65 或更新版本",
         "auth": "授权可能已过期，需要重新授权 rclone 远程",
@@ -1039,11 +1142,11 @@ def write_excluded_folders(path: str, names):
             return False, problem
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as fh:
-            fh.write("# Folders not kept on this machine, one per line.\n")
-            fh.write("# Edited by the tray. The cloud keeps them either way.\n")
-            for name in sorted(names):
-                fh.write(f"{name}\n")
+        text = ("# Folders not kept on this machine, one per line.\n"
+                "# Edited by the tray. The cloud keeps them either way.\n")
+        for name in sorted(names):
+            text += f"{name}\n"
+        write_atomic(path, text)
         return True, ""
     except OSError:
         return False, "Could not save the folder list"
@@ -1194,6 +1297,12 @@ class Tray:
         self.notified_error_at = None
         self.manual_requested = False
         self.busy = False
+        # The re-authorise row runs a terminal and a flow that waits minutes for
+        # the remote to answer, and rclone's config file has no cross-process
+        # locking: two of them are last-writer-wins over the same remote's
+        # credentials, and the first to finish reports a sign-in while the other
+        # terminal is still open.
+        self.reauth_busy = False
         # The first line of what systemd said the last time it refused a start,
         # or "". The status row reads it so a start that did not happen cannot
         # be dressed up as a run in flight.
@@ -1234,6 +1343,11 @@ class Tray:
         self.timer_state = None
         self.active_seen = None
         self.poll_count = 0
+        # Bumped whenever the tray changes the units itself. Every state answer
+        # carries the value it was computed under, because a worker that asked
+        # before a pause can answer after it, and that answer is about a state
+        # that no longer exists.
+        self.units_generation = 0
 
         if Notify is not None:
             Notify.init(APP_ID)
@@ -1505,7 +1619,13 @@ class Tray:
         expired, leaving them to find `rclone config reconnect` themselves. The
         flow needs one answer and a browser, so it gets a terminal when there is
         one: the URL and Microsoft's own error text stay on screen.
+
+        One flow at a time, the way every other worker in this class is guarded:
+        rclone has no lock on its own config file, so a second reconnect is a
+        second writer over the same credentials.
         """
+        if self.reauth_busy:
+            return
         remote = self.remote.split(":", 1)[0] + ":"
         if not self._confirm(
                 Gtk.MessageType.QUESTION,
@@ -1515,6 +1635,8 @@ class Tray:
                        "credentials until it finishes.", remote=remote),
                 self.t("Cancel"), self.t("Sign in again")):
             return
+        self.reauth_busy = True
+        self.item_reauth.set_sensitive(False)
         self.notify(APP_NAME, self.t("Waiting for the sign-in to finish…"))
         threading.Thread(target=self._reauth_worker, args=(remote,),
                          daemon=True).start()
@@ -1529,7 +1651,13 @@ class Tray:
         if term and spawn(term):
             # The terminal owns the exit status, so success is decided by asking
             # the remote again rather than by reading a return code.
-            if self._wait_for_remote(remote):
+            ok = self._wait_for_remote(remote)
+            if not ok:
+                # A terminal that never led to a working remote still ends the
+                # flow here: otherwise the guard would stay up for the life of
+                # the process and the row could never be tried again.
+                self._reauth_finished(False, "")
+            else:
                 self._reauth_finished(True)
             return
         rc, out, err = sh(reconnect, timeout=900)
@@ -1547,6 +1675,10 @@ class Tray:
 
     def _reauth_finished(self, ok: bool, detail: str = ""):
         def report():
+            # The guard comes down with the flow, whichever way it ended, and the
+            # row is usable again.
+            self.reauth_busy = False
+            self.item_reauth.set_sensitive(True)
             if ok:
                 self.notify(APP_NAME, self.t("Signed in. Syncing now."))
                 self.state = None
@@ -1568,7 +1700,15 @@ class Tray:
         that directory must not be the root itself. Anything else is refused, so
         a listing cannot have the tray delete a parent, a sibling, a nested
         path, or the target of a symlink that points out of the root.
+
+        A LOCAL that is not absolute is refused first, and for the same reason:
+        every check below would be made against a path resolved from this
+        process's own working directory rather than from the directory rclone
+        syncs, and all of them would pass. The sentence that says so is
+        local_path_problem()'s, the one main() prints.
         """
+        if local_path_problem(self.local):
+            return None
         if not name or name in (".", "..") or os.path.basename(name) != name:
             return None
         root = os.path.realpath(self.local)
@@ -1604,8 +1744,9 @@ class Tray:
         if not self._confirm(
                 Gtk.MessageType.QUESTION,
                 self.t("Delete the local copy of {name}?", name=name),
-                self.t("The folder stays in OneDrive. Only the copy on this machine "
-                       "is deleted, and ticking the folder again downloads it back."),
+                self.t("This deletes {path}. The folder stays in OneDrive: only the "
+                       "copy on this machine is removed, and ticking the folder "
+                       "again downloads it back.", path=target),
                 self.t("Keep local copy"), self.t("Delete local copy")):
             return
         self._delete_local(target)
@@ -1810,7 +1951,9 @@ class Tray:
         self.menu.append(Gtk.SeparatorMenuItem())
         self._add(self.t("Check file names"), self._check_names)
         self._add(self.t("Diagnostics…"), self._diagnose)
-        self._add(self.t("Re-authorise OneDrive…"), self.on_reauth)
+        # Kept: the handler takes it out of action while a sign-in is in flight.
+        self.item_reauth = self._add(self.t("Re-authorise OneDrive…"),
+                                     self.on_reauth)
         self._add(self.t("Rebuild sync baseline (resync)…"), self.on_resync)
 
         self.menu.append(Gtk.SeparatorMenuItem())
@@ -2131,7 +2274,9 @@ class Tray:
             self.t("Rebuild the sync baseline?"),
             self.t("The next run compares both sides from scratch and rebuilds the "
                    "baseline. On a large folder it takes a while and must not be "
-                   "interrupted."),
+                   "interrupted. Where a file changed on both sides the copy that "
+                   "changed last wins, and on an older rclone the cloud copy "
+                   "replaces the local one, so copy local edits aside first."),
             self.t("Cancel"), self.t("Rebuild"))
         if not confirmed or self.busy:
             return
@@ -2140,16 +2285,21 @@ class Tray:
         threading.Thread(target=self._run, args=("resync",), daemon=True).start()
 
     def _units_changed(self):
-        """Forget what systemctl last said about the units.
+        """Forget what systemctl last said about the units, and say they moved.
 
         The enabled answer is cached because asking costs a fork, and the tray
         changes the units itself when it pauses, resumes or toggles the watcher.
-        Reusing the answer from before such a change reported automatic sync as
-        on during a pause, which deleted the pause stamp three seconds after the
-        pause began and left the menu claiming sync was off.
+        Clearing the cache is only half of it, and the half that was missing: an
+        is-enabled answer already on its way back from systemctl was computed
+        before the change and still describes the old state, so clearing the cache
+        did nothing about it. Reusing it reported automatic sync as on during a
+        pause, which deleted the pause stamp three seconds after the pause began
+        and left the menu claiming sync was off. The counter below is what such an
+        answer is compared against; see _query_state() and _apply_state().
         """
         self.timer_state = None
         self.active_seen = None
+        self.units_generation = getattr(self, "units_generation", 0) + 1
 
     def _set_units(self, *action):
         """start/stop/enable the timer and the watcher together."""
@@ -2382,6 +2532,10 @@ class Tray:
         attributes are read through getattr: a caller that hands it a minimal
         stand-in instead of a constructed Tray has to keep working.
         """
+        # Which units this answer is about, taken before the forks below: the
+        # tray can move the units while systemctl is being asked, and an answer
+        # from before that must not become the cache the next tick reuses.
+        generation = getattr(self, "units_generation", 0)
         _, out, _ = sh("systemctl --user is-active "
                        f"{shlex.quote(self.service)} {shlex.quote(self.timer)}",
                        timeout=30)
@@ -2409,7 +2563,9 @@ class Tray:
                 timer = "off"
             else:
                 timer = "unknown"
-            self.timer_state = timer
+            if generation == getattr(self, "units_generation", 0):
+                self.timer_state = timer
+            return active, timer
         return active, self.timer_state
 
     def poll(self):
@@ -2441,13 +2597,17 @@ class Tray:
         if self.state_busy:
             return
         self.state_busy = True
+        # Snapshotted here, before the worker starts: the tray can pause or
+        # resume while the worker is forking systemctl, and the answer it brings
+        # back then describes the units as they were before that.
+        generation = getattr(self, "units_generation", 0)
 
         def worker():
             try:
                 syncing, timer_state = self.unit_states()
             except Exception:  # noqa: BLE001
                 syncing, timer_state = False, "unknown"
-            GLib.idle_add(self._apply_state, syncing, timer_state)
+            GLib.idle_add(self._apply_state, syncing, timer_state, generation)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -2585,13 +2745,25 @@ class Tray:
             self.log_result = read_last_result(self.log_tail)
         return self.log_tail, self.log_result
 
-    def _apply_state(self, syncing, timer_state):
+    def _apply_state(self, syncing, timer_state, generation=None):
         """Put one worker's answer on screen, on the main loop.
+
+        `generation` is the value of the units counter when the worker started.
+        An answer older than the current counter was computed before the tray
+        paused, resumed or toggled the watcher itself, so it describes a state
+        that no longer exists: _auto_state() reads its "enabled" as automatic
+        sync being on and deletes the pause stamp with it. A caller that does not
+        tag its answer (generation=None) is applied the way it always was.
 
         Must return False: GLib.idle_add() re-calls an idle callback that
         returns True, forever.
         """
         self.state_busy = False
+        if (generation is not None
+                and generation != getattr(self, "units_generation", 0)):
+            # Dropped, not applied: the next tick asks again and answers about
+            # the units as they are now.
+            return False
 
         # A run really in flight is proof the units are working again, so the
         # start failure stops being the newest thing on screen. The log is not
@@ -2974,28 +3146,63 @@ def acquire_lock():
     local user can write, from being a file somebody else chose: a symlink is
     refused instead of being truncated. The refusal has to come from the open and
     not from a check before it, because the link can be swapped in between.
+
+    The flock alone is not enough while the file is removed on the way out. A tray
+    that opens the path, then waits, can flock it after the holder released and
+    unlinked it: the descriptor then holds an inode no other process will ever
+    open, so the next tray creates a fresh file and locks that one, and two trays
+    run at once. What makes the lock real is that the path still names the inode
+    this descriptor holds; when it does not, this is a lock on nobody's file and
+    the attempt starts again.
     """
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
-    handle = os.fdopen(os.open(LOCK_FILE, flags, 0o600), "w")
-    try:
-        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
+    for _ in range(8):
+        handle = os.fdopen(os.open(LOCK_FILE, flags, 0o600), "w")
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            handle.close()
+            return None
+        try:
+            ours = (os.stat(LOCK_FILE).st_ino
+                    == os.fstat(handle.fileno()).st_ino)
+        except OSError:
+            ours = False
+        if ours:
+            return handle
+        # The path was unlinked between the open and the flock and something may
+        # have taken it since; close and look again. No other process can unlink
+        # it now that this flock is held, so the next round either finds the file
+        # it holds at the path or loses the race to the process that has it.
         handle.close()
-        return None
-    return handle
+    # Eight whole rounds of that is a machine worth not starting a second tray on.
+    return None
 
 
 def release_lock(handle):
     """Drop the lock and remove the file this process created.
 
-    The lock itself is the flock on the descriptor, but the file was left behind
-    after every exit, so a later run (or a curious user) found a stale lock
-    sitting there.
+    The lock itself is the flock on the descriptor, and the file carries no
+    state; it is removed so a later run does not find a stale lock sitting there.
+    Only the inode this handle holds may go: os.remove() was unconditional, so a
+    tray on its way out deleted whatever was at the path, including a lock another
+    process had just created and was holding.
+
+    The remove happens before the close, while this flock still keeps every other
+    tray out. Closing first would leave the window the check in acquire_lock()
+    exists for: another tray that had already opened this inode could flock it and
+    find the path still naming it, and then this process would unlink the file out
+    from under that tray.
     """
     try:
-        os.remove(LOCK_FILE)
+        ours = (os.stat(LOCK_FILE).st_ino == os.fstat(handle.fileno()).st_ino)
     except OSError:
-        pass
+        ours = False
+    if ours:
+        try:
+            os.remove(LOCK_FILE)
+        except OSError:
+            pass
     try:
         handle.close()
     except OSError:
@@ -3129,6 +3336,18 @@ def main(argv=None):
             # business, and the tray's other rows say so.
             print(f'{APP_ID}: REMOTE is not set in {CONFIG_FILE}; run setup.sh, '
                   f'or add REMOTE="yourremote:" to that file.',
+                  file=sys.stderr)
+            return 1
+        local_problem = local_path_problem(cfg.get("LOCAL"))
+        if local_problem:
+            # A relative LOCAL is resolved against this process's own working
+            # directory, and the tray is started by an autostart entry with no
+            # terminal: the one place it is used as a root is the delete guard,
+            # where "which directory is this?" decides whether a tree outside the
+            # sync pair is handed to shutil.rmtree. One sentence and exit 1, the
+            # way the missing-REMOTE case above is handled.
+            print(f"{APP_ID}: {local_problem}\n"
+                  f"    Fix LOCAL in {CONFIG_FILE} and start again.",
                   file=sys.stderr)
             return 1
         if not icon_dir_ok():

@@ -218,6 +218,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The tray's refusal for a config with no REMOTE named `onedrive-doctor`, which is
   read-only by construction and cannot set one. It names `setup.sh` and the line to
   add, with the config path.
+- `onedrive-sync --resync` overwrote local edits with the cloud copy and said
+  nothing. rclone's `--resync` is `--resync-mode path1` and the wrapper passes the
+  remote first, so for a file that changed on both sides the cloud version won:
+  measured on a scratch pair, a local edit was replaced, `rc=0`, no conflict copy,
+  and `docs/TROUBLESHOOTING.md` called that "safe". The wrapper now asks rclone for
+  `--resync-mode newer` once before a resync and passes it when the flag exists, so
+  the copy that changed last wins; on an rclone without it the run logs a warning
+  saying the cloud copy will replace the local one before it starts. The README,
+  the troubleshooting page and the tray's confirmation dialog say the same thing
+  now instead of promising that nothing is lost.
+- The doctor's tray check reported a tray whenever any command line on the machine
+  contained the name, including its own `timeout` wrapper and another install's
+  tray, so `ok tray running (pid N)` was printed with no tray of this install
+  running, the pid named was often already dead, and the two "no tray process"
+  answers below it were unreachable. It asks the tray's own lock file instead, with
+  `flock -n`, which is the fact the tray publishes.
+- A config or exclude list the tray could not finish writing was left truncated,
+  because every writer opened the target with `"w"` first: a full disk or a kill
+  mid-write destroyed the hand-edited config, and `onedrive-sync` then died on a
+  file it could not source. The four writers now write beside the target, fsync and
+  rename it into place, and a write to a read-only file still refuses rather than
+  succeeding through the rename.
+- A unit-state answer that arrived after a pause deleted the pause stamp, because
+  the answer was not tagged with when it was asked: the row then read "Automatic
+  sync is off" for the rest of the pause and nothing restored it after a restart.
+  Answers carry a generation now and a stale one is dropped, in the state and in
+  the cache.
+- The stale-lock sweep ran once, before the retry loop, so when rclone died
+  mid-run (a kill, the OOM killer) every remaining attempt failed on its
+  dead-owner lock while the sweep that would have removed it had already run. It
+  runs before each attempt now.
+- "Re-authorise OneDrive…" had no in-flight guard, so two activations started two
+  reconnect flows and two pollers, and the first to finish announced a sign-in
+  while the other was still open. The row is insensitive while a flow runs.
+- The single-instance lock could be taken twice: `release_lock()` unlinked the file
+  and then closed the descriptor, so a process that opened it in between held an
+  unlinked inode while the next created a fresh file. The lock is checked against
+  its own inode and unlinked before the close.
+- An empty remote side made every incremental run fail with advice to run
+  `--resync`, which rebuilt an equally empty baseline and looped forever; the
+  README's own no-account trial created exactly that pair, and now puts one file in
+  the cloud directory. rclone's `Empty prior Path1 listing` has its own tag and
+  hint in both the wrapper and the doctor.
+- The delete cap is a percentage of the pair under the hood, and a count below one
+  percent floors to one percent: `MAX_DELETE=1` over a 397-file folder allows about
+  three deletions, not one. rclone takes whole percentages only (`--max-delete 0.5`
+  is refused), so the log and the docs now say what the percentage really allows,
+  by naming the number.
+- `config/config.example` hardcoded `$HOME/.config` and `$HOME/.cache` while every
+  script follows `XDG_CONFIG_HOME` and `XDG_CACHE_HOME`, so the config `install.sh`
+  copies pointed at paths nothing had created on such a machine, and the filters
+  were silently not applied. It uses the same expansion the scripts do, and the
+  tray resolves the `${VAR:-fallback}` form bash writes, which its parser used to
+  leave as literal text.
+- `setup.sh --yes` reset the interval and turned realtime sync back on when those
+  flags were not passed, while every other key it does not ask about was carried
+  over. Both follow the same rule.
+- A `LOCAL` that is not an absolute path had the delete guard working against the
+  tray process's working directory rather than the synced tree, so a same-named
+  directory elsewhere could be offered for deletion; the confirmation named only
+  the folder. A relative `LOCAL` is refused with the key named, and the dialog says
+  which path it will delete.
 
 ### Changed
 

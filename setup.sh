@@ -45,6 +45,11 @@ DO_INSTALL=1
 # choice may replace a file that is already there.
 FILTERS_GIVEN=0
 SKIP_FOLDERS_GIVEN=0
+# The two settings below reach the template as values, not as files, but they are
+# the user's the same way the carried keys are: a re-run that does not mention
+# them must leave what the config already has. The flags are what overrides.
+INTERVAL_GIVEN=0
+WATCH_GIVEN=0
 
 say()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*" >&2; }
@@ -72,8 +77,8 @@ while [ $# -gt 0 ]; do
         --remote)     REMOTE_IN="${2:?}"; shift 2 ;;
         --local)      LOCAL_IN="${2:?}"; shift 2 ;;
         --filters)    FILTERS_CHOICE="${2:?}"; FILTERS_GIVEN=1; shift 2 ;;
-        --interval)   INTERVAL="${2:?}"; shift 2 ;;
-        --watch)      WATCH="${2:?}"; shift 2 ;;
+        --interval)   INTERVAL="${2:?}"; INTERVAL_GIVEN=1; shift 2 ;;
+        --watch)      WATCH="${2:?}"; WATCH_GIVEN=1; shift 2 ;;
         --unit-name)  UNIT_NAME="${2:?}"; shift 2 ;;
         --skip-folders) SKIP_FOLDERS="${2?--skip-folders needs a value}"; SKIP_FOLDERS_GIVEN=1; shift 2 ;;
         --yes|-y)     ASSUME_YES=1; shift ;;
@@ -313,6 +318,21 @@ carry() {  # carry <KEY> <default> -> the value already in the config, or the de
     esac
 }
 
+# The interval and the realtime switch are carried over by the same rule as the
+# keys above when the run did not ask for them. Written from the template
+# unconditionally, they reset a changed interval to 5 and turned realtime sync
+# back on during a documented re-run that passed only --remote/--local/--unit-name,
+# while every key beside them was preserved. Measured by a reviewer:
+# INTERVAL_MIN="15" and WATCH="0" became "5" and "1".
+if [ "$INTERVAL_GIVEN" -eq 0 ]; then
+    INTERVAL="$(carry INTERVAL_MIN 5)"
+fi
+if [ "$WATCH_GIVEN" -eq 1 ]; then
+    WATCH="$([ "$WATCH" = "yes" ] && echo 1 || echo 0)"
+else
+    WATCH="$(carry WATCH 1)"
+fi
+
 cat > "$CONFIG_FILE" <<EOF
 # Written by setup.sh on $(date '+%Y-%m-%d %H:%M')
 REMOTE="$(config_quote "$REMOTE")"
@@ -336,7 +356,7 @@ OPEN_APP_CMD="$(config_quote "$(carry OPEN_APP_CMD "")")"
 OPEN_APP_NAME="$(config_quote "$(carry OPEN_APP_NAME "the app")")"
 UI_LANG="$(config_quote "$(carry UI_LANG "")")"
 
-WATCH="$([ "$WATCH" = "yes" ] && echo 1 || echo 0)"
+WATCH="$WATCH"
 WATCH_DEBOUNCE="$(config_quote "$(carry WATCH_DEBOUNCE 8)")"
 WATCH_SETTLE="$(config_quote "$(carry WATCH_SETTLE 12)")"
 WATCH_EXCLUDE="$(config_quote "$(carry WATCH_EXCLUDE "")")"

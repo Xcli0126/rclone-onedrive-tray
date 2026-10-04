@@ -288,12 +288,15 @@ losing everything after a network failure or a mistake. This project's `MAX_DELE
 the wrapper converts it: `MAX_DELETE=100` over a 750-file folder becomes `--max-delete 13%`. The log
 records the conversion on every run.
 
-The conversion has two edges, both recorded in the log:
+The conversion has three edges, all recorded in the log:
 
 - `MAX_DELETE=0` refuses every deletion.
 - A `MAX_DELETE` at least as large as the folder means no cap at all. The log says
   `no delete cap is in effect`, because passing 100 would otherwise switch off rclone's 50% default
   silently.
+- A `MAX_DELETE` below one percent of the pair cannot be expressed as a percentage.
+  `MAX_DELETE=1` over a 397-file pair becomes `--max-delete 1%`, which allows about 3 deletions,
+  and the log says `allows about 3 deletion(s), not 1`.
 
 A value that is not a number is ignored with a warning, which leaves rclone's own 50% in place.
 
@@ -717,6 +720,11 @@ fuser -v "$HOME/.cache/rclone-onedrive-tray/sync.lck"
 ls -la ~/.cache/rclone/bisync/*.lck 2>/dev/null
 ```
 
-**When in doubt, `--resync` is safe.** It re-establishes the baseline from whatever is currently
-on both sides; it does not delete files that exist on only one side. It is not fast, and it should
-not be interrupted, but it is the supported way out of an inconsistent state.
+**A `--resync` is safe for a file that exists on only one side, and not for a file that changed
+on both.** It re-establishes the baseline from what is on both sides, and where the two copies
+differ one of them wins and the other is gone. rclone has `--resync-mode newer` for that, and the
+wrapper passes it when the installed rclone has it, so the copy that changed last wins. On an
+rclone without the flag the cloud copy replaces the local one, and the run says so in the log
+before it starts, so copy local edits aside first or upgrade rclone. No file that exists on only
+one side is ever deleted by a resync. It is not fast and it should not be interrupted, but it is
+the supported way out of an inconsistent state.

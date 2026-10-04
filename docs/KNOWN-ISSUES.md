@@ -85,7 +85,10 @@ test is allowed to touch before anyone starts.
   remote it asked, so the stale answer lands and the menu shows the old account's
   folders until the answer after it arrives. It needs a generation counter or an
   answer tagged with the remote it belongs to, which is a larger change than the
-  reload path.
+  reload path. The stale list is not only displayed: unticking a row in it writes
+  that folder name into the exclusion file that now governs the new remote, and a
+  listing that failed for the old remote stores its error as "could not list" the
+  new one.
 - The settings window rewrites a line it changes without its `export ` prefix:
   `KEY_RE` matches `export REMOTE=`, and `update_config_file` writes the line back
   as `REMOTE=`. The value and the meaning are the same either way, so this is a
@@ -96,6 +99,19 @@ test is allowed to touch before anyone starts.
   and the quota row are not cleared the way they are when `REMOTE` moves: they were
   fetched from the binary being left behind, so they can describe the wrong build
   until the next refresh. It needs the same clear-and-re-ask the remote gets.
+- `the delete guard uses the reloaded LOCAL` in `tests/tray.sh` fails about once in
+  twenty runs when the machine is loaded: `_delete_local`'s worker removes the tree
+  before the idle callback that notifies, so the scenario can read the
+  notifications too early. It is the suite's own timing, not a shipped defect, and
+  it is written down because a flake in CI costs a rerun every time.
+- A reload of a config whose `LOCAL` is relative is refused by the delete guard but
+  the tray keeps running with it, since only `main()` validates the path when the
+  tray starts. Validating it in the reload as well is a few lines; the guard is the
+  part that can lose data, and it refuses.
+- `onedrive-doctor` reads the tray's pid from `/proc/locks`, which is Linux only.
+  Where that file is absent or unreadable the line says `pid unknown` and the
+  verdict still comes from `flock`, so the check is right and only the pid is
+  missing.
 
 ### The tray's state is read out of English prose in a shared log
 

@@ -92,7 +92,6 @@ sync-short-verbose-cli	bin/onedrive-sync	s|            if verbose_flag "$arg"; t
 # pass the doctor as a healthy config
 doctor-config-numbers	bin/onedrive-doctor	s|    for key in RETRIES RETRY_DELAY MAX_LOG_BYTES; do|    for key in ; do|	install-flow
 # the tray probe, which matched the log tail the project's own docs tell you to run
-doctor-tray-pattern	bin/onedrive-doctor	s|pgrep -f 'python3 .\*/onedrive-tray'|pgrep -f 'onedrive-tray'|	install-flow
 # a wizard with no terminal to answer, which used to start the full baseline sync
 # on the (Y/n) prompt's default
 setup-notty-first-sync	setup.sh	s|    elif \[ ! -t 0 \]; then|    elif false; then|	install-flow
@@ -170,3 +169,28 @@ tray-remote-fix-names-writer	bin/onedrive-tray	s|or add REMOTE="yourremote:" to 
 # the doctor warning line the five non-auth classes share, which no fixture fed
 # before, so its wording could be anything
 doctor-tag-warn-line	bin/onedrive-doctor	s|a \[$tag\] failure is in the log|a failure is in the log|	install-flow
+sync-resync-mode-flag	bin/onedrive-sync	s|ARGS+=(--resync-mode newer)|:|	install-flow
+sync-resync-cloud-warning	bin/onedrive-sync	s|^        log_line "WARNING: --resync: this rclone has no --resync-mode.*|        :|	install-flow
+sync-lock-sweep-each-attempt	bin/onedrive-sync	s|^    sweep_stale_locks$|    :|	install-flow
+sync-empty-remote-tag	bin/onedrive-sync	s|^        tag=emptyremote$|        tag=resync|	install-flow
+sync-delete-cap-effective-count	bin/onedrive-sync	s|so this allows about \$max_delete_files deletion(s), not \$MAX_DELETE|and the count is the cap|	install-flow
+doctor-tray-lock	bin/onedrive-doctor	s|flock -n 8 2>/dev/null \|\| tray_running=1|:|	install-flow
+doctor-empty-remote-class	bin/onedrive-doctor	s|    elif grep -qiE "\$RE_EMPTY" <<<"\$t"; then printf 'emptyremote'|    elif false; then printf 'emptyremote'|	install-flow
+docs-config-example-xdg	config/config.example	s|^FILTERS_FILE="\${XDG_CONFIG_HOME:-\$HOME/.config}/rclone-onedrive-tray/filters.txt"$|FILTERS_FILE="\$HOME/.config/rclone-onedrive-tray/filters.txt"|	install-flow
+setup-carry-interval	setup.sh	s|^if \[ "\$INTERVAL_GIVEN" -eq 0 \]; then$|if false; then|	install-flow
+setup-carry-watch	setup.sh	s|^if \[ "\$WATCH_GIVEN" -eq 1 \]; then$|if false; then|	install-flow
+# The tray half of round seven: the four writers that must not truncate, the
+# generation tag on unit-state answers, the re-authorise guard, the lock
+# inode checks, the relative-LOCAL refusal and the delete dialog naming its path.
+tray-config-write-not-atomic	bin/onedrive-tray	s|^    write_atomic(path, out)$|    open(path, "w", encoding="utf-8").write(out)|	tray
+tray-exclusion-write-not-atomic	bin/onedrive-tray	s|^        write_atomic(path, text)$|        open(path, "w", encoding="utf-8").write(text)|	tray
+tray-dropin-write-not-atomic	bin/onedrive-tray	s|^        write_atomic(path,$|        open(path, "w", encoding="utf-8").write(|	tray
+tray-autostart-write-not-atomic	bin/onedrive-tray	s|^            write_atomic(AUTOSTART, autostart_contents())$|            open(AUTOSTART, "w", encoding="utf-8").write(autostart_contents())|	tray
+tray-stale-state-drop	bin/onedrive-tray	s|^                and generation != getattr(self, "units_generation", 0)):$|                and False):|	tray
+tray-stale-state-cache	bin/onedrive-tray	s|^            if generation == getattr(self, "units_generation", 0):$|            if True:|	tray
+tray-reauth-no-guard	bin/onedrive-tray	s|^        if self.reauth_busy:$|        if False:|	tray
+tray-lock-acquire-verifies	bin/onedrive-tray	s|^            ours = (os.stat(LOCK_FILE).st_ino$|            ours = True or (os.stat(LOCK_FILE).st_ino|	tray
+tray-lock-release-inode	bin/onedrive-tray	s|^        ours = (os.stat(LOCK_FILE).st_ino == os.fstat(handle.fileno()).st_ino)$|        ours = True|	tray
+tray-main-relative-local	bin/onedrive-tray	s|^        local_problem = local_path_problem(cfg.get("LOCAL"))$|        local_problem = ""|	tray
+tray-relative-local-guard	bin/onedrive-tray	s|^        if local_path_problem(self.local):$|        if False:|	tray
+tray-delete-dialog-path	bin/onedrive-tray	s|"again downloads it back.", path=target)|"again downloads it back.")|	tray

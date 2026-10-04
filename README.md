@@ -68,13 +68,20 @@ Overlapping runs are impossible. The wrapper holds a `flock` for the duration of
 clicking "Sync now" while the timer fires waits instead of racing. Two bisync processes on the
 same file pair delete each other's listing files, and the recovery costs a full `--resync`.
 
-Deletions are capped at `MAX_DELETE` files per run. A wiped local folder aborts the sync rather
+Deletions are capped at `MAX_DELETE` files per run, as closely as rclone's percentage can express
+it. A count below one percent of the pair cannot be expressed at all: `MAX_DELETE=1` over a
+397-file folder becomes `--max-delete 1%`, which allows about 3 deletions, and the log says so by
+naming the number the percentage really allows. A wiped local folder aborts the sync rather
 than propagating to the cloud, though it does mean a deliberate bulk delete needs `onedrive-sync
 --force` once, which lifts the cap for that run. A `--resync` looks like the safer answer and is
-not: nothing is deleted by a resync, so every file you removed locally comes back down.
+not: nothing is deleted by a resync, so every file you removed locally comes back down. It is not
+a merge either: where a file changed on both sides one copy wins. The wrapper asks for
+`--resync-mode newer` when the installed rclone has it, so the copy that changed last wins; on an
+older rclone the cloud copy replaces the local one, and the log says so before the run starts.
 
-Conflicts keep both copies. When a file changed on both sides, rclone renames both versions
-instead of picking a winner, so nothing is lost. The cost is that you merge them by hand.
+On a normal run, conflicts keep both copies. When a file changed on both sides, rclone renames both
+versions instead of picking a winner, so nothing is lost. The cost is that you merge them by hand.
+The paragraph above is the exception: a `--resync` replaces instead of renaming.
 
 The log rotates at 5 MB, and the tray reads only the last 64 KB of it. A sync every five minutes
 writes roughly 240 KB a day, which is harmless for the disk but not for a `readlines()` call
@@ -138,7 +145,9 @@ interrupted, so it stays a decision you make rather than a side effect of answer
 overwrite an existing config when you give it flags, so a scripted re-run does not have to delete
 the file by hand first; without `--yes`, a run that finds one still stops and asks.
 
-Everything lands in your home directory, and neither script calls `sudo`.
+Everything lands in your home directory, and neither script calls `sudo`. The
+directories below are the defaults; each one follows the usual `XDG_*` variable
+when it is set, so `XDG_CONFIG_HOME=/somewhere` moves all three config lines.
 
 ```
 ~/.local/bin/onedrive-sync, onedrive-tray, onedrive-watch, onedrive-check,
@@ -184,6 +193,9 @@ chmod 700 "$XDG_RUNTIME_DIR"
 mkdir -p "$XDG_CONFIG_HOME/rclone" /tmp/trial/cloud /tmp/trial/local
 export RCLONE_CONFIG="$XDG_CONFIG_HOME/rclone/rclone.conf"
 rclone config create trial alias remote /tmp/trial/cloud
+# One file, or every incremental run refuses an empty remote side: rclone will not
+# sync to a directory whose prior listing has no entries in it.
+echo "hello from the cloud" > /tmp/trial/cloud/hello.txt
 
 ./setup.sh --remote trial: --local /tmp/trial/local --unit-name trial-sync --yes
 ```
@@ -356,7 +368,7 @@ onedrive-doctor               # is this install healthy, and if not, which part
 systemctl --user list-timers onedrive-sync.timer
 systemctl --user start onedrive-sync.service     # sync now
 journalctl --user -u onedrive-sync.service -f
-tail -f ~/.cache/rclone-onedrive-tray/sync.log
+tail -f "${XDG_CACHE_HOME:-$HOME/.cache}/rclone-onedrive-tray/sync.log"
 onedrive-tray --settings      # the settings window, tray or no tray
 onedrive-tray --hide-icon     # and --show-icon to bring it back
 ```
