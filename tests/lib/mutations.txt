@@ -358,3 +358,5 @@ tray-dialog-control-unnamed	bin/onedrive-tray	s|                    widget.get_a
 # but the same expression through the harness reports SURVIVED, which means the
 # copy the suite reads is not the copy the row changed, and a row that cannot be
 # trusted is worse than a row that is missing.
+# round twenty-six: resuming a pause enabled the watcher even with WATCH off.
+tray-resume-ignores-watch	bin/onedrive-tray	s|        watched = truthy(self.cfg.get("WATCH", "1"))|        watched = True|	tray

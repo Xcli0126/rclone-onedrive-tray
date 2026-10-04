@@ -2776,8 +2776,16 @@ class Tray:
         self.units_generation = getattr(self, "units_generation", 0) + 1
 
     def _set_units(self, *action):
-        """start/stop/enable the timer and the watcher together."""
-        for unit in (self.timer, self.watch):
+        """start/stop/enable the timer, and the watcher only when WATCH is on.
+
+        The two were always touched together, which is right for a pause that had
+        stopped them and wrong for anything that turns automatic sync back on: a
+        user who had realtime sync off got the watcher back by resuming a pause,
+        because this ran `enable --now` on both. WATCH is the settings switch for
+        it, so the watcher is only touched when that says so.
+        """
+        watched = truthy(self.cfg.get("WATCH", "1"))
+        for unit in ([self.timer, self.watch] if watched else [self.timer]):
             self._sc(*action, unit)
         # Here rather than at each caller: forgetting one left the cached answer
         # describing the units as they were before, and the next poll then deleted

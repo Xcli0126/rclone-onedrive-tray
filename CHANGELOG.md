@@ -36,6 +36,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Resuming a pause turned realtime sync back on for a user who had switched it off.
+  The pause never touches the units, so resuming only has to clear the stamp; when
+  the timer itself is off, "Resume now" is the only way back from the menu and
+  enabling that is right, but the watcher went with it because the two were always
+  touched together. `WATCH` decides the watcher now.
 - The pause stamp had three readers with three grammars. The tray's `_pause_due()`
   was given digits and a length rule; `_paused_until()`, which the menu label reads,
   kept the old `int()` and `time.localtime()`, so an eleven to nineteen digit stamp

@@ -4154,6 +4154,42 @@ def scenario_a11y_state():
     return data
 
 
+def scenario_resume_watch_off():
+    """Resume now does not turn realtime sync back on for a user who turned it off.
+
+    The pause never touches the units, so resuming only has to clear the stamp - and
+    when the timer itself is off, "Resume now" is the only way back from the menu, so
+    it enables that. It used to enable the watcher in the same call, which is wrong
+    when WATCH is off: the settings switch has to decide that, not the resume.
+    """
+    cfg = dict(CFG)
+    cfg["WATCH"] = "0"
+    stamp = MODULE.PAUSE_STAMP
+    os.makedirs(os.path.dirname(stamp), exist_ok=True)
+    with open(stamp, "w", encoding="utf-8") as fh:
+        fh.write(str(int(time.time()) + 900))
+    marked = os.path.join(os.environ["TRAY_CALLS"], "timer-disabled")
+    open(marked, "w").close()
+    clear_calls()
+    try:
+        tray = MODULE.Tray(cfg)
+        GLib.timeout_add(200, tray.poll)
+        pump(0.5)
+        tray.resume_now()
+        done = wait_for(lambda: not os.path.exists(stamp), 8.0)
+        pump(0.6)
+        calls = call_lines()
+    finally:
+        try:
+            os.remove(marked)
+        except OSError:
+            pass
+    return {"done": done,
+            "watcher": [x for x in calls if "watch.service" in x],
+            "enabled": [x for x in calls if "enable --now" in x],
+            "stamp_left": os.path.exists(stamp)}
+
+
 def scenario_lock_inode():
     """release_lock() removes only the file it locked, and a second take works.
 
@@ -4442,6 +4478,7 @@ SCENARIOS = {
     "log-forged-marker": scenario_log_forged_marker,
     "pause-sync-now": scenario_pause_sync_now,
     "a11y-state": scenario_a11y_state,
+    "resume-watch-off": scenario_resume_watch_off,
     "stale-state": scenario_stale_state,
     "stale-state-cache": scenario_stale_state_cache,
     "relative-local": scenario_relative_local,
@@ -6160,6 +6197,24 @@ if not d["busy_while_busy"] or not d["insensitive_while_busy"]:
 if not d["finished"] or d["busy_after"] or not d["sensitive_after"]:
     print("finished=%r busy_after=%r sensitive_after=%r"
           % (d["finished"], d["busy_after"], d["sensitive_after"]))
+    raise SystemExit(1)
+'
+fi
+
+title "Resume now with realtime sync switched off"
+if run_driver resume-watch-off TRAY_REAUTH_AUTO=1; then
+    check "the pause is cleared and the timer comes back" json_py '
+if not d["done"] or d["stamp_left"]:
+    print("done=%r stamp_left=%r" % (d["done"], d["stamp_left"]))
+    raise SystemExit(1)
+if not any("enable --now" in x and "watch" not in x and "timer" in x
+           for x in d["enabled"]):
+    print("the timer was not enabled: %r" % (d["enabled"],))
+    raise SystemExit(1)
+'
+    check "and the watcher stays off, because WATCH says so" json_py '
+if d["watcher"]:
+    print("a resume started the watcher with WATCH=0: %r" % (d["watcher"],))
     raise SystemExit(1)
 '
 fi

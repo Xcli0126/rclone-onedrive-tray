@@ -17,15 +17,11 @@ were found in the first place.
 
 ### What the pause audit left
 
-Round twenty-two's audit found ten things; the code, the grammar and the instrument
-are fixed and in the changelog, and the mutation table has no dead rows for the first
-time in several rounds (seven were re-pointed to the lines they name and two dropped
-with their reasons). What is still open from that review:
+Round twenty-two's audit found ten things; the code, the grammar, the instrument and
+the watcher question are fixed and in the changelog, and the mutation table has no
+dead rows for the first time in several rounds (seven were re-pointed to the lines
+they name and two dropped with their reasons). What is still open from that review:
 
-- `resume_now()` enables the watcher even when `WATCH="0"`, so a user who had
-  realtime sync off gets it back by resuming a pause. Whether "Resume now" should
-  mean "automatic sync runs again" or only "this pause is over" is the decision;
-  the review measured the behaviour and left it.
 - The mutation row `tray-setunits-invalidate` still survives, and the reason recorded
   beside it is narrower than it reads: the generation bump is observable in a
   stale-state-shaped probe that calls `_set_units()`, and what the suite lacks is that
