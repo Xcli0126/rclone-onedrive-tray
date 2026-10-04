@@ -520,7 +520,7 @@ if [ "$tray_running" -eq 1 ]; then
         # The device field is major:minor:inode in hex, and a tmpfs minor such as
         # "2e" is why this is not [0-9]+: on /tmp the all-digits form matched
         # nothing and the pid came out unknown.
-        tray_pid="$(grep -E "FLOCK[[:space:]]+ADVISORY[[:space:]]+WRITE[[:space:]]+[0-9]+[[:space:]]+[0-9a-fA-F]+:[0-9a-fA-F]+:$tray_inode[[:space:]]" \
+        tray_pid="$(grep -E "FLOCK[[:space:]]+ADVISORY[[:space:]]+WRITE[[:space:]]+[0-9]+[[:space:]]+[0-9a-fA-F]+:[0-9a-fA-F]+:${tray_inode}[[:space:]]" \
             /proc/locks 2>/dev/null | head -1 | tr -s ' ' | cut -d' ' -f5 || true)"
     fi
     case "$tray_pid" in ''|*[!0-9]*) tray_pid="unknown" ;; esac

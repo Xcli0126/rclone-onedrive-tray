@@ -337,6 +337,10 @@ check "and so does realtime sync" grep -qxF 'WATCH="1"' "$CARRY_CFG"
 title "the shipped config follows the XDG directories"
 XDG5="$WORK/xdg-example"
 xdg_example_paths() {  # the three path keys as bash resolves them from the example
+    # The single quotes are the point: the variables in there belong to the inner
+    # shell, which is the one that sources the example under the redirected XDG
+    # directories this case passes in.
+    # shellcheck disable=SC2016
     "$@" bash -c 'set -u; . "$1"; printf "%s\n%s\n%s\n" "$FILTERS_FILE" "$EXCLUDE_FOLDERS_FILE" "$LOG"' \
         _ "$SRC_DIR/config/config.example"
 }
