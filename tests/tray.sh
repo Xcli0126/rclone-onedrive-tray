@@ -1880,8 +1880,9 @@ def scenario_pause_recovery_cached():
         with open(stamp, "w", encoding="utf-8") as fh:
             fh.write(str(int(time.time()) + 900))
         tray.recover_pause()
-        # Wait for the poll to run rather than for a stopwatch: the poll is on a
-        # three-second timer, so pumping 1.4s proved nothing about whether it had run.
+        # Wait for a poll to run rather than assuming a fixed pump covered one: the
+        # driver registers its own 200ms timer, so a pump usually covers several, and
+        # saying which poll this is matters when the assertion below is about ordering.
         polls_before = getattr(tray, "poll_count", 0)
         wait_for(lambda: getattr(tray, "poll_count", 0) > polls_before, 12.0)
         pump(0.4)
@@ -5100,6 +5101,10 @@ fi
 # cases call _units_changed() directly, so the call inside _set_units() had no case
 # and its mutation row survived; this is the case that would retire the row.
 if run_driver pause-recovery-cached; then
+    # The first block of assertions is the setup: the cache held the pre-recovery
+    # answer, recovery put the units back, and the pause is kept. The second is the
+    # discriminating one - the reading after the pause ends - and it is what the
+    # mutation row for the invalidation fails on.
     check "a recovered pause does not reuse the answer cached before it" json_py '
 if not d["cached"] or d["cached_value"] != "off":
     print("the cache held %r before recovery, so the ordering was not built"

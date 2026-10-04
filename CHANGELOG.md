@@ -69,6 +69,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   against `47cbedb`, the tree before the carry rule was rewritten: five shapes fail (an
   escaped space, `$(command -v rclone)`, a backtick, `$(id)`, `$((1+1))`) where the same
   battery looked green with the dead guard.
+- A fresh install's config is checked value by value against a table of what the template
+  promises, because the shape battery compares the wizard against itself and so cannot
+  see a changed default: seven defaults, from `MAX_LOG_BYTES` to `SHOW_ICON`, could be
+  changed with the whole suite green. The table is 25 lines, one per key the template
+  writes, and it stops at the first difference.
 
 - The mutation row for the invalidation inside `_set_units()` is caught, and the coverage
   gap it documented is closed. The ordering it needed: a tray that has cached the units as

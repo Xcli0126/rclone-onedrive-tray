@@ -617,10 +617,10 @@ def local_path_problem(value) -> str:
         # because load_config() expands it the way the shell does.
         suggestion = (f"LOCAL=~{text[1:]}" if text == "~" or text.startswith("~/")
                       else "the absolute path")
-        return (f'LOCAL="{text}" holds a tilde this reader will not expand: it is either '
-                f'inside quotes, where the shell does not expand one either, or a form '
-                f'like "~+" that names a directory the tray does not share. Write '
-                f'{suggestion}, or the path with "$HOME" spelled out.')
+        return (f'LOCAL="{text}" holds a tilde this reader will not expand: it is inside '
+                f'quotes, or it names no user this machine has, or it is a form like "~+" '
+                f'whose meaning the tray does not share. Write {suggestion}, or the path '
+                f'with "$HOME" spelled out.')
     if not os.path.isabs(text):
         return (f'LOCAL="{text}" is not an absolute path; it has to be one, such '
                 f'as "$HOME/OneDrive".')

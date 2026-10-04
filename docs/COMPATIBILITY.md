@@ -29,7 +29,7 @@ so the tree is also put through a mutation pass: deliberate changes to the shipp
 scripts, one at a time, each run against the suite that covers it. `tests/lib/mutate.sh`
 runs it, `tests/lib/mutations.txt` lists the rows, and the run prints how many were
 caught. A full pass is hours - 113 of the 234 rows run `install-flow`, 1m53s each on
-this machine, and 89 run the tray suite, three to four minutes each - so a pass is done
+this machine, and 89 run the tray suite, 2m33s each - so a pass is done
 in pieces: `tests/lib/mutate.sh --suite install-flow` runs one suite's rows, and a
 `RESULTS=` file opens with the commit it was measured at, whether the tree was dirty,
 and which rows the run covered. `tests/lib/sweep.sh --out DIR` is the pass itself: one

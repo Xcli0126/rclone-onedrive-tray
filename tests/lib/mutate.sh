@@ -10,7 +10,7 @@
 #   RESULTS=mutations.txt tests/lib/mutate.sh     also write the table to a file
 #
 # A full pass is hours: 113 of the rows run install-flow (measured here: 1m53s each)
-# and 89 run the tray suite (three to four minutes each), so about ten hours together.
+# and 89 run the tray suite (2m33s each), so about ten hours together.
 # `--suite` is how a pass is done in pieces, one suite at a time, and the RESULTS file
 # records the commit, whether the tree was dirty, and which rows the run covered.
 #
@@ -291,16 +291,29 @@ WANT
 fi
 
 # A partial sweep is only useful if the file says what it covers, so the results file
-# opens with the commit it was measured at, whether the tree was dirty, and which rows
-# the run was for.
+# opens with the commit it was measured at, whether the tree was dirty, and the rows
+# this run will cover rather than the table's size.
+covered_rows() {  # how many rows this run is for
+    local ids_re=""
+    [ "${#wanted[@]}" -gt 0 ] && ids_re="^($(printf '%s|' "${wanted[@]}" | sed 's/|$//'))$"
+    awk -F'\t' -v suite="$suite_only" -v ids="$ids_re" '
+        /^#/ { next }
+        NF != 4 { next }
+        suite != "" && $4 != suite { next }
+        ids != "" && $1 !~ ids { next }
+        { n++ }
+        END { print n + 0 }' "$TABLE"
+}
+
 if [ -n "${RESULTS:-}" ]; then
     {
         printf '# %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
         printf '# commit %s%s\n' \
             "$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)" \
             "$([ -n "$(git -C "$REPO" status --porcelain 2>/dev/null)" ] && echo ' (dirty)')"
-        printf '# rows %s%s\n' "$(grep -cvE '^#|^$' "$TABLE")" \
-            "$([ -n "$suite_only" ] && echo " (suite $suite_only)")"
+        printf '# rows %s%s%s\n' "$(covered_rows)" \
+            "$([ -n "$suite_only" ] && echo " (suite $suite_only)")" \
+            "$([ "${#wanted[@]}" -gt 0 ] && echo " (ids: ${wanted[*]})")"
     } > "$RESULTS"
 fi
 

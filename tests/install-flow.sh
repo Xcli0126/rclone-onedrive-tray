@@ -538,6 +538,61 @@ check "and every key after that line is still set when it is sourced" \
              && [ "${RCLONE+set}" = set ] && [ "${SHOW_ICON+set}" = set ]' _ "$CARRY_CFG"
 rm -f "$CARRY_CFG.sourced-marker"
 
+# ------------------------------------------------- what a fresh install writes
+# The shape battery below compares the wizard against itself, so a changed default is
+# invisible to it: the seed is written by the same template. This is the other half,
+# and the place a default change becomes a decision - every value the template writes,
+# for a run that gave only the flags a person would type.
+title "what a fresh install writes"
+FRESH_HOME="$WORK/fresh-home"
+rm -rf "$FRESH_HOME"; mkdir -p "$FRESH_HOME"
+FRESH_CFG="$FRESH_HOME/.config/rclone-onedrive-tray/config"
+fresh_run() {
+    env HOME="$FRESH_HOME" XDG_CONFIG_HOME="$FRESH_HOME/.config" \
+        XDG_CACHE_HOME="$FRESH_HOME/.cache" \
+    bash "$SRC_DIR/setup.sh" --remote "$REMOTE" --local "$FRESH_HOME/OneDrive" \
+        --filters none --unit-name zz-fresh --interval 9 --yes --no-install
+}
+run "a fresh install writes its config" 0 "Wrote" fresh_run
+
+fresh_expect() {  # fresh_expect <key> <expected value>
+    local key="$1" want="$2" got
+    got="$(grep -m1 "^$key=" "$FRESH_CFG")"
+    if [ "$got" != "$key=\"$want\"" ]; then
+        printf '%s is %s, the template promises %s="%s"\n' "$key" "$got" "$key" "$want"
+        return 1
+    fi
+}
+
+fresh_all_values() {  # every value the template promises, as a table
+    fresh_expect REMOTE "$REMOTE" || return 1
+    fresh_expect LOCAL "$FRESH_HOME/OneDrive" || return 1
+    fresh_expect UNIT_NAME "zz-fresh" || return 1
+    fresh_expect INTERVAL_MIN "9" || return 1
+    fresh_expect MAX_DELETE "100" || return 1
+    fresh_expect BW_LIMIT "" || return 1
+    fresh_expect CHECK_ACCESS "0" || return 1
+    fresh_expect CHECK_FILENAME "" || return 1
+    fresh_expect BISYNC_ARGS "--resilient --recover --max-lock 2m --conflict-resolve none --conflict-loser num --stats 2s" || return 1
+    fresh_expect FILTERS_FILE "$FRESH_HOME/.config/rclone-onedrive-tray/filters.txt" || return 1
+    fresh_expect EXCLUDE_FOLDERS_FILE "$FRESH_HOME/.config/rclone-onedrive-tray/exclude-folders.txt" || return 1
+    fresh_expect LOG "$FRESH_HOME/.cache/rclone-onedrive-tray/sync.log" || return 1
+    fresh_expect OPEN_APP_CMD "" || return 1
+    fresh_expect OPEN_APP_NAME "the app" || return 1
+    fresh_expect UI_LANG "" || return 1
+    fresh_expect WATCH "1" || return 1
+    fresh_expect WATCH_DEBOUNCE "8" || return 1
+    fresh_expect WATCH_SETTLE "12" || return 1
+    fresh_expect WATCH_EXCLUDE "" || return 1
+    fresh_expect RETRIES "3" || return 1
+    fresh_expect RETRY_DELAY "60" || return 1
+    fresh_expect MAX_LOG_BYTES "5242880" || return 1
+    fresh_expect SHOW_ICON "1" || return 1
+    fresh_expect NOTIFY_ON_SUCCESS "1" || return 1
+    fresh_expect RCLONE "" || return 1
+}
+check "and every value in it is the one the template promises" fresh_all_values
+
 # ------------------------------------------------- every hand-written shape
 # The general form of both carry defects the reviews found, rather than one case per
 # defect: whatever the old file held, what the wizard writes has to source with every
@@ -605,10 +660,11 @@ shape_ok() {  # shape_ok <line> [preserve] -- the invariant, printing what broke
     # template line that stops being written, or a carried line that swallows the keys
     # after it, both leave one unset here even when they were unset before.
     for key in $SHAPE_KEYS; do
-        # The shape's own key is the one a repair may legitimately leave unset: the
-        # multi-word BISYNC_ARGS line is a command prefix to bash, so the shell reads
-        # the key as unset and carrying it faithfully keeps that reading.
-        if [ "$preserve" = 0 ] && [ "$key" = "$shape_key" ]; then
+        # The shape's own key may stay unset, but only where the old file already read
+        # it that way: the multi-word BISYNC_ARGS line is a command prefix to bash, so
+        # the shell reads the key as unset, and carrying it faithfully keeps that. A key
+        # bash read as set has to be set in what the wizard writes, whatever the shape.
+        if [ "$key" = "$shape_key" ] && grep -qx "$key=<UNSET>" <<<"$before"; then
             continue
         fi
         if grep -qx "$key=<UNSET>" <<<"$after"; then
