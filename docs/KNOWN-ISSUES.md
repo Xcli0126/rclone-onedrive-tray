@@ -47,7 +47,10 @@ still open from that review:
   command, and the shape is not a config value in any useful sense; it is written down
   rather than guessed at. The value half of the same line is fixed: an unquoted value
   ends at its first space, quotes and backslashes are removed the way bash removes them,
-  and a tilde is expanded before them.
+  and a tilde is expanded before them, where the shell expands one - `~`, `~/...`, a
+  `~user` that exists, and any of those after a `:`. A tilde the reader leaves alone
+  (`~+`, `~-`, `~~`) is refused by `local_path_problem()` wherever it stands in a `LOCAL`,
+  rather than resolved into a directory the wrapper would never sync.
 - A parameter form this reader does not implement is left exactly as the file wrote
   it. `shell_value()` answers `$VAR`, `${VAR}`, `${VAR:-word}`, `${VAR-word}`,
   `${VAR:+word}`, `${VAR:=word}`, a nested expansion inside the word, and the quoting

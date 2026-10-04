@@ -53,6 +53,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The reader expands a tilde only where the shell does, and a `LOCAL` that still holds one
+  is refused wherever it stands. `~`, `~/...` and a `~user` that exists are expanded,
+  after a `:` as well as at the front of the value; `~+` (the shell's own working
+  directory, which a tray process does not share), `~-` and `~~` are left as written.
+  A value like `/data:~+/OneDrive` was accepted and the delete guard rooted on a literal
+  `~+` directory while the wrapper synced something else; it is refused now.
+- The carry battery's value half was dead code for one commit, and the batch could not
+  see a key the wizard stops writing. `wc -l` on a one-line variable made the guard
+  `25 -eq 1`, so the comparison never ran, and the dumps could not tell an unset key from
+  an empty one. It now checks, for every shape, that every key the template writes is set
+  in what the wizard wrote, that nothing the shell could read before is gone after, and
+  that for a line bash reads as a plain assignment every value is the one bash read from
+  the old file - 41 shapes covering all 18 carried keys. Measured with the guard fixed
+  against `47cbedb`, the tree before the carry rule was rewritten: five shapes fail (an
+  escaped space, `$(command -v rclone)`, a backtick, `$(id)`, `$((1+1))`) where the same
+  battery looked green with the dead guard.
+
 - The mutation row for the invalidation inside `_set_units()` is caught, and the coverage
   gap it documented is closed. The ordering it needed: a tray that has cached the units as
   off, a pause arriving while they are still disabled, recovery putting them back, and then

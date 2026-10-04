@@ -211,7 +211,7 @@ tray-local-root-guard	bin/onedrive-tray	s#^        if os.path.dirname(root) == r
 # which bash does not expand in a sourced value, and a space at either end, which
 # bash keeps as part of the path. Expanding the tilde instead is what let the guard
 # resolve "/" with the process in "/" and hand back "/etc".
-tray-local-tilde-refused	bin/onedrive-tray	s|^    if text.startswith("~"):$|    if False:|	tray
+tray-local-tilde-refused	bin/onedrive-tray	s#^    if any(part.startswith("~") for part in text.split(":")):$#    if False:#	tray
 tray-local-space-refused	bin/onedrive-tray	s|^    if raw != text:$|    if False:|	tray
 # The other half of the tilde rule: an unquoted tilde is expanded the way the
 # shell expands it, and a quoted one is refused.

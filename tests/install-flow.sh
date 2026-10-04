@@ -600,14 +600,31 @@ shape_ok() {  # shape_ok <line> [preserve] -- the invariant, printing what broke
         bash -n "$CARRY_CFG" 2>&1 | head -2
         return 1
     fi
-    # Nothing the shell could read before may be gone after it: that half holds for
-    # every shape, including one whose own line is not a plain assignment.
+    # Every key the template writes has to be set in what it wrote, whatever the old
+    # file looked like. This is the half that does not depend on the old file: a
+    # template line that stops being written, or a carried line that swallows the keys
+    # after it, both leave one unset here even when they were unset before.
+    for key in $SHAPE_KEYS; do
+        # The shape's own key is the one a repair may legitimately leave unset: the
+        # multi-word BISYNC_ARGS line is a command prefix to bash, so the shell reads
+        # the key as unset and carrying it faithfully keeps that reading.
+        if [ "$preserve" = 0 ] && [ "$key" = "$shape_key" ]; then
+            continue
+        fi
+        if grep -qx "$key=<UNSET>" <<<"$after"; then
+            echo "$key is not set in the config the wizard wrote for: $line"
+            return 1
+        fi
+    done
+    # Nothing the shell could read before may be gone after it either, which is the
+    # half that holds for a shape whose own line is not a plain assignment.
     if [ -n "$before" ]; then
         for key in $CARRY_KEYS; do
-            case "$before" in *"$key=<UNSET>"*) continue ;; esac
-            case "$after" in
-                *"$key=<UNSET>"*) echo "$key was set before and is unset after: $line"; return 1 ;;
-            esac
+            grep -qx "$key=<UNSET>" <<<"$before" && continue
+            if grep -qx "$key=<UNSET>" <<<"$after"; then
+                echo "$key was set before and is unset after: $line"
+                return 1
+            fi
         done
     fi
     # And for a line bash reads as a plain assignment, every value has to be the one
@@ -628,6 +645,10 @@ shape_ok() {  # shape_ok <line> [preserve] -- the invariant, printing what broke
 # measured against this rather than against whatever the shape before it left behind.
 SHAPE_SEED="$CARRY_HOME/.shape-seed"
 rm -f "$SHAPE_SEED"
+# From nothing, not from whatever the cases above left behind: the here-doc case
+# before this one leaves a config that does not source, and a seed made from it would
+# already have those keys unset, which is exactly what the check above must not assume.
+rm -f "$CARRY_CFG"
 wizard_run --interval 9 >/dev/null 2>&1
 cp -f "$CARRY_CFG" "$SHAPE_SEED"
 
@@ -684,6 +705,7 @@ RETRY_DELAY=120
 MAX_LOG_BYTES=1048576
 NOTIFY_ON_SUCCESS=0
 UI_LANG=zh
+RCLONE=rclone
 SHAPES
 
 # ------------------------------------------------- the shipped config and XDG

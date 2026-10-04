@@ -455,12 +455,12 @@ def expand_shell_text(text: str, quoted: bool, depth: int = 0,
                 and (index == 0 or text[index - 1] == ":")):
             word = re.match(r"~[A-Za-z0-9_.-]*", text[index:]).group(0)
             after = index + len(word)
-            if after < len(text) and text[after] != "/":
+            if after < len(text) and text[after] not in "/:":
                 # `~+`, `~-`, `~~`: the word is not a tilde prefix. `~+` and `~-` are
                 # the shell's own working directories, which a tray process does not
                 # share, and `~~` is not a user at all, so the text is left as written
-                # and local_path_problem()'s tilde refusal sees it. Measured against
-                # bash: this is where the two answered differently before.
+                # and local_path_problem()'s tilde refusal sees it. A `:` does end the
+                # prefix, in an assignment as in the shell, so `~:/x` expands.
                 out.append(char)
                 index += 1
                 continue
@@ -600,7 +600,12 @@ def local_path_problem(value) -> str:
         # tray describe a directory the wrapper refuses.
         return (f'LOCAL="{raw}" has a space at one end, and the shell that sources '
                 f'the config keeps it as part of the path; write it without one.')
-    if text.startswith("~"):
+    # A tilde anywhere a word starts, not only at the front: the shell expands one
+    # after each `:` in an assignment, so a value like `/data:~+/OneDrive` is two
+    # words to the wrapper and this reader has no answer for the second. The scanner
+    # expands the tildes it can; one that survives is one this reader did not expand,
+    # and the guard must not resolve a directory the wrapper will not use.
+    if any(part.startswith("~") for part in text.split(":")):
         # A tilde that is still here was written inside quotes or escaped, and the
         # shell that sources the config expands neither: this is the literal relative
         # path "~/OneDrive" to onedrive-sync, which then refuses the run
@@ -612,10 +617,10 @@ def local_path_problem(value) -> str:
         # because load_config() expands it the way the shell does.
         suggestion = (f"LOCAL=~{text[1:]}" if text == "~" or text.startswith("~/")
                       else "the absolute path")
-        return (f'LOCAL="{text}" starts with a tilde this reader will not expand: it is '
-                f'either inside quotes, where the shell does not expand one either, or a '
-                f'form like "~+" that names a directory the tray does not share. Write '
-                f'{suggestion}, or the path with "$HOME" in it.')
+        return (f'LOCAL="{text}" holds a tilde this reader will not expand: it is either '
+                f'inside quotes, where the shell does not expand one either, or a form '
+                f'like "~+" that names a directory the tray does not share. Write '
+                f'{suggestion}, or the path with "$HOME" spelled out.')
     if not os.path.isabs(text):
         return (f'LOCAL="{text}" is not an absolute path; it has to be one, such '
                 f'as "$HOME/OneDrive".')

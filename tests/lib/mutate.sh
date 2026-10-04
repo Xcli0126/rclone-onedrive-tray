@@ -9,10 +9,10 @@
 #   tests/lib/mutate.sh --self-test        check the verdict classifier on its own
 #   RESULTS=mutations.txt tests/lib/mutate.sh     also write the table to a file
 #
-# A full pass is hours: 113 of the rows run install-flow (about twelve minutes each
-# here) and 89 run the tray suite. `--suite` is how a pass is done in pieces, one
-# suite at a time, which is also how a partial sweep is recorded: the verdicts in
-# RESULTS carry the commit they were measured at.
+# A full pass is hours: 113 of the rows run install-flow (measured here: 1m53s each)
+# and 89 run the tray suite (three to four minutes each), so about ten hours together.
+# `--suite` is how a pass is done in pieces, one suite at a time, and the RESULTS file
+# records the commit, whether the tree was dirty, and which rows the run covered.
 #
 # Each row of mutations.txt describes one small, deliberate change to a shipped
 # script: a rule removed, a comparison flipped, a default changed, a flag
@@ -290,7 +290,19 @@ WANT
     exit "$bad"
 fi
 
-[ -n "${RESULTS:-}" ] && : > "$RESULTS"
+# A partial sweep is only useful if the file says what it covers, so the results file
+# opens with the commit it was measured at, whether the tree was dirty, and which rows
+# the run was for.
+if [ -n "${RESULTS:-}" ]; then
+    {
+        printf '# %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+        printf '# commit %s%s\n' \
+            "$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)" \
+            "$([ -n "$(git -C "$REPO" status --porcelain 2>/dev/null)" ] && echo ' (dirty)')"
+        printf '# rows %s%s\n' "$(grep -cvE '^#|^$' "$TABLE")" \
+            "$([ -n "$suite_only" ] && echo " (suite $suite_only)")"
+    } > "$RESULTS"
+fi
 
 caught=0
 skipped=0

@@ -1880,9 +1880,11 @@ def scenario_pause_recovery_cached():
         with open(stamp, "w", encoding="utf-8") as fh:
             fh.write(str(int(time.time()) + 900))
         tray.recover_pause()
-        # Short enough that the poll's own once-every-twelve re-ask cannot be what
-        # refreshes the answer: what is under test is the invalidation recovery does.
-        pump(1.4)
+        # Wait for the poll to run rather than for a stopwatch: the poll is on a
+        # three-second timer, so pumping 1.4s proved nothing about whether it had run.
+        polls_before = getattr(tray, "poll_count", 0)
+        wait_for(lambda: getattr(tray, "poll_count", 0) > polls_before, 12.0)
+        pump(0.4)
         data.update({
             "stamp_left": os.path.exists(stamp),
             "enabled": [x for x in call_lines() if "enable --now" in x],
@@ -1896,7 +1898,9 @@ def scenario_pause_recovery_cached():
         # is the ordering the mutation row for that call was missing.
         data["asks_before"] = len([x for x in call_lines() if "is-enabled" in x])
         os.remove(stamp)
-        pump(1.4)
+        polls_before = getattr(tray, "poll_count", 0)
+        wait_for(lambda: getattr(tray, "poll_count", 0) > polls_before, 12.0)
+        pump(0.4)
         data.update({
             "asks_after": len([x for x in call_lines() if "is-enabled" in x]),
             "auto_seen_after": getattr(tray, "auto_seen", None),
