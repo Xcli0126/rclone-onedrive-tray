@@ -14,144 +14,53 @@ round uses a different model with a different lens, which is how the entries her
 were found in the first place.
 
 ## Open
-### What the pause redesign left
 
-The meta-review of the pause commit found, in its interim report, that the migration
-did not repair what it was for (fixed, with a case that drives the shape where the
-units are still disabled), that "Resume now" announced a resume it had not done
-(fixed), and that the pause commit wrote four corrupted lines into
-`tests/lib/mutations.txt` (removed). What is left:
+### A carried value is written back with its variables frozen
 
-- The dead `systemd-run` stubs and markers in `tests/tray.sh` are still there: no
-  code reads them since the pause stopped arming a transient timer, and a fixture
-  that nothing reads is a place the next reader looks for behaviour that is gone.
-  `docs/DEPENDENCIES.md` also still lists the transient timer in its systemd row.
-- The mutation row `tray-setunits-invalidate` survives now: `_auto_state` reads the
-  stamp before it reads `timer_state`, so the `_units_changed()` inside `_set_units`
-  is no longer load-bearing and nothing notices its removal. A full sweep is red for
-  that reason, which the `KNOWN_SURVIVORS` mechanism can excuse only if the row is a
-  decision rather than a line nobody needs. Measured: `s|        elif due is not
-  None:|        elif False:|` is caught (288 passed, 3 failed), so the tray half of
-  the pause can have a row after all, and the previous round's claim that sed could
-  not express one was wrong.
-- "Sync now" during a pause is a silent no-op: the wrapper exits 0 without invoking
-  rclone and writes no result line, so the menu gives no sign that the request was
-  refused. Under the old design the units were stopped, so the request started them
-  and really synced. Either the item says it is paused, or the wrapper's refusal is
-  what the tray reports.
-- The stamp is written with a truncating `open(..., "w")` although `write_atomic()`
-  exists two hundred lines above, and an empty read is "not a time", so a pause
-  written while the file is being truncated is deleted and the run syncs.
-- The pause check sits before the log rotation, so an install that spends its life
-  paused never rotates its log, and the file the cap exists for grows without it.
+`setup.sh` reads an existing config through `lib/config.sh`, which answers a value
+as the file wrote it, and then writes every carried value back through
+`config_quote()`, which escapes `$` and the backtick. A config holding
+`LOG="${XDG_CACHE_HOME:-$HOME/.cache}/sync.log"` therefore comes back as
+`LOG="\${XDG_CACHE_HOME:-$HOME/.cache}/sync.log"`, and the wrapper then reads a
+literal directory name where it used to expand one: a wizard re-run breaks the log
+path of an install that was working. The fix is to carry the old file's own line for
+a key rather than its value, so what the file already quoted stays quoted the way it
+was; that touches every line of the writer that carries a value, which is why it is
+a round of its own.
 
-### What the last meta-review found in the newest commits
+### Two test-side items from the meta-reviews
 
-Round nineteen's meta-review audited the two commits before it, and found eleven
-things, three of them the newest work's own. Its patch covers most of them and is
-not applied yet; they are listed here so the next round starts from the list rather
-than from a re-reading.
-
-- `install.sh` refuses `INTERVAL_MIN="0"` but not `"00"` or `"000"`: the unit then
-  ships `OnUnitInactiveSec=00min`, which systemd reads as zero, which is the sync
-  loop the validation was written to close. The changelog's "or is zero" is false.
-- `write_atomic()` opens the config path with a blocking `O_WRONLY`, so the write
-  side of the guard added for the read side stopped one file short: an
-  `EXCLUDE_FOLDERS_FILE` fifo freezes the tray from a GTK `toggled` handler. The
-  fix is `O_NONBLOCK` on that open, which raises `ENXIO` at once on a fifo.
-- The new "`LOG` is not a regular file" failure hits `LOG=/dev/null`, which the
-  wrapper handles perfectly well, so a working install is now called broken; the
-  same program's older log row already treats a device as a warning.
-- Three user-facing pages still carry the systemd premise that was corrected in the
-  unit and in the wrapper's header this round.
-- Two comments the same commit wrote are false: `lib/config.sh` says the shell
-  scripts read no path key with a variable in it, and `setup.sh` now reads `LOG`
-  through it; and "both treat it as a failure with the reason" is true of the
-  doctor and not of the tray, which returns an empty list silently.
-- One page still says three readers of the config, and the changelog claims the
-  pages say four.
-- The three NetworkManager hook cases pin the hook's text rather than its
-  behaviour: commenting the gate out - its text and its position kept, which is
-  exactly the old behaviour - leaves the whole of install-flow green. The hook is
-  not executed by any suite, so it wants a fixture with a stub `systemctl`.
-- `install-flow.sh` has a conjunct that can never match: `report()` pads its verdict
-  with `%-4s`, so the line reads `ok   logfile` and `^ok logfile` never does.
-- `KNOWN_SURVIVORS` excuses a row by id with nothing checking that the id exists or
-  that its reason still holds.
-- The drop-in's trailing-comment and trailing-whitespace strip has no case of its
-  own; the only fixture is a bare value.
-
-### What the loop's own fixes left behind
-
-Round seventeen's meta-review looked for the harm a long series of local fixes does,
-and found it. Most of it is fixed and in the changelog: the fifo and directory guards
-that stopped one file short (`EXCLUDE_FOLDERS_FILE`), the doctor's `logfile` row that
-called a directory writable while the wrapper refused it, `setup.sh` as a fourth
-reader of the config with both faults the shared reader had lost, and a case the loop
-had added that could not fail. Two things are still open, and one correction:
-
+- Two tray cases pin source identifiers rather than behaviour: renaming the
+  module-level `STRINGS` fails five cases, one of them unrelated to languages. A
+  rename is a refactor, and a suite that fails on one costs more to change than it
+  is worth.
 - Two guards for one thing: `_local_delete_path` re-checks the filesystem root after
   `local_path_problem` has already refused it, and the case that covers it
   monkeypatches the first guard away to reach the second. One of the two is dead, and
   the mutation row pins the dead one, so removing it means deciding which guard is
   the contract.
-- Two tray cases pin source identifiers rather than behaviour: renaming the
-  module-level `STRINGS` fails five cases, one of them unrelated to languages. A
-  rename is a refactor, and a suite that fails on one is a suite that costs more to
-  change than it is worth.
-- The tray's guard for a non-regular `EXCLUDE_FOLDERS_FILE` has no case of its own:
-  the doctor's is covered by a fixture that carries a twenty second clock, and the
-  tray's would need the same clock inside the driver rather than a suite that hangs
-  without it. The code is there for the reason `tail_text()` gives, and the doctor's
-  case is what pins the rule.
-- Correction to an earlier entry: the count of config readers was never three.
-  `onedrive-doctor` sources the file as well, so with `lib/config.sh` shared by the
-  three shell scripts that may not execute it, the readers are four: the tray's
-  parser, the wrapper, the doctor, and the shared sed reader. The pages that said
-  three were wrong when they were written.
-- A wizard re-run still re-escapes a carried `${VAR}` value, so a config holding
-  `LOG="${XDG_CACHE_HOME:-$HOME/.cache}/sync.log"` is written back with the variable
-  frozen into a literal path. It is pre-existing, the reviewer proved it against the
-  old reader as well, and the fix is a decision: write carried values raw, or expand
-  them as the shell would.
 
-### What is left of the accessibility review
+### The hook's cases pin its text, not its behaviour
 
-The state sentence reaches the indicator's title, the icon's accessible description
-and the menu's own accessible name, the settings dialog's labelled controls carry
-names and label-for relations, and the dialogs have titles and default actions. Four
-things from that review are decisions rather than work, and they are recorded here
-so the next reader knows they were considered:
-
-- No mnemonics. Alt+letter shortcuts would mean underscores inside the translation
-  keys, which is a change to every string in the table and to how translators see
-  them, and the settings window is reachable and usable with Tab and Return now.
-- A save and a cancel are still indistinguishable to a screen reader: the window
-  disappears either way and GTK 3 has no live region to announce the outcome in. The
-  tray's notifications cover the changes that matter (the sync, a failure, a pause),
-  and a settings save is reported by the settings that change.
-- The status rows stay insensitive, so arrow keys still skip them. Making them
-  sensitive would put "No sync recorded yet" and the quota line in the tab order of
-  a menu, where activating them does nothing.
-- `set_label` is not used. It draws text beside the icon in every panel, which is a
-  visible product change rather than an accessible one; the tooltip-sized channels
-  above carry the sentence without changing what the panel looks like.
-
-### `Tray` is one 900-line class
-
-Menu construction, the three-second poll, the six actions, the folder submenu and
-the settings hand-off all live in one class in `bin/onedrive-tray`. The audit's
-suggestion is a `TrayMenu` holding the widgets and the `_build_*` methods, which
-would roughly halve it.
-
-It moves attributes the test suite reaches into directly (`tray.menu`,
-`tray.item_status`, `tray.pause`, `tray.ind`), so it needs a decision about what a
-test is allowed to touch before anyone starts.
-
+The three NetworkManager hook cases read the generated hook's lines. Commenting its
+timer gate out - text and position kept, which is exactly the behaviour before the
+gate existed - leaves the whole of install-flow green, because no suite ever executes
+the hook. A fixture that runs it against a stub `systemctl` is what would make those
+cases measure something.
 
 ## Accepted, with the reason
 
-- A lone CR is read differently by the two readers of the log, and the tray's answer
+- `Tray` stays one class. The audit that suggested splitting it into a menu class
+  and a status class was right that it is 900 lines, and wrong that the size is the
+  problem: what the class holds is one widget tree whose parts are wired to each
+  other (the menu items call the tray's actions, the poll reads and writes the same
+  rows, the settings hand-off replaces them), and the suite reaches those parts by
+  name in ninety cases. A split would either move the names and change ninety cases
+  or add properties that forward to the new object, which is indirection without a
+  user on the other end. The decision the ledger entry asked for is this: a test may
+  touch the tray's own attributes, and the class stays one until a change makes the
+  seam obvious rather than theoretical.
+- - A lone CR is read differently by the two readers of the log, and the tray's answer
   is the one that stays. Python's `splitlines()` breaks on `\r` and grep does not, so
   one file holding CR-separated lines gives the tray a synced run and the doctor a
   failure. The tray also treats a marker whose `msg=` contains a failure's own prose
