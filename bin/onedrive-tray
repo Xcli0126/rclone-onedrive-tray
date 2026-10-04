@@ -454,6 +454,16 @@ def expand_shell_text(text: str, quoted: bool, depth: int = 0,
         if (tilde and char == "~" and mode is None
                 and (index == 0 or text[index - 1] == ":")):
             word = re.match(r"~[A-Za-z0-9_.-]*", text[index:]).group(0)
+            after = index + len(word)
+            if after < len(text) and text[after] != "/":
+                # `~+`, `~-`, `~~`: the word is not a tilde prefix. `~+` and `~-` are
+                # the shell's own working directories, which a tray process does not
+                # share, and `~~` is not a user at all, so the text is left as written
+                # and local_path_problem()'s tilde refusal sees it. Measured against
+                # bash: this is where the two answered differently before.
+                out.append(char)
+                index += 1
+                continue
             home = os.path.expanduser(word)
             if home != word:
                 out.append(home)
@@ -602,9 +612,10 @@ def local_path_problem(value) -> str:
         # because load_config() expands it the way the shell does.
         suggestion = (f"LOCAL=~{text[1:]}" if text == "~" or text.startswith("~/")
                       else "the absolute path")
-        return (f'LOCAL="{text}" has a tilde inside quotes, and the shell that sources '
-                f'the config does not expand one there; write it unquoted '
-                f'({suggestion}) or as "$HOME{text[1:]}".')
+        return (f'LOCAL="{text}" starts with a tilde this reader will not expand: it is '
+                f'either inside quotes, where the shell does not expand one either, or a '
+                f'form like "~+" that names a directory the tray does not share. Write '
+                f'{suggestion}, or the path with "$HOME" in it.')
     if not os.path.isabs(text):
         return (f'LOCAL="{text}" is not an absolute path; it has to be one, such '
                 f'as "$HOME/OneDrive".')

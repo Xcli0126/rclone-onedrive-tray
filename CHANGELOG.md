@@ -72,10 +72,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   config can hold. Both are replaced by asking bash, twice.
 - The config the wizard writes is checked with `bash -n` in a side file before it
   replaces the one on disk, and the two values it writes unquoted are validated rather
-  than carried blind: `WATCH` is written out as a 0 or a 1 - the spellings the two
-  readers accept, and the empty value the tray reads as off rather than the on
-  `onedrive-doctor`'s `${WATCH:-1}` would - and `INTERVAL_MIN` has to be a whole number
-  of minutes, or the wizard writes the default and says so. A hand-written `WATCH='a"b'`
+  than carried blind: `WATCH` is written out as a 0 or a 1, which is what both readers
+  agree on, and an empty value becomes the 0 the tray reads rather than the on that
+  `onedrive-doctor`'s `${WATCH:-1}` makes of it; `INTERVAL_MIN` has to be a whole
+  number of minutes, or the wizard writes the default and says so. A hand-written `WATCH='a"b'`
   used to be assembled into a file that no longer sourced, and an `INTERVAL_MIN`
   holding shell syntax was assembled into a file `bash -n` calls valid: that is a
   command in a file the wrapper runs with `.`, so the check is on the value rather than

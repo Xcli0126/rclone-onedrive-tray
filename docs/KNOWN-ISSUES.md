@@ -70,8 +70,9 @@ still open from that review:
   printed back as written, and so are the forms this reader has no answer for at all:
   `${A#prefix}`, `${A%suffix}`, `${#A}`, a backtick and an unterminated `${`. Tests
   pin all five, and pin the reason it is safe: the tray parses a config rather than
-  running one, so a `$(command)` or a backtick in a value stays text and is never
-  executed. A value nested more than twenty expansions deep is also left as written,
+  running one, so a `$(command)` or a backtick in a value stays text as far as the tray
+  is concerned. The shell that sources the same file does run it, as it did before the
+  tray read the value at all, and the wizard carries such a line as the file has it. A value nested more than twenty expansions deep is also left as written,
   which is a limit rather than an answer: without it a file holding thousands of
   `${A:-` recursed until Python raised. Answering those forms would mean a shell, and a shell for a
   config value the tray only ever reads as a path or a command line is a bigger thing
