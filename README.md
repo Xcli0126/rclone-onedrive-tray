@@ -150,6 +150,9 @@ build the baseline. If you would rather not answer prompts:
 ./setup.sh --remote onedrive:Notes --local ~/OneDrive --filters obsidian --yes
 ```
 
+`./setup.sh --help`, `./install.sh --help` and `./uninstall.sh --help` list every flag each
+one takes, including `--interval`, `--watch`, `--no-install`, `--prefix` and `--with-nm-dispatcher`.
+
 `--yes` deliberately stops short of the first sync. That one downloads everything and must not be
 interrupted, so it stays a decision you make rather than a side effect of answering "yes". It does
 overwrite an existing config when you give it flags, so a scripted re-run does not have to delete

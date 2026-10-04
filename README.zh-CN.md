@@ -103,6 +103,9 @@ cd rclone-onedrive-tray
 ./setup.sh --remote onedrive:Notes --local ~/OneDrive --filters obsidian --yes
 ```
 
+`./setup.sh --help`、`./install.sh --help`、`./uninstall.sh --help` 会列出每个脚本接受的
+全部参数，包括 `--interval`、`--watch`、`--no-install`、`--prefix` 与 `--with-nm-dispatcher`。
+
 `--yes` **故意不触发首次同步**。那一步会把云端全部拉下来且不能中断，所以它应该由你决定，而不是"一路回车"的副作用。带上配置项（`--remote`、`--local` 等）再给 `--yes` 时，它会直接覆盖已有的配置文件，脚本重跑不必先手动删文件；不给 `--yes` 时，遇到已有配置它会停下问你。
 
 所有东西都装进你的家目录，两个脚本都不会调用 `sudo`。下面这些是默认位置，每一项都跟随对应的 `XDG_*` 变量：设了 `XDG_CONFIG_HOME=/somewhere`，三条配置路径都会跟着搬过去。
