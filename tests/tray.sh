@@ -4981,6 +4981,7 @@ fi
 # and the tray did not. Measured with the shells themselves: v="$(cat stamp)" on
 # these bytes gives 9999999999 and the wrapper's length rule calls it a pause.
 if run_driver pause-recovery TRAY_PAUSE_CASE=nul; then
+    # shellcheck disable=SC2016  # $(cat ...) is the text the failure names
     check "a stamp whose bytes include a NUL is the pause the shells read" json_py '
 if d["auto_seen"] != "paused" or not d["stamp_left"]:
     print("the tray read %r as auto_seen=%r, stamp_left=%r, while $(cat ...) reads "
