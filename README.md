@@ -84,7 +84,11 @@ On a normal run, conflicts keep both copies. When a file changed on both sides, 
 versions instead of picking a winner, so nothing is lost. The cost is that you merge them by hand.
 The paragraph above is the exception: a `--resync` replaces instead of renaming.
 
-The log rotates at 5 MB, and the tray reads only the last 64 KB of it. A sync every five minutes
+Every run ends with one machine-readable line, `ONEDRIVE_RESULT v=1
+state=<synced|error|stopped> tag=<tag|none> when=HH:MM msg=<sentence>`, and that line is
+what the tray reads for the icon, the time and the reason. The English around it is what
+older versions wrote, and it is still what the tray and the doctor read when the line is
+not there. The log rotates at 5 MB, and the tray reads only the last 64 KB of it. A sync every five minutes
 writes roughly 240 KB a day, which is harmless for the disk but not for a `readlines()` call
 running every three seconds for a year.
 

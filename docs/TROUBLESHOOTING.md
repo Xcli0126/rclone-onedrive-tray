@@ -97,6 +97,14 @@ expired sign-in. Anything that fails before Microsoft answers is now `[network]`
 and `[auth]` is reserved for a real refusal (`invalid_grant`, 401, 403, an
 `AADSTS` code).
 
+Every run now ends with its verdict on one machine-readable line,
+`ONEDRIVE_RESULT v=1 state=<synced|error|stopped> tag=<tag|none> when=HH:MM msg=<sentence>`.
+`state=stopped` is a failure of a class a rerun cannot clear, `state=error` is a run that
+used up its attempts, `state=synced` is a run that worked, and `tag=` carries the same
+class the `[tag]` hints above use. `onedrive-doctor` reads that line when the log has one
+and falls back to the `[tag]` prose above for a log written by an older version, or by a
+run killed before its last line.
+
 **There was nothing to click.** The tray now has a **Re-authorise OneDrive…**
 item. It asks for confirmation, opens a terminal and the browser, and runs
 

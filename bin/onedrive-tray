@@ -1125,23 +1125,49 @@ def tail_text(path: str, max_bytes: int = 64 * 1024) -> str:
 
 TS_RE = re.compile(r"^(\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2})")
 HINT_RE = re.compile(r"\[(\w+)\]\s*(.*)$")
+# The sync wrapper states the outcome of a run in one machine-readable line,
+# written last, so the tray does not have to match English out of a log rclone
+# shares with it. msg is the last field and runs to the end of the line, so it
+# may hold spaces, commas, semicolons and a URL. Every field is required: a line
+# missing one is a truncated write or a rotation inside the line, and the prose
+# scan below answers it the way it answered a log an older wrapper wrote.
+#
+# The state is read as any token rather than as the three this format freezes.
+# A value this build does not know has to land on the failure side, because the
+# other side of the choice is a green icon for a run nobody has classified; a
+# state missing altogether still fails the match and takes the prose path.
+RESULT_RE = re.compile(
+    r"ONEDRIVE_RESULT v=\d+ state=(\S+) tag=([a-z]+|none) "
+    r"when=(\d{2}:\d{2}) msg=(.*)$")
 
 
 def read_last_result(text: str):
     """Return (state, 'HH:MM', tag, raw_hint) parsed from the tail of the log.
 
-    The sync wrapper prefixes its hint with a stable [tag] so the caller can
-    localise it without matching English text; raw_hint is the fallback. The
+    A line carrying ONEDRIVE_RESULT is the wrapper stating what a run did, and it
+    is what the caller reads in preference: the outcome and the tag come from the
+    wrapper's own classification rather than from matching English fragments in a
+    log shared with rclone. `msg` is the raw hint, and `tag=none` is the empty
+    tag, which is what the prose path gives a success too.
+
+    A log with no marker, or with a marker missing a field, takes the prose scan
+    unchanged: that is what an older wrapper wrote, and the [tag] it prefixes its
+    hint with is what the caller localises without matching English text. The
     caller passes the text, so one poll reads the log once rather than twice.
     """
     kind, when, tag, raw = "unknown", "", "", ""
-    for line in text.splitlines():
+    marker = None                  # (line index, line) of the newest marker
+    success_at = -1                # line index of the newest prose success
+    for index, line in enumerate(text.splitlines()):
+        if "ONEDRIVE_RESULT " in line:
+            marker = (index, line)
         match = TS_RE.match(line)
         if not match:
             continue
         ts = match.group(1)
         if "Bisync successful" in line:
             kind, when, tag, raw = "synced", ts, "", ""
+            success_at = index
         elif ("ERROR" in line or "Failed to" in line
               or "Bisync aborted" in line or "critical error" in line):
             kind, when = "error", ts
@@ -1150,6 +1176,23 @@ def read_last_result(text: str):
                 tag, raw = found.group(1), found.group(2)
             else:
                 tag, raw = "other", line
+    if marker is not None:
+        index, line = marker
+        found = RESULT_RE.search(line)
+        # The marker beats prose written before it. Prose written after it loses
+        # only to a success, which is a later run finishing: rclone can flush a
+        # line from this run's own subprocess after the wrapper wrote its marker,
+        # and that line still describes the same run. The index test is inclusive,
+        # because the marker's own msg can carry the prose word - a success whose
+        # message reads "Bisync successful" - and a marker outranked by the line
+        # holding it would report that line's clock instead of the run's own
+        # when=. The state carries only two meanings the tray has - a success and
+        # everything else - so a state this build does not know, `stopped`
+        # included, is a failure rather than a green icon.
+        if found and index >= success_at:
+            state, mark_tag, mark_when, raw = found.groups()
+            return ("synced" if state == "synced" else "error", mark_when,
+                    "" if mark_tag == "none" else mark_tag, raw)
     if " " in when:
         when = when.split(" ")[1][:5]
     return kind, when, tag, raw

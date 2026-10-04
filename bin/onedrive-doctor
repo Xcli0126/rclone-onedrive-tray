@@ -357,6 +357,19 @@ classify_hint() {  # classify_hint <text> -> a tag, or none
     else printf 'none'; fi
 }
 
+# marker_field <the part of the line after its number> <key> -> the value of
+# that field, or nothing when the line does not carry it. Parameter expansion
+# rather than a pattern: msg runs to the end of the line and may hold spaces,
+# "=" and "/", so it cannot be read as one more word.
+marker_field() {
+    local line="$1" key="$2" rest
+    case "$line" in
+        *" $key="*) rest="${line#* "$key"=}" ;;
+        *) return 0 ;;
+    esac
+    printf '%s' "${rest%% *}"
+}
+
 if [ ! -e "$LOG" ]; then
     report warn log "no log at $LOG yet, so no run has written one; the first sync creates it"
 elif [ ! -r "$LOG" ]; then
@@ -379,6 +392,40 @@ else
     hint_at="$(grep -n -iE "$ALL_HINTS" "$LOG" | tail -1 | cut -d: -f1 || true)"
     newest_hint="$(grep -iE "$ALL_HINTS" "$LOG" | tail -1 || true)"
     tag="none"; [ -n "$newest_hint" ] && tag="$(classify_hint "$newest_hint")"
+    # ---- the wrapper's own verdict, when the log carries one ----------------
+    # onedrive-sync ends a run with one ONEDRIVE_RESULT line, so a reader does
+    # not have to match English. When that line is newer than the newest prose
+    # hint it settles the class whatever English sits beside it; the table above
+    # is what still reads a log from an older wrapper, or one whose last run was
+    # killed before it could write its marker.
+    marker_at=""
+    marker_line="$(grep -n 'ONEDRIVE_RESULT v=1 ' "$LOG" | tail -1 || true)"
+    if [ -n "$marker_line" ]; then
+        marker_at="${marker_line%%:*}"
+        marker_text="${marker_line#*:}"
+        marker_state="$(marker_field "$marker_text" state)"
+        marker_tag="$(marker_field "$marker_text" tag)"
+        # state=synced is this run's success line, which is what the
+        # "a later run synced past it" comparison above works from.
+        if [ "$marker_state" = synced ] &&
+                { [ -z "$last_ok" ] || [ "$marker_at" -gt "$last_ok" ]; }; then
+            last_ok="$marker_at"
+        fi
+        if [ -z "$hint_at" ] || [ "$marker_at" -gt "$hint_at" ]; then
+            case "$marker_state" in
+                synced) tag="none"; newest_hint="" ;;
+                # A tag outside the a-z set (or none) cannot beat the table.
+                error|stopped)
+                    case "$marker_tag" in
+                        ''|none) ;;
+                        # The line without its number: everything that reads
+                        # newest_hint afterwards wants the timestamped text,
+                        # and the number is only for the comparisons above.
+                        *) tag="$marker_tag"; newest_hint="$marker_text" ;;
+                    esac ;;
+            esac
+        fi
+    fi
     # A hint that a later run synced past is history, which is the difference
     # between "this failed once" and "this is failing": reporting the first as a
     # fault sends a user to reconnect a remote that already works.

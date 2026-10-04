@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Every run now ends with one machine-readable line of its own:
+  `ONEDRIVE_RESULT v=1 state=<synced|error|stopped> tag=<tag|none> when=HH:MM
+  msg=<sentence>`. The tray reads it for the icon, the time and the reason it
+  gives, and `onedrive-doctor` reads it to classify the log, instead of both of
+  them matching English fragments in a file rclone also writes. `state=stopped` is
+  a failure class a rerun cannot clear, `state=error` is a run that used up its
+  attempts, and `tag=` carries the same class the `[tag]` hints use. The English
+  scan is still there and is what answers for a log written by an older version, or
+  by a run killed after rclone wrote and before the wrapper could, and
+  `tests/docs.sh` now holds the field names in the three files together so a rename
+  in one cannot leave the others silently on the fallback.
 - The suites run on two GitHub runners, `ubuntu-latest` and `ubuntu-22.04`, with
   `fail-fast` off. It found a real portability defect on its first run: a test
   imported `GioUnix`, which only exists from GLib 2.80, so it died on 22.04's

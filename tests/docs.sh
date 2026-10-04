@@ -220,6 +220,22 @@ if [ -z "$wrapper_tags" ]; then
     bad "no tags were found in bin/onedrive-sync; the pattern or the wrapper moved"
 fi
 
+# ------------------------------------------------- the run result line
+# The wrapper states each run's outcome on one machine-readable line and the tray
+# and the doctor read it. The field names are a contract between files written in
+# different languages, and nothing else keeps them spelled the same way: a rename
+# in one file leaves the readers silently falling back to the prose scan, which is
+# exactly what the line exists to replace.
+title "the run result line"
+check "the wrapper writes it" \
+    grep -q 'ONEDRIVE_RESULT v=1 state=' bin/onedrive-sync
+for field in state tag when msg; do
+    check "the tray parses the $field field" grep -q "$field=" bin/onedrive-tray
+done
+check "the doctor reads the same line" grep -q 'ONEDRIVE_RESULT' bin/onedrive-doctor
+check "and the tray accepts the version the wrapper writes" \
+    grep -qF 'ONEDRIVE_RESULT v=\d+' bin/onedrive-tray
+
 # ------------------------------------------------- the keys the settings window writes
 # SETTINGS_DEFAULTS is the list of keys the tray's settings window writes. Every
 # one of them has to be in the annotated config, or a reader of that file

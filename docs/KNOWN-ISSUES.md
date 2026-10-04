@@ -55,28 +55,6 @@ It moves attributes the test suite reaches into directly (`tray.menu`,
 test is allowed to touch before anyone starts.
 
 
-### The tray's state is read out of English prose in a shared log
-
-`onedrive-sync` writes its own messages and rclone's `--log-file` output into one
-file, and the tray decides what happened by matching fragments of English in the
-newest lines of it (`read_last_result`). What keeps that correct today is
-ordering: rclone writes "Bisync successful" after its own failures, so the last
-match wins. A wrapper message added after that line, or an rclone reword, flips a
-green icon to red with no test between them. The wrapper already tags its own
-hints as `[tag]` precisely so that consumers do not match English, and the doctor
-matches English anyway.
-
-The fix worth doing is one machine-readable line per run, a single `key=value` or
-JSON line at the end of the log, with the current prose reader kept for one
-release as a fallback. It would also retire the duplicated pattern table that the
-documentation check now merely guards.
-
-Reading the wrapper's `[tag]` instead of matching English is not that fix on its
-own, which is why the doctor has not been switched to it: the doctor is what a
-user runs when a run misbehaved, so it has to classify a log written by an older
-version of the wrapper, or by rclone alone, and a table it owns is what lets it do
-that. The two tables are held equal by `tests/docs.sh`.
-
 ### Two sync pairs cannot coexist, in three places
 
 `UNIT_NAME` is a config knob and `install.sh --prefix` exists, but a second pair
@@ -91,6 +69,15 @@ have to derive it from three file names.
 
 ## Accepted, with the reason
 
+- The prose in the shared log is now the fallback rather than the source of truth.
+  Every run ends with one machine-readable line (`ONEDRIVE_RESULT v=1 state=…
+  tag=… when=HH:MM msg=…`), and both the tray and the doctor read that first. The
+  English scan stays for two things it is the only answer to: a log written by an
+  older version of the wrapper, and a run killed after rclone wrote but before the
+  wrapper could. The doctor also keeps its own copy of the pattern table for the
+  same reason, and `tests/docs.sh` holds the two copies equal. What is left of the
+  original entry is the doctor's classification of a marker-less log, which the
+  table it owns is what lets it do.
 - `onedrive-check`'s name-length branch cannot fire on a local filesystem: the
   limit is the documented 255, and a filesystem refuses a name longer than 255
   bytes, so nothing on disk can reach it. It was found by mutating the limit to

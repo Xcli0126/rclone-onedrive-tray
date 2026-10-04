@@ -720,6 +720,23 @@ hint_for() {
     printf '[%s] %s' "$tag" "$msg"
 }
 
+# ---------------------------------------------------------------- result marker
+# One machine-readable line per run, written last, so a reader no longer has to
+# match English in a log this script shares with rclone. The format is frozen:
+#
+#   ONEDRIVE_RESULT v=1 state=<synced|error|stopped> tag=<a-z|none> when=HH:MM msg=<text>
+#
+# state=synced, whose tag is the word none, is a run that succeeded, state=stopped
+# is a run a permanent class stopped early (with that tag), and state=error is a
+# run that used up its attempts (with the tag of the last failure). msg is the
+# sentence the hint prints after its "[tag] ", so a reader can show what the log
+# shows without parsing it. It goes through log_line, so it carries the same
+# timestamp prefix as every other line, and when= is the local HH:MM the tray
+# shows today.
+result_line() {  # result_line <state> <tag> <message>
+    log_line "ONEDRIVE_RESULT v=1 state=$1 tag=$2 when=$(LC_ALL=C date '+%H:%M') msg=$3"
+}
+
 # ---------------------------------------------------------------- main loop
 # rclone only writes to --log-file once it has parsed its flags, so a bad flag
 # (an rclone older than the arguments this config passes) would leave nothing
@@ -734,6 +751,11 @@ trap 'rm -f "$ERRS"' EXIT
 # waits on a rerun that cannot succeed. Everything else (a network problem, a
 # held lock, an unclassified failure) is retried as before.
 PERMANENT_TAGS=" auth access maxdelete oldrclone "
+
+# 0 until a permanent class stops the loop. The closing marker has to say
+# state=stopped for that run and state=error for one that spent every attempt,
+# and both reach the same exit below, so this is what tells them apart.
+stopped=0
 
 for i in $(seq 1 "$RETRIES"); do
     # Again at the top of every attempt: an attempt that was killed leaves its
@@ -752,20 +774,25 @@ for i in $(seq 1 "$RETRIES"); do
 
     if [ "$rc" -eq 0 ]; then
         [ "$i" -gt 1 ] && echo "$APP: succeeded on attempt $i"
+        result_line synced none "sync completed"
         exit 0
     fi
 
     hint=$(hint_for)
     # hint_for prints "[tag] message", and it runs in a subshell, so the tag is
-    # read back out of the line it printed rather than left in a variable.
+    # read back out of the line it printed rather than left in a variable. The
+    # sentence after the tag is what the closing marker carries as msg, so the
+    # prose a person reads and the line a reader parses cannot drift apart.
     hint_tag="${hint#[}"
     hint_tag="${hint_tag%%]*}"
+    hint_msg="${hint#*] }"
     printf '%s: attempt %d/%d failed (rc=%d) %s\n' "$APP" "$i" "$RETRIES" "$rc" "$hint" >&2
     log_line "ERROR: attempt $i/$RETRIES failed (rc=$rc) $hint"
 
     case "$PERMANENT_TAGS" in
         *" $hint_tag "*)
             log_line "NOTICE: not retrying: [$hint_tag] cannot be cleared by another attempt, so this round stops after $i"
+            stopped=1
             break ;;
     esac
 
@@ -775,4 +802,9 @@ done
 # $i, not $RETRIES: a run that stopped at the first permanent failure made one
 # attempt, and saying it made three is the same kind of lie as "all 0 attempts".
 printf '%s: all %d attempts failed, giving up this round\n' "$APP" "$i" >&2
+if [ "$stopped" -eq 1 ]; then
+    result_line stopped "$hint_tag" "$hint_msg"
+else
+    result_line error "$hint_tag" "$hint_msg"
+fi
 exit 1

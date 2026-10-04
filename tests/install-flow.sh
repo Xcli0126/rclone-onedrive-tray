@@ -1934,6 +1934,132 @@ fi
 
 cap_config
 
+# --------------------------------------------- the wrapper's result marker
+# The tray and the doctor used to decide what a run did by matching English
+# fragments in a log the wrapper shares with rclone. The wrapper now ends every
+# run with one machine-readable line so a reader can take the outcome from it:
+#
+#   ONEDRIVE_RESULT v=1 state=<synced|error|stopped> tag=<a-z|none> when=HH:MM msg=<text>
+#
+# It is written through the script's own log_line, it is the last thing a run
+# writes, and there is exactly one per run. Every prose line around it is
+# unchanged, because that is what an older reader still matches.
+title "the wrapper's result marker"
+
+# result_field <log> <key> -- one field of the newest marker line, or nothing
+# when the log carries none. msg runs to the end of the line, so it is returned
+# whole; the other three are single words.
+result_field() {
+    local line
+    line="$(grep 'ONEDRIVE_RESULT v=1 ' "$1" 2>/dev/null | tail -1 || true)"
+    [ -n "$line" ] || return 0
+    case "$2" in
+        msg) printf '%s' "${line#* msg=}" ;;
+        *)   printf '%s' "$(printf '%s' "${line#* "$2"=}" | cut -d' ' -f1)" ;;
+    esac
+}
+result_count() { grep -c 'ONEDRIVE_RESULT v=1 ' "$1" 2>/dev/null || true; }
+
+# A successful run: one marker, state=synced tag=none, carrying the same minute
+# the timestamp on its own line does, and nothing written after it.
+cap_config
+: > "$CAP/sync.log"; : > "$WORK/cap-args"
+cap_env CAP_STDERR= CAP_RC=0 "$HOME/.local/bin/onedrive-sync" >/dev/null 2>&1 || true
+if [ "$(result_count "$CAP/sync.log")" = 1 ] &&
+        grep -qE '^[0-9]{4}/[0-9]{2}/[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} ONEDRIVE_RESULT v=1 state=synced tag=none when=[0-9]{2}:[0-9]{2} msg=.+' "$CAP/sync.log"; then
+    ok "a successful run writes exactly one marker, state=synced tag=none"
+else
+    bad "a successful run: $(result_count "$CAP/sync.log") marker(s), last '$(grep 'ONEDRIVE_RESULT' "$CAP/sync.log" | tail -1)'"
+fi
+if [ "$(tail -1 "$CAP/sync.log")" = "$(grep 'ONEDRIVE_RESULT' "$CAP/sync.log" | tail -1)" ]; then
+    ok "and it is the last thing the run writes"
+else
+    bad "the marker is not the last log line: '$(tail -1 "$CAP/sync.log")'"
+fi
+MARKER_WHEN="$(result_field "$CAP/sync.log" when)"
+MARKER_PREFIX_WHEN="$(grep -oE '^[0-9]{4}/[0-9]{2}/[0-9]{2} [0-9]{2}:[0-9]{2}' "$CAP/sync.log" |
+    tail -1 | cut -d' ' -f2)"
+if [ -n "$MARKER_WHEN" ] && [ "$MARKER_WHEN" = "$MARKER_PREFIX_WHEN" ]; then
+    ok "and when= is the local HH:MM the tray shows, the line's own minute"
+else
+    bad "when='$MARKER_WHEN' is not the timestamp minute '$MARKER_PREFIX_WHEN'"
+fi
+
+# A failure whose class a rerun can clear: the attempts run out, so the marker
+# says error and names the class, and msg is the hint sentence with the tag
+# taken off. [auth] is in PERMANENT_TAGS, so it stops the loop instead; that is
+# the case below.
+cap_config
+: > "$CAP/sync.log"; : > "$WORK/cap-args"
+NET_OUT="$(cap_env CAP_STDERR="$CAP_EOF" CAP_RC=1 "$HOME/.local/bin/onedrive-sync" 2>&1)" || true
+NET_HINT="$(grep -oE '\[network\] .*' <<<"$NET_OUT" | head -1)"; NET_HINT="${NET_HINT#\[network\] }"
+if [ "$(result_count "$CAP/sync.log")" = 1 ] &&
+        [ "$(result_field "$CAP/sync.log" state)" = error ] &&
+        [ "$(result_field "$CAP/sync.log" tag)" = network ]; then
+    ok "a run that used its attempts up writes state=error and the classified tag"
+else
+    bad "a network failure: $(grep 'ONEDRIVE_RESULT' "$CAP/sync.log" | tail -1)"
+fi
+if [ -n "$NET_HINT" ] && [ "$(result_field "$CAP/sync.log" msg)" = "$NET_HINT" ]; then
+    ok "and msg is the sentence the hint printed, without the tag"
+else
+    bad "marker msg '$(result_field "$CAP/sync.log" msg)' is not the hint sentence '$(grep -m1 -oE '\[network\] .*' "$CAP/sync.log")'"
+fi
+check "and the prose line the older readers match is still there" \
+    grep -qF 'ERROR: attempt 1/1 failed (rc=1) [network]' "$CAP/sync.log"
+
+# A permanent class stops the run at the first attempt. The marker has to say
+# stopped rather than error: "error" is what a run that spent every attempt
+# says, and the two sentences for a user are not the same.
+cap_config 'RETRIES="3"
+RETRY_DELAY="1"'
+: > "$CAP/sync.log"; : > "$WORK/cap-args"
+ACCESS_OUT="$(cap_env CAP_STDERR="$RETRY_ACCESS" CAP_RC=1 "$HOME/.local/bin/onedrive-sync" 2>&1)" || true
+ACCESS_HINT="$(grep -oE '\[access\] .*' <<<"$ACCESS_OUT" | head -1)"; ACCESS_HINT="${ACCESS_HINT#\[access\] }"
+if [ "$(result_count "$CAP/sync.log")" = 1 ] &&
+        [ "$(result_field "$CAP/sync.log" state)" = stopped ] &&
+        [ "$(result_field "$CAP/sync.log" tag)" = access ]; then
+    ok "a permanent class stops the run with state=stopped and its tag"
+else
+    bad "a stopped run: $(grep 'ONEDRIVE_RESULT' "$CAP/sync.log" | tail -1)"
+fi
+if grep -q 'state=error' "$CAP/sync.log"; then
+    bad "the stopped run also wrote an error marker"
+else
+    ok "and it is not written as an error, which would claim the attempts ran out"
+fi
+if [ -n "$ACCESS_HINT" ] && [ "$(result_field "$CAP/sync.log" msg)" = "$ACCESS_HINT" ]; then
+    ok "and its msg is the hint sentence for the stop"
+else
+    bad "stopped msg '$(result_field "$CAP/sync.log" msg)' is not the hint '$(grep -m1 -oE '\[access\] .*' "$CAP/sync.log")'"
+fi
+check "and only the one attempt was made" test "$(wc -l < "$WORK/cap-args")" -eq 1
+
+# A dry run changes nothing, so its marker is the only record of the run and it
+# has to describe what really happened: a clean dry run is a clean run, and one
+# whose rclone failed is a failure.
+cap_config
+: > "$CAP/sync.log"; : > "$WORK/cap-args"
+cap_env CAP_STDERR= CAP_RC=0 "$HOME/.local/bin/onedrive-sync" --dry-run >/dev/null 2>&1 || true
+check "a dry run passes --dry-run through to rclone" \
+    grep -q -- '--dry-run' "$WORK/cap-args"
+if [ "$(result_count "$CAP/sync.log")" = 1 ] &&
+        grep -q 'state=synced tag=none' "$CAP/sync.log"; then
+    ok "and a dry run nothing failed in writes one synced marker"
+else
+    bad "a clean dry run: $(grep 'ONEDRIVE_RESULT' "$CAP/sync.log" | tail -1)"
+fi
+: > "$CAP/sync.log"; : > "$WORK/cap-args"
+cap_env CAP_STDERR="$CAP_EOF" CAP_RC=1 "$HOME/.local/bin/onedrive-sync" --dry-run >/dev/null 2>&1 || true
+if [ "$(result_count "$CAP/sync.log")" = 1 ] &&
+        [ "$(result_field "$CAP/sync.log" state)" = error ] &&
+        [ "$(result_field "$CAP/sync.log" tag)" = network ]; then
+    ok "and a dry run whose rclone failed says error, not synced"
+else
+    bad "a failed dry run: $(grep 'ONEDRIVE_RESULT' "$CAP/sync.log" | tail -1)"
+fi
+cap_config
+
 # ------------------------------------------------- the help text and the flags
 # Every script prints its own header comment as its help, extracted up to the
 # first line that is not a comment. Two of them used a fixed line range instead,
@@ -2647,6 +2773,51 @@ if [ "$DOCTOR_RC" -eq 0 ] && grep -q "a network problem" <<<"$DOCTOR_OUT" &&
 else
     bad "cleared then network: exit $DOCTOR_RC, $(head -1 <<<"$DOCTOR_OUT")"
 fi
+
+# The wrapper now ends a run with one machine-readable marker, so the doctor
+# asks the log for one before it reads any English. The log below is the case
+# the prose reader gets wrong: rclone's line is a token fetch that never reached
+# Microsoft, which the table above calls [network], while the wrapper's own
+# verdict for that run is tag=auth. The marker is the newer of the two, and it
+# is the one the doctor has to believe.
+title "the doctor reads the wrapper's result marker"
+doc_fixture marker-auth-over-network
+: > "$DOC_FX/cache/sync.log"
+cat >> "$DOC_FX/cache/sync.log" <<'EOF'
+2026/10/04 03:54:30 CRITICAL: failed to get root: Get "https://graph.microsoft.com/v1.0/drives/b!/root": couldn't fetch token: Post "https://login.microsoftonline.com/common/oauth2/v2.0/token": EOF
+2026/10/04 03:54:31 ONEDRIVE_RESULT v=1 state=error tag=auth when=03:54 msg=the sign-in was refused or has expired; use the tray's 'Re-authorise OneDrive' item, or run: rclone config reconnect docfake:
+EOF
+DOCTOR_OUT="$(doc_run "$DOC_FX" --quiet --offline 2>&1)"; DOCTOR_RC=$?
+if [ "$DOCTOR_RC" -eq 1 ] && grep -q "expired sign-in" <<<"$DOCTOR_OUT" &&
+        ! grep -q "a network problem" <<<"$DOCTOR_OUT" &&
+        grep -qE 'from [0-9]+[smhd] ago' <<<"$DOCTOR_OUT"; then
+    ok "a marker's tag decides the class, not the English beside it"
+else
+    bad "marker tag=auth over a network line: exit $DOCTOR_RC, $(grep ' log ' <<<"$DOCTOR_OUT" | head -1)"
+fi
+
+# The other half of reading a marker: one saying the run synced is this log's
+# success line, so it clears the refusal written before it even though rclone
+# wrote no "Bisync successful" for the reader to find.
+doc_fixture marker-synced-clears
+: > "$DOC_FX/cache/sync.log"
+cat >> "$DOC_FX/cache/sync.log" <<'EOF'
+2026/10/04 03:54:30 CRITICAL: Failed to refresh token: oauth2: cannot fetch token: 400 Bad Request: {"error":"invalid_grant","error_description":"AADSTS70043: The refresh token has expired"}
+2026/10/04 04:00:00 ONEDRIVE_RESULT v=1 state=synced tag=none when=04:00 msg=sync completed
+EOF
+DOCTOR_OUT="$(doc_run "$DOC_FX" --offline 2>&1)"; DOCTOR_RC=$?
+if [ "$DOCTOR_RC" -eq 0 ] && ! grep -q "expired sign-in" <<<"$DOCTOR_OUT" &&
+        grep -q "every failure hint in it was followed by a sync that worked" <<<"$DOCTOR_OUT"; then
+    ok "a synced marker is the success line that clears an older refusal"
+else
+    bad "synced marker after a refusal: exit $DOCTOR_RC, $(grep ' log ' <<<"$DOCTOR_OUT" | head -1)"
+fi
+
+# A log with no marker at all stays on the pattern table, which is what reads a
+# log from a wrapper older than this, or one killed before it wrote its last
+# line. The case above named "a token fetch that never reached Microsoft is a
+# network problem, not an expiry" is that control, and the class battery is the
+# rest of it.
 
 doc_fixture timer-off
 DOC_TIMER_ENABLED="disabled"

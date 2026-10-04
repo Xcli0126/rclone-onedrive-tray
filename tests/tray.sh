@@ -2475,6 +2475,159 @@ def scenario_log_result():
     return cases
 
 
+def scenario_log_marker():
+    """The wrapper's ONEDRIVE_RESULT line, read in preference to English prose.
+
+    onedrive-sync states the outcome of a run in one machine-readable line,
+    written last:
+
+        ONEDRIVE_RESULT v=1 state=<synced|error|stopped> tag=<a-z|none>
+                        when=HH:MM msg=<text to the end of the line>
+
+    read_last_result() reads that in preference to matching fragments of English
+    in a log it shares with rclone, and keeps the prose scan for a log an older
+    wrapper wrote. The two readers are pinned to each other over one run, and the
+    corners where they cannot agree are measured rather than forced.
+    """
+    msg = ("network problem reaching the remote, so nothing was changed; "
+           "the next run will retry")
+    prose = "\n".join([
+        "2026/10/04 04:04:50 NOTICE: delete cap MAX_DELETE=100 of about 1200 "
+        "files = --max-delete 8%",
+        "2026/10/04 04:05:00 ERROR : : error listing: dial tcp: i/o timeout",
+        "2026/10/04 04:05:06 ERROR: attempt 3/3 failed (rc=1) [network] " + msg,
+    ]) + "\n"
+    marker = ("2026/10/04 04:05:06 NOTICE: ONEDRIVE_RESULT v=1 state=error "
+              "tag=network when=04:05 msg=" + msg + "\n")
+
+    data = {}
+    # One run described twice: the prose log the wrapper used to write, and the
+    # marker-only log it writes now. The two readers have to give the same
+    # answer, or a rewording on either side of the hand-off goes unnoticed.
+    data["prose_only"] = list(MODULE.read_last_result(prose))
+    data["marker_only"] = list(MODULE.read_last_result(marker))
+    data["markers_agree"] = data["prose_only"] == data["marker_only"]
+
+    # Both in one log: the prose line the run wrote, then the marker it wrote
+    # last for that same run. The marker is the newer statement, so it wins.
+    data["both"] = list(MODULE.read_last_result(prose + marker))
+
+    # rclone can flush a line after the marker. The marker is still newer than
+    # the last success and describes the run the prose lines describe, so it
+    # keeps winning over prose that comes after it.
+    data["marker_not_newest"] = list(MODULE.read_last_result(
+        prose + marker
+        + "2026/10/04 04:05:08 INFO  : there was nothing to transfer\n"))
+
+    # The case the prose reader gets wrong: the newest tagged prose line says
+    # network, and the wrapper, having read the whole log, says auth. Only the
+    # marker is right, and it is the marker that has to reach the tray.
+    auth_msg = ("the sign-in was refused or has expired; use the tray's "
+                "re-authorise item, or run: rclone config reconnect remote:")
+    auth_prose = ("2026/10/04 04:10:06 ERROR: attempt 3/3 failed (rc=1) "
+                  "[network] " + msg + "\n")
+    auth_marker = ("2026/10/04 04:10:06 NOTICE: ONEDRIVE_RESULT v=1 "
+                   "state=error tag=auth when=04:10 msg=" + auth_msg + "\n")
+    data["auth_prose"] = list(MODULE.read_last_result(auth_prose))
+    data["auth_marker"] = list(MODULE.read_last_result(auth_prose + auth_marker))
+
+    # The rule the ordering rests on: the marker wins over prose written before
+    # it, and loses only to a success written after it, because that success is a
+    # later run finishing. A success from an earlier run does not outrank it.
+    earlier_success = "2026/10/04 03:00:00 INFO  : Bisync successful\n"
+    data["after_success"] = list(MODULE.read_last_result(
+        earlier_success + auth_prose + auth_marker))
+    data["before_success"] = list(MODULE.read_last_result(
+        auth_marker + "2026/10/04 04:20:00 INFO  : Bisync successful\n"))
+
+    # msg is the last field and runs to the end of the line, so a URL, a comma
+    # and a semicolon in it are text rather than a field or a separator.
+    url_msg = "gave up on https://example.com/a?b=c&d=e; retry, later"
+    url_marker = ("2026/10/04 04:15:00 NOTICE: ONEDRIVE_RESULT v=1 "
+                  "state=error tag=network when=04:15 msg=" + url_msg + "\n")
+    data["url_msg"] = list(MODULE.read_last_result(url_marker))
+    data["url_msg_want"] = ["error", "04:15", "network", url_msg]
+
+    # state=synced is a success, and the line carries none of the words the
+    # prose reader matched on, so only the marker can make this green. tag=none
+    # is the empty tag the tray already uses.
+    synced_marker = ("2026/10/04 04:20:00 NOTICE: ONEDRIVE_RESULT v=1 "
+                     "state=synced tag=none when=04:20 "
+                     "msg=the run finished with nothing to transfer\n")
+    synced_prose = "2026/10/04 04:20:00 INFO  : Bisync successful\n"
+    data["synced_marker"] = list(MODULE.read_last_result(synced_marker))
+    data["synced_prose"] = list(MODULE.read_last_result(synced_prose))
+    data["synced_has_error_word"] = "ERROR" in synced_marker
+    # A success whose message is the prose word itself, written a minute after
+    # the when= it reports: the marker carries the run's own clock, so the marker
+    # is the one that has to answer, not the line holding it.
+    collided = ("2026/10/04 04:20:07 NOTICE: ONEDRIVE_RESULT v=1 state=synced "
+                "tag=none when=04:19 msg=Bisync successful\n")
+    data["collided"] = list(MODULE.read_last_result(collided))
+    # On a success the two readers differ in the fourth element alone: the prose
+    # reader has no message to give and the marker has one. The tray does not
+    # use raw on a success, so the two are compared where it does read them.
+    data["synced_agree"] = (data["synced_marker"][:3]
+                            == data["synced_prose"][:3])
+
+    # state=stopped is the failed state the tray already paints, and the tag is
+    # what tells it from state=error; nothing else reads the literal state.
+    stopped = ("2026/10/04 04:26:00 NOTICE: ONEDRIVE_RESULT v=1 state=stopped "
+               "tag=stopped when=04:26 msg=the run was asked to stop\n")
+    data["stopped"] = list(MODULE.read_last_result(stopped))
+
+    # An unknown state= is a failure, not a success: `error` and `stopped` are
+    # the two that mean a run ended badly, and a value a later wrapper invents
+    # is not something this tray may paint green.
+    unknown = ("2026/10/04 04:25:00 NOTICE: ONEDRIVE_RESULT v=1 state=future "
+               "tag=network when=04:25 msg=a state this tray does not know\n")
+    data["unknown_state"] = list(MODULE.read_last_result(unknown))
+
+    # A truncated write, and a rotation inside the line: a field is missing, so
+    # the line is not a marker to trust and the prose scan answers instead.
+    cut_short = ("2026/10/04 04:30:00 NOTICE: ONEDRIVE_RESULT v=1 state=error "
+                 "tag=net\n")
+    cut_earlier = ("2026/10/04 04:31:00 NOTICE: ONEDRIVE_RESULT v=1 "
+                   "state=error tag=networ\n")
+    data["truncated"] = list(MODULE.read_last_result(prose + cut_short))
+    data["truncated_earlier"] = list(MODULE.read_last_result(prose
+                                                             + cut_earlier))
+    data["truncated_want"] = data["prose_only"]
+
+    # Through poll()'s own path, one tray per log because _log_snapshot caches
+    # by signature: the icon and the status sentence come from _apply_state, so
+    # a marker that parsed but painted nothing is still caught here.
+    real_notify = MODULE.Notify
+    MODULE.Notify = install_fake_notify([])
+    try:
+        painted = {}
+        for name, text in (("marker", synced_marker),
+                           ("prose", synced_prose),
+                           ("truncated", prose + cut_short)):
+            log = os.path.join(WORK, "marker", name + ".log")
+            os.makedirs(os.path.dirname(log), exist_ok=True)
+            with open(log, "w", encoding="utf-8") as fh:
+                fh.write(text)
+            cfg = dict(MODULE.load_config())
+            cfg["LOG"] = log
+            tray = MODULE.Tray(cfg)
+            _, timer_state = tray.unit_states()
+            tray.was_syncing = True
+            tray.log_failure = None
+            tray.state = None
+            tray._apply_state(False, timer_state)
+            painted[name] = {
+                "state": tray.state,
+                "status": tray.item_status.get_label() or "",
+                "icon": os.path.basename(tray.shown_icon or ""),
+                "green": tray.shown_icon == tray.icons["synced"],
+            }
+        data["painted"] = painted
+    finally:
+        MODULE.Notify = real_notify
+    return data
+
+
 def scenario_hint_langs():
     """The `other` tag shows the wrapper's own line in either language.
 
@@ -3891,6 +4044,7 @@ SCENARIOS = {
     "config-unreadable": scenario_config_unreadable,
     "config-unreadable-poll": scenario_config_unreadable_poll,
     "log-result": scenario_log_result,
+    "log-marker": scenario_log_marker,
     "hint-langs": scenario_hint_langs,
     "log-cache-moved": scenario_log_cache_moved,
     "folders-stale": scenario_folders_stale,
@@ -4843,6 +4997,137 @@ if d["state"] != "error":
     raise SystemExit(1)
 if "22:21" not in d["status"] or "网络" not in d["status"]:
     print("status=%r" % (d["status"],))
+    raise SystemExit(1)
+'
+fi
+
+title "The wrapper's machine-readable result line"
+# read_last_result used to decide what a run did by matching fragments of English
+# in a log it shares with rclone, so a reword anywhere flipped the icon with no
+# test between them. onedrive-sync now states the outcome of a run in one
+# ONEDRIVE_RESULT line, written last, and the tray reads that in preference while
+# keeping the prose scan for a log an older wrapper wrote. Pinning the two
+# readers to each other over one run is what keeps the hand-off honest.
+if run_driver log-marker; then
+    check "a marker-only log reads as the prose log for the same run" json_py '
+want = ["error", "04:05", "network",
+        "network problem reaching the remote, so nothing was changed; "
+        "the next run will retry"]
+if d["marker_only"] != want:
+    print("marker-only: %r" % (d["marker_only"],))
+    print("want %r" % (want,))
+    raise SystemExit(1)
+if not d["markers_agree"]:
+    print("marker %r against prose %r" % (d["marker_only"], d["prose_only"]))
+    raise SystemExit(1)
+'
+    check "a log with only the old prose still reads as it did" json_py '
+want = ["error", "04:05", "network",
+        "network problem reaching the remote, so nothing was changed; "
+        "the next run will retry"]
+if d["prose_only"] != want:
+    print("prose-only: %r" % (d["prose_only"],))
+    print("want %r" % (want,))
+    raise SystemExit(1)
+'
+    check "a log holding both prefers the marker" json_py '
+if d["both"] != d["marker_only"]:
+    print("both: %r" % (d["both"],))
+    print("marker: %r" % (d["marker_only"],))
+    raise SystemExit(1)
+'
+    check "and rclone writing after the marker does not take it back" json_py '
+if d["marker_not_newest"] != d["marker_only"]:
+    print("marker not newest: %r" % (d["marker_not_newest"],))
+    print("marker: %r" % (d["marker_only"],))
+    raise SystemExit(1)
+'
+    check "a marker naming auth wins over prose that says network" json_py '
+if d["auth_prose"][2] != "network":
+    print("the prose reader no longer says network: %r" % (d["auth_prose"],))
+    raise SystemExit(1)
+if d["auth_marker"][2] != "auth":
+    print("the prose reader won over the marker: %r" % (d["auth_marker"],))
+    raise SystemExit(1)
+if d["auth_marker"][1] != "04:10":
+    print("when=%r" % (d["auth_marker"][1],))
+    raise SystemExit(1)
+'
+    check "a marker newer than the last success still wins" json_py '
+if d["after_success"] != d["auth_marker"]:
+    print("after an earlier success: %r" % (d["after_success"],))
+    print("marker: %r" % (d["auth_marker"],))
+    raise SystemExit(1)
+'
+    check "and a success written after the marker is a later run, and wins" json_py '
+if d["before_success"] != ["synced", "04:20", "", ""]:
+    print("after the marker: %r" % (d["before_success"],))
+    raise SystemExit(1)
+'
+    check "msg runs to the end of the line through a URL and punctuation" json_py '
+if d["url_msg"] != d["url_msg_want"]:
+    print("got %r" % (d["url_msg"],))
+    print("want %r" % (d["url_msg_want"],))
+    raise SystemExit(1)
+'
+    check "a state=synced marker is a success with no prose word in it" json_py '
+if d["synced_has_error_word"]:
+    print("the marker line carries ERROR, so this pins nothing")
+    raise SystemExit(1)
+if d["synced_marker"] != ["synced", "04:20", "",
+                          "the run finished with nothing to transfer"]:
+    print("marker: %r" % (d["synced_marker"],))
+    raise SystemExit(1)
+if not d["synced_agree"]:
+    print("marker %r against prose %r" % (d["synced_marker"],
+                                         d["synced_prose"]))
+    raise SystemExit(1)
+'
+    check "a success marker whose msg is the prose word still answers it" json_py '
+if d["collided"] != ["synced", "04:19", "", "Bisync successful"]:
+    print("collided: %r" % (d["collided"],))
+    raise SystemExit(1)
+'
+    check "and the tray paints that marker green" json_py '
+if not d["painted"]["marker"]["green"]:
+    print("painted: %r" % (d["painted"]["marker"],))
+    raise SystemExit(1)
+if d["painted"]["marker"]["state"] != "synced":
+    print("painted: %r" % (d["painted"]["marker"],))
+    raise SystemExit(1)
+'
+    check "a marker success and a prose success paint the same tray" json_py '
+for key in ("state", "status", "icon", "green"):
+    if d["painted"]["marker"][key] != d["painted"]["prose"][key]:
+        print("%s: marker %r against prose %r"
+              % (key, d["painted"]["marker"], d["painted"]["prose"]))
+        raise SystemExit(1)
+'
+    check "state=stopped is the failed state, and keeps its tag" json_py '
+if d["stopped"] != ["error", "04:26", "stopped",
+                    "the run was asked to stop"]:
+    print("stopped: %r" % (d["stopped"],))
+    raise SystemExit(1)
+'
+    check "an unknown state is an error, not a success" json_py '
+if d["unknown_state"] != ["error", "04:25", "network",
+                          "a state this tray does not know"]:
+    print("unknown state: %r" % (d["unknown_state"],))
+    raise SystemExit(1)
+'
+    check "a truncated marker falls back to the prose scan" json_py '
+if d["truncated"] != d["truncated_want"]:
+    print("truncated: %r" % (d["truncated"],))
+    print("want %r" % (d["truncated_want"],))
+    raise SystemExit(1)
+if d["truncated_earlier"] != d["truncated_want"]:
+    print("cut before when and msg: %r" % (d["truncated_earlier"],))
+    print("want %r" % (d["truncated_want"],))
+    raise SystemExit(1)
+'
+    check "and a poll over a truncated marker still lands on the failure" json_py '
+if d["painted"]["truncated"]["state"] != "error":
+    print("painted: %r" % (d["painted"]["truncated"],))
     raise SystemExit(1)
 '
 fi
