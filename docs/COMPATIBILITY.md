@@ -28,7 +28,14 @@ How much those cases would notice is a separate question from how many there are
 so the tree is also put through a mutation pass: deliberate changes to the shipped
 scripts, one at a time, each run against the suite that covers it. `tests/lib/mutate.sh`
 runs it, `tests/lib/mutations.txt` lists the rows, and the run prints how many were
-caught. `tests/lib/mutate.sh --lint` is the cheap half and CI runs it with
+caught. A full pass is hours - 113 of the 234 rows run `install-flow`, about twelve
+minutes each on this machine, and 89 run the tray suite - so a pass is done in pieces:
+`tests/lib/mutate.sh --suite install-flow` runs one suite's rows, and passing a
+`RESULTS=` file records the verdicts next to the commit they were measured at. The
+fast three suites were swept in full at `47cbedb`: 32 rows, 31 caught, 1
+survived-by-design, 0 skipped, 0 unresolved. The two slow suites have been swept row
+by row around each change rather than end to end, and that is the coverage that
+exists. `tests/lib/mutate.sh --lint` is the cheap half and CI runs it with
 `--self-test`: it checks in a second that every row names a file and a suite, that
 `sed` accepts its expression, and that the expression still changes that file,
 because a row that quietly stopped matching mutates nothing and a sweep is the only

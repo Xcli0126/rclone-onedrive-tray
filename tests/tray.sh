@@ -1839,6 +1839,56 @@ def scenario_pause_recovery():
     return data
 
 
+def scenario_pause_recovery_cached():
+    """A recovered pause refreshes the answer the poll cached before it ran.
+
+    `recover_pause()` puts the units back with `_set_units("enable", "--now")`, and
+    that is the one action with no `_after_*` callback of its own, so what keeps the
+    next tick from reading the pre-recovery answer back is the invalidation inside
+    `_set_units()` itself. The two stale-state cases call `_units_changed()` directly,
+    which is why the mutation row for that call survived; this is the ordering only
+    recovery has, built by caching the old answer first and recovering after it.
+    """
+    stamp = MODULE.PAUSE_STAMP
+    os.makedirs(os.path.dirname(stamp), exist_ok=True)
+    try:
+        os.remove(stamp)
+    except OSError:
+        pass
+    marker = os.path.join(os.environ["TRAY_CALLS"], "timer-disabled")
+    open(marker, "w").close()          # the units of the old shape were disabled
+
+    shown = []
+    real_notify = MODULE.Notify
+    MODULE.Notify = install_fake_notify(shown)
+    clear_calls()
+    try:
+        # No stamp yet, so this is a tray that polls and caches what the units say.
+        tray = build()
+        data = {"cached": wait_for(
+            lambda: getattr(tray, "timer_state", None) is not None, 10.0),
+            "cached_value": getattr(tray, "timer_state", None)}
+        # The pause appears while the units are still disabled, which is the shape a
+        # pause left by the older design has. The stub clears the marker when it is
+        # asked to enable them, so a fresh ask from here on answers "enabled".
+        with open(stamp, "w", encoding="utf-8") as fh:
+            fh.write(str(int(time.time()) + 900))
+        tray.recover_pause()
+        # Short enough that the poll's own once-every-twelve re-ask cannot be what
+        # refreshes the answer: what is under test is the invalidation recovery does.
+        pump(1.4)
+        data.update({
+            "stamp_left": os.path.exists(stamp),
+            "enabled": [x for x in call_lines() if "enable --now" in x],
+            "auto_seen": getattr(tray, "auto_seen", None),
+            "pause_label": tray.item_pause.get_label() or "",
+            "notices": list(shown),
+        })
+    finally:
+        MODULE.Notify = real_notify
+    return data
+
+
 def scenario_pause_write_failed():
     """A pause that cannot be written is not a pause, and says so.
 
@@ -4535,6 +4585,7 @@ SCENARIOS = {
     "excluded-name": scenario_excluded_name,
     "folder-delete": scenario_folder_delete,
     "pause-recovery": scenario_pause_recovery,
+    "pause-recovery-cached": scenario_pause_recovery_cached,
     "pause-write-failed": scenario_pause_write_failed,
     "openapp": scenario_openapp,
     "open-path-tool-missing": scenario_open_path_tool_missing,
@@ -5017,6 +5068,29 @@ if run_driver pause-recovery TRAY_PAUSE_CASE=nul; then
 if d["auto_seen"] != "paused" or not d["stamp_left"]:
     print("the tray read %r as auto_seen=%r, stamp_left=%r, while $(cat ...) reads "
           "the pause 9999999999" % ("9999999999\\0", d["auto_seen"], d["stamp_left"]))
+    raise SystemExit(1)
+'
+fi
+
+# The ordering only recovery has: an answer cached before the units were put back,
+# and a poll after it that must ask again rather than reuse it. The other stale-state
+# cases call _units_changed() directly, so the call inside _set_units() had no case
+# and its mutation row survived; this is the case that would retire the row.
+if run_driver pause-recovery-cached; then
+    check "a recovered pause does not reuse the answer cached before it" json_py '
+if not d["cached"] or d["cached_value"] != "off":
+    print("the cache held %r before recovery, so the ordering was not built"
+          % (d["cached_value"],))
+    raise SystemExit(1)
+if not any("enable --now" in x for x in d["enabled"]):
+    print("recovery did not put the units back: %r" % (d["enabled"],))
+    raise SystemExit(1)
+if d["auto_seen"] != "paused":
+    print("after recovery the tray reads %r, so it reused the answer from before it "
+          "(cached %r)" % (d["auto_seen"], d["cached_value"]))
+    raise SystemExit(1)
+if not d["stamp_left"]:
+    print("the pause stamp went with it")
     raise SystemExit(1)
 '
 fi

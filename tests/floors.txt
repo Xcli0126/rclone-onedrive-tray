@@ -21,4 +21,4 @@ dependency-matrix.sh 88
 install-flow.sh 510
 filters.sh 50
 docs.sh 107
-tray.sh 305
+tray.sh 306

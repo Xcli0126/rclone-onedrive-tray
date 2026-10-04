@@ -2,11 +2,17 @@
 #
 # mutate.sh: which of the shipped behaviours would the suites actually notice?
 #
-#   tests/lib/mutate.sh              every row
-#   tests/lib/mutate.sh <id>...      named rows only
-#   tests/lib/mutate.sh --lint       check the table itself, without running a suite
-#   tests/lib/mutate.sh --self-test  check the verdict classifier on its own
+#   tests/lib/mutate.sh                    every row
+#   tests/lib/mutate.sh <id>...            named rows only
+#   tests/lib/mutate.sh --suite tray       every row whose suite is the named one
+#   tests/lib/mutate.sh --lint             check the table itself, without a suite
+#   tests/lib/mutate.sh --self-test        check the verdict classifier on its own
 #   RESULTS=mutations.txt tests/lib/mutate.sh     also write the table to a file
+#
+# A full pass is hours: 113 of the rows run install-flow (about twelve minutes each
+# here) and 89 run the tray suite. `--suite` is how a pass is done in pieces, one
+# suite at a time, which is also how a partial sweep is recorded: the verdicts in
+# RESULTS carry the commit they were measured at.
 #
 # Each row of mutations.txt describes one small, deliberate change to a shipped
 # script: a rule removed, a comparison flipped, a default changed, a flag
@@ -31,6 +37,17 @@ WORK="$(mktemp -d)" || exit 1
 trap 'rm -rf "$WORK"' EXIT
 
 [ -f "$TABLE" ] || { echo "no $TABLE" >&2; exit 1; }
+
+# --suite <name>: the rows whose suite column is that name. Checked against the
+# table, so a typo is a refusal rather than a sweep that says "no row matched".
+suite_only=""
+if [ "${1:-}" = "--suite" ]; then
+    suite_only="${2:-}"
+    [ -n "$suite_only" ] || { echo "--suite needs a suite name" >&2; exit 1; }
+    grep -q "	$suite_only\$" "$TABLE" || {
+        echo "no row in $TABLE is run by the suite '$suite_only'" >&2; exit 1; }
+    shift 2
+fi
 wanted=("$@")
 
 # A row whose change no suite can notice, and that no suite can notice because the
@@ -41,14 +58,16 @@ wanted=("$@")
 # without a case. Without this list the harness could never exit 0, and every full
 # sweep would be red for a reason that is already recorded.
 KNOWN_SURVIVORS=" check-name-limit tray-setunits-invalidate tray-local-root-guard "
-# The second is a decision rather than an unreachable branch, and the reason is
-# narrower than it first read. The generation bump inside _set_units() is not
-# unobservable: a case shaped like stale-state() but calling _set_units() with an
-# answer in flight applies that answer without the bump and the menu row becomes
-# "Automatic sync is off" (measured, both trees). What the suite lacks is that
-# ordering - no pause scenario straddles a _set_units() call - and the alternative
-# was a case rather than the row. Removing the row would drop the mutation; keeping
-# it here with this note says the coverage is missing rather than unnoticed.
+# The second is redundancy rather than an unreachable branch: _units_changed() has
+# four call sites (apply_settings, _set_units, _after_pause, _after_resume) and every
+# action that goes through _set_units() also reaches one of the other three, so the
+# call inside it cannot be distinguished by any case. Measured: 305 passed, 0 failed on
+# this tree. The case that exists for the generation bump calls _units_changed()
+# itself. Removing the row would drop the mutation; keeping it here says the coverage
+# is missing rather than unnoticed, and docs/KNOWN-ISSUES.md names what a case would
+# have to do to retire it: end the pause after recover_pause()'s write and assert that
+# the tray asks the units again, since a case written for the recovery path alone is
+# green either way (the stamp answers _auto_state() while the pause is in force).
 # The third is unreachable by construction: _local_delete_path() resolves LOCAL with
 # the same expanduser+realpath that local_path_problem() refuses the filesystem root
 # with, so no value can be accepted by the first and land on "/" in the second. The
@@ -281,6 +300,9 @@ unresolved=0
 
 while IFS=$'\t' read -r id target expr suite; do
     case "$id" in ''|'#'*) continue ;; esac
+    if [ -n "$suite_only" ] && [ "$suite" != "$suite_only" ]; then
+        continue
+    fi
     if [ "${#wanted[@]}" -gt 0 ]; then
         hit=0
         for w in "${wanted[@]}"; do [ "$w" = "$id" ] && hit=1; done
