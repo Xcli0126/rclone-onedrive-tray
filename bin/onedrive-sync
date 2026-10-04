@@ -34,12 +34,13 @@ CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/rclone-onedrive-tray"
 
 die() { printf '%s: %s\n' "$APP" "$*" >&2; exit 1; }
 
+# The two refusals that have no log to write to stay with die(): this one, because
+# the file that would say where LOG is is the file that is missing, and the
+# unwritable-log one below, which is about the log itself. Everything after them
+# goes through refuse().
 [ -f "$CONFIG_FILE" ] || die "config not found: $CONFIG_FILE (run install.sh first)"
 # shellcheck source=/dev/null
 . "$CONFIG_FILE"
-
-: "${REMOTE:?REMOTE is not set in $CONFIG_FILE}"
-: "${LOCAL:?LOCAL is not set in $CONFIG_FILE}"
 
 RCLONE="${RCLONE:-rclone}"
 LOG="${LOG:-$CACHE_DIR/sync.log}"
@@ -53,6 +54,67 @@ CHECK_FILENAME="${CHECK_FILENAME:-}"
 MAX_LOG_BYTES="${MAX_LOG_BYTES:-5242880}"
 RETRIES="${RETRIES:-3}"
 RETRY_DELAY="${RETRY_DELAY:-60}"
+
+# ---------------------------------------------------------------- the log
+# An unwritable log directory used to be silent: the directory creation hid its
+# own failure, the run carried on and could "succeed" having recorded nothing,
+# and the failure hint then pointed at a file that could not exist. Open the log
+# for append here, before the run, and stop with the path if that fails. The log
+# and the cache are this run's own state, so they are still created for a run that
+# goes on to refuse below: the refusal has to be readable.
+#
+# This block comes before every other refusal in the file for that reason. A
+# refusal is a run that ends here, and a run whose only trace was a line on
+# stderr (the journal) left the log empty, so onedrive-doctor reported that
+# nothing had ever run and the tray showed an unknown state with no reason in it.
+log_dir="$(dirname "$LOG")"
+mkdir -p "$log_dir" "$CACHE_DIR" 2>/dev/null || true
+if ! log_err="$({ : >>"$LOG"; } 2>&1)"; then
+    # bash's own message ends with the reason ("... : Permission denied").
+    log_err="${log_err##*: }"
+    [ -n "$log_err" ] || log_err="it could not be opened for append"
+    die "cannot write the log $LOG: $log_err (check that $log_dir is writable, or point LOG somewhere else in $CONFIG_FILE)"
+fi
+
+# The stamp is pinned to the C locale on purpose: a locale whose %Y is not
+# Gregorian (fa_IR writes 1405 where this reads 2026) put a calendar in the log
+# that no reader can match. The doctor parses the field with `date -d` and the
+# tray parses it with strptime, and neither can know which calendar wrote the
+# file, so the writer is the only place this can be settled.
+log_line() { printf '%s %s\n' "$(LC_ALL=C date '+%Y/%m/%d %H:%M:%S')" "$*" >>"$LOG"; }
+
+# ---------------------------------------------------------------- result marker
+# One machine-readable line per run, written last, so a reader no longer has to
+# match English in a log this script shares with rclone. The format is frozen:
+#
+#   ONEDRIVE_RESULT v=1 state=<synced|error|stopped> tag=<a-z|none> when=HH:MM msg=<text>
+#
+# state=synced, whose tag is the word none, is a run that succeeded, state=stopped
+# is a run that cannot be cleared by another attempt (a permanent class, or a
+# refusal before rclone was ever invoked), and state=error is a run that used up
+# its attempts (with the tag of the last failure). msg is the sentence the hint
+# prints after its "[tag] ", so a reader can show what the log shows without
+# parsing it. It goes through log_line, so it carries the same timestamp prefix as
+# every other line, and when= is the local HH:MM the tray shows today.
+result_line() {  # result_line <state> <tag> <message>
+    log_line "ONEDRIVE_RESULT v=1 state=$1 tag=$2 when=$(LC_ALL=C date '+%H:%M') msg=$3"
+}
+
+# Stop the run with a message that is also in the log. die() alone goes to stderr,
+# which systemd puts in the journal, and the journal is not where the tray or the
+# doctor look. The tag is "other", the class whose raw sentence a reader shows
+# rather than interpreting, because every message here is this script's own.
+refuse() {  # refuse <message>
+    log_line "ERROR: $*"
+    result_line stopped other "$*"
+    die "$*"
+}
+
+# Checked here rather than with ${VAR:?}, which is bash printing its own line to
+# stderr before this script could write anything. The default expansion is what
+# covers an unset key under set -u; the ${VAR:?} form used to cover both.
+[ -n "${REMOTE:-}" ] || refuse "REMOTE is not set in $CONFIG_FILE"
+[ -n "${LOCAL:-}" ] || refuse "LOCAL is not set in $CONFIG_FILE"
 
 # A numeric key holding something else used to fail in three quiet ways: `seq 1
 # three` printed nothing, so the retry loop never ran and a run that never
@@ -70,9 +132,9 @@ require_positive_int() {  # require_positive_int <KEY>
     value="${value#"${value%%[![:space:]]*}"}"
     value="${value%"${value##*[![:space:]]}"}"
     case "$value" in
-        ''|*[!0-9]*) die "$key='${!1}' is not a positive integer in $CONFIG_FILE" ;;
+        ''|*[!0-9]*) refuse "$key='${!1}' is not a positive integer in $CONFIG_FILE" ;;
     esac
-    [ "$value" -gt 0 ] || die "$key='${!1}' is not a positive integer in $CONFIG_FILE"
+    [ "$value" -gt 0 ] || refuse "$key='${!1}' is not a positive integer in $CONFIG_FILE"
     printf -v "$key" '%s' "$value"
 }
 require_positive_int RETRIES
@@ -99,29 +161,14 @@ BW_LIMIT="${BW_LIMIT:-}"
 LOCK_FILE="$CACHE_DIR/sync.lck"
 RCLONE_CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/rclone"
 
-command -v "$RCLONE" >/dev/null 2>&1 || die "rclone not found in PATH"
+command -v "$RCLONE" >/dev/null 2>&1 || refuse "rclone not found in PATH"
 
 # Fail loudly if the locking tool is absent. Without this check a missing flock
 # makes the command exit 127, `!` turns that into success, and every run reports
 # "another sync is already running" while never invoking rclone at all: a silent
 # total failure that looks like normal activity in the log.
 command -v flock >/dev/null 2>&1 ||
-    die "flock not found (it ships with util-linux); refusing to run without the lock"
-
-# An unwritable log directory used to be silent: the directory creation hid its
-# own failure, the run carried on and could "succeed" having recorded nothing,
-# and the failure hint then pointed at a file that could not exist. Open the log
-# for append here, before the run, and stop with the path if that fails. The log
-# and the cache are this run's own state, so they are still created for a run that
-# goes on to refuse below: the refusal has to be readable.
-log_dir="$(dirname "$LOG")"
-mkdir -p "$log_dir" "$CACHE_DIR" 2>/dev/null || true
-if ! log_err="$({ : >>"$LOG"; } 2>&1)"; then
-    # bash's own message ends with the reason ("... : Permission denied").
-    log_err="${log_err##*: }"
-    [ -n "$log_err" ] || log_err="it could not be opened for append"
-    die "cannot write the log $LOG: $log_err (check that $log_dir is writable, or point LOG somewhere else in $CONFIG_FILE)"
-fi
+    refuse "flock not found (it ships with util-linux); refusing to run without the lock"
 
 # A missing LOCAL used to be created here, which turned a typo in the path or an
 # unmounted tree into a fresh directory that the run then treated as the sync
@@ -131,20 +178,13 @@ fi
 # this mkdir, and setup.sh creates the directory for a config it writes, so the
 # wrapper refuses too and names the one command that fixes it.
 if [ ! -d "$LOCAL" ]; then
-    die "$LOCAL does not exist. Create it first:  mkdir -p \"$LOCAL\"  (or point LOCAL at the right directory in $CONFIG_FILE)"
+    refuse "$LOCAL does not exist. Create it first:  mkdir -p \"$LOCAL\"  (or point LOCAL at the right directory in $CONFIG_FILE)"
 fi
-
-# The stamp is pinned to the C locale on purpose: a locale whose %Y is not
-# Gregorian (fa_IR writes 1405 where this reads 2026) put a calendar in the log
-# that no reader can match. The doctor parses the field with `date -d` and the
-# tray parses it with strptime, and neither can know which calendar wrote the
-# file, so the writer is the only place this can be settled.
-log_line() { printf '%s %s\n' "$(LC_ALL=C date '+%Y/%m/%d %H:%M:%S')" "$*" >>"$LOG"; }
 
 # ---------------------------------------------------------------- mutual exclusion
 # A manual run racing the systemd timer corrupts bisync's .lst listings.
 exec 9>"$LOCK_FILE" ||
-    die "cannot open the lock file $LOCK_FILE (is $CACHE_DIR writable?)"
+    refuse "cannot open the lock file $LOCK_FILE (is $CACHE_DIR writable?)"
 if ! flock -w 120 9; then
     echo "$APP: another sync is already running, skipping this run" >&2
     log_line "NOTICE: another run holds the lock, skipping"
@@ -416,7 +456,7 @@ fi
 for opt in "${BISYNC_OPTS[@]-}"; do
     case "$opt" in
         \"*|*\"|\'*|*\')
-            die "BISYNC_ARGS holds a token that begins or ends with a quote ('$opt'). The value is split on whitespace, not by a shell, so a pattern containing a space cannot be written here; put it in FILTERS_FILE or exclude-folders.txt" ;;
+            refuse "BISYNC_ARGS holds a token that begins or ends with a quote ('$opt'). The value is split on whitespace, not by a shell, so a pattern containing a space cannot be written here; put it in FILTERS_FILE or exclude-folders.txt" ;;
     esac
 done
 
@@ -718,23 +758,6 @@ hint_for() {
     fi
 
     printf '[%s] %s' "$tag" "$msg"
-}
-
-# ---------------------------------------------------------------- result marker
-# One machine-readable line per run, written last, so a reader no longer has to
-# match English in a log this script shares with rclone. The format is frozen:
-#
-#   ONEDRIVE_RESULT v=1 state=<synced|error|stopped> tag=<a-z|none> when=HH:MM msg=<text>
-#
-# state=synced, whose tag is the word none, is a run that succeeded, state=stopped
-# is a run a permanent class stopped early (with that tag), and state=error is a
-# run that used up its attempts (with the tag of the last failure). msg is the
-# sentence the hint prints after its "[tag] ", so a reader can show what the log
-# shows without parsing it. It goes through log_line, so it carries the same
-# timestamp prefix as every other line, and when= is the local HH:MM the tray
-# shows today.
-result_line() {  # result_line <state> <tag> <message>
-    log_line "ONEDRIVE_RESULT v=1 state=$1 tag=$2 when=$(LC_ALL=C date '+%H:%M') msg=$3"
 }
 
 # ---------------------------------------------------------------- main loop

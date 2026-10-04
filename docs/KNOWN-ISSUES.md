@@ -55,20 +55,63 @@ It moves attributes the test suite reaches into directly (`tray.menu`,
 test is allowed to touch before anyone starts.
 
 
-### Two sync pairs cannot coexist, in three places
+### Seven failures the scripts throw away
 
-`UNIT_NAME` is a config knob and `install.sh --prefix` exists, but a second pair
-would collide: the wrapper's lock is one file per cache directory, the tray's
-pause stamp is one file per cache directory, and the tray's single-instance lock
-is one fixed name, so only one pair can have a tray. None of that is written
-down anywhere except here.
+Round eleven put a reviewer on dropped failures: every `|| true`, `2>/dev/null`,
+bare `except` and discarded return value in `bin/*`, `install.sh`, `uninstall.sh`
+and `setup.sh`, read in context and split into the ones that lose the only signal
+and the roughly sixty that are cleanup or a probe. The seven below lose it, each
+has a reproduction in that reviewer's report, and none is fixed yet. They are not
+one defect, and the reason they are still open is that the channel differs by
+file: the shell scripts can print to stderr and to the log, while the tray has no
+log of its own and notifications are declared optional, so each site needs an
+answer rather than one patch.
 
-Either the three names get the unit name appended, which is a few lines, or the
-single-pair limit is a decision. This entry exists so the next person does not
-have to derive it from three file names.
+- `install.sh` prints `watcher disabled: WATCH is off in ...` after
+  `systemctl --user disable --now ... || true`, so a refused disable reads as a
+  watcher that is off while it is still enabled.
+- `install.sh` refreshes the watcher with `try-restart ... 2>/dev/null || true`,
+  so a refused restart says nothing anywhere and the loop keeps the old code
+  until reboot.
+- `uninstall.sh` swallows the same two `disable --now` calls and ends with
+  "Done", leaving units enabled whose scripts this run has just deleted.
+- `ensure_icons` in the tray catches `OSError` and hands back the five icon paths
+  anyway, so an unwritable icon directory gives a tray with no icon, no
+  notification and no message, and `onedrive-doctor` reports the icons as
+  present because it only tests that the directory exists.
+- The name check `--resync` is documented to run is skipped when `onedrive-check`
+  is absent or not executable, with nothing said, and the run still ends
+  `state=synced`.
+- `setup.sh` reads `rclone listremotes` with stderr dropped, so an rclone that
+  cannot read its own config is reported as "No rclone remotes are configured
+  yet" and the repair it offers cannot fix that.
+- `load_config` in the tray swallows the `OSError` from an unreadable config, and
+  the tray then reports `REMOTE is not set`, which sends the reader to the remote
+  rather than to the file's permissions.
 
 ## Accepted, with the reason
 
+- `install.sh` warns about a unit pair left by an earlier `UNIT_NAME` or
+  `--prefix`, rather than disabling it. What was wrong there was the warning, and
+  that is fixed: it names every file this installer writes under the old name and
+  prints the `systemctl --user disable --now` line for both halves of the pair.
+  Turning the pair off stays `uninstall.sh`'s job, which does it. An install that
+  disabled units it is no longer managing would also break the promise
+  `docs/UPDATING.md` makes, that an update does not interrupt a sync already
+  running: `disable --now` on the watcher kills that loop outright, and the
+  watcher is the half that would be running a sync at the time.
+- One sync pair per user account, and the three names that decide it. The entry
+  here used to say that a second pair would collide on the wrapper's lock, the
+  tray's pause stamp and the tray's single-instance lock, and that either those
+  names get the unit name appended or the single-pair limit becomes a decision.
+  The limit is the decision, because the three names are not what makes it one:
+  `~/.config/rclone-onedrive-tray/config` holds a single `REMOTE` and `LOCAL`, so
+  two pairs in a session would have one config between them whatever the lock
+  files are called, and the units of a second copy land in a directory the user
+  manager does not read. That is written down for the user now, in
+  `docs/COMPATIBILITY.md` and in both READMEs, which is what was missing.
+  Appending the unit name to three files would have left the config as the real
+  obstacle and moved the failure somewhere harder to find.
 - The prose in the shared log is now the fallback rather than the source of truth.
   Every run ends with one machine-readable line (`ONEDRIVE_RESULT v=1 state=…
   tag=… when=HH:MM msg=…`), and both the tray and the doctor read that first. The

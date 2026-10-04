@@ -386,13 +386,32 @@ fi
 
 # A UNIT_NAME that changed between installs leaves the old unit pair behind
 # still enabled, and nothing said so. The timer is the entry point systemd
-# starts, so it is the one named here.
+# starts, but naming only the timer was half a warning: the timer starts
+# <name>.service, and <name>-watch.service is a loop that goes on syncing by
+# itself, so a user who did what the line said kept a second sync path alive and
+# never heard about it. Every file this installer writes under a unit name is
+# listed, and the command that turns the pair off names both halves, which is
+# what uninstall.sh already does. A unit name whose service runs something other
+# than this project's scripts belongs to something else in the same directory,
+# and this install is not the one to point at it. The search names the scripts
+# rather than today's $BIN_DIR, because a reinstall under a different --prefix is
+# the same migration: anchoring it to the prefix in use found nothing and said
+# nothing.
 for sibling in "$UNIT_DIR"/*.timer; do
     [ -e "$sibling" ] || continue
     sibling_name="$(basename "$sibling")"
     [ "$sibling_name" = "$UNIT_NAME.timer" ] && continue
-    warn "$sibling_name is not the configured unit name; if an earlier install used it:"
-    warn "    systemctl --user disable --now $sibling_name"
+    sibling_unit="${sibling_name%.timer}"
+    grep -qE 'onedrive-(sync|watch)' "$UNIT_DIR/$sibling_unit.service" 2>/dev/null ||
+        continue
+    warn "$sibling_name is not the configured unit name; an earlier install of this script left it behind:"
+    for part in "$sibling_unit.service" "$sibling_name" \
+                "$sibling_unit-watch.service" "$sibling_name.d"; do
+        if [ -e "$UNIT_DIR/$part" ]; then
+            warn "    $UNIT_DIR/$part"
+        fi
+    done
+    warn "    systemctl --user disable --now $sibling_name $sibling_unit-watch.service"
 done
 
 # --------------------------------------------------------------- autostart

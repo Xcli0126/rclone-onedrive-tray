@@ -176,6 +176,20 @@ blocking on a browser sign-in, and the tray aborting without a display. Each of
 those now has a regression case in `tests/`, and the two places where they did
 not match the documentation were corrected rather than explained away.
 
+## Not supported by construction
+
+- One sync pair per user account, and the reason is three files rather than an
+  unfinished feature. `~/.config/rclone-onedrive-tray/config` holds one `REMOTE`
+  and one `LOCAL`; the wrapper's lock (`sync.lck`) and the tray's pause stamp
+  (`paused-until`) live in the one cache directory; and the tray takes one
+  `$XDG_RUNTIME_DIR/rclone-onedrive-tray.lock`, because a second tray would read
+  the same config and report the same pair. Two pairs in one session therefore
+  have one config between them. A second account gets its own Unix user, or its
+  own machine. The scratch tree in README's "Trying it alongside an existing
+  install" runs a second copy safely, and it is a trial rather than a second
+  pair: its units land in a directory this session's user manager does not read,
+  so nothing schedules them.
+
 ## Not verified
 
 Everything below is untested. It may well work. Nobody has watched it work, so
@@ -204,7 +218,6 @@ treat it as unknown rather than supported.
   machine could show.
 - Suspend and resume. The dispatcher hook covers the reconnect, but hibernate
   with a sync in flight has not been reproduced.
-- More than one account or more than one config at a time.
 - The tray's panel icon itself, and its notifications. A one-off test on a
   private Broadway display constructed the real menu and activated every handler
   with stubs, which found the ten defects listed in the changelog, and the

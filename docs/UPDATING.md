@@ -25,6 +25,14 @@ rewrites the systemd units from the current templates, and it leaves the autosta
 entry alone if you removed it, so unticking "Start tray at login" survives an
 update. It does not interrupt a sync that is already running.
 
+Renaming the unit (`UNIT_NAME` in the config) or moving the install to another
+prefix leaves the old units in `~/.config/systemd/user` still enabled, and the
+timer among them keeps running a script this install has just replaced.
+`install.sh` recognises a leftover pair by the scripts its service runs, lists the
+files that go with it and prints the `systemctl --user disable --now` line for
+both halves; `uninstall.sh` removes such a pair outright. The watcher is the half
+worth not missing: it is a loop, so it goes on syncing after the timer is off.
+
 ## Did the update take effect?
 
 Two checks, both cheap.

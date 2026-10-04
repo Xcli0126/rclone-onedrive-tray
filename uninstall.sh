@@ -111,8 +111,11 @@ for orphan in "$UNIT_DIR"/*.timer; do
     orphan_unit="$(basename "$orphan" .timer)"
     orphan_service="$UNIT_DIR/$orphan_unit.service"
     [ -e "$orphan_service" ] || continue
-    # Only pairs that run something this project installed.
-    grep -q "$BIN_DIR/onedrive-" "$orphan_service" 2>/dev/null || continue
+    # Only pairs that run something this project installed, and the scripts are
+    # what is named rather than this run's $BIN_DIR: a pair left by an install
+    # under a different --prefix names the same script, and anchoring the search
+    # to the prefix in use left its timer firing at a script this run deletes.
+    grep -qE 'onedrive-(sync|watch)' "$orphan_service" 2>/dev/null || continue
     if systemctl --user show-environment >/dev/null 2>&1; then
         # Both halves: the watcher is a long-lived process, so removing its unit
         # file while it stays enabled leaves it restarting against a script this

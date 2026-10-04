@@ -721,16 +721,66 @@ else
     grep -i 'watch' "$WORK/watch-yes-out.txt" | head -3 | sed 's/^/        /'
 fi
 
-# A UNIT_NAME changed between installs leaves the old timer enabled forever, and
-# nothing said so. The timer is the entry point systemd starts.
-title "a sibling timer left by an earlier unit name"
+# A UNIT_NAME changed between installs leaves the old unit pair enabled forever,
+# and nothing said so. Naming the timer alone was half the warning: the timer
+# starts <name>.service, and <name>-watch.service is a loop that goes on syncing
+# by itself, so a user who followed the advice kept a second sync path alive.
+title "a unit pair left by an earlier unit name"
+# Every file this installer would have written under the old name.
+printf '[Unit]\nDescription=old install\n[Service]\nExecStart=%s/onedrive-sync\n' \
+    "$WATCH_HOME/.local/bin" > "$WATCH_UNIT_DIR/zz-old-name.service"
 printf '[Timer]\nOnUnitInactiveSec=9min\n' > "$WATCH_UNIT_DIR/zz-old-name.timer"
-run "an install warns about a sibling timer that is not the configured name" 0 \
-    "systemctl --user disable --now zz-old-name.timer" \
-    env HOME="$WATCH_HOME" XDG_CONFIG_HOME="$WATCH_HOME/.config" \
-        XDG_CACHE_HOME="$WATCH_HOME/.cache" XDG_DATA_HOME="$WATCH_HOME/.data" \
-        PATH="$WATCH_STUB_DIR:$PATH" \
-    bash "$SRC_DIR/install.sh" --prefix "$WATCH_HOME/.local" --no-start
+printf '[Unit]\nDescription=old watcher\n[Service]\nExecStart=%s/onedrive-watch\n' \
+    "$WATCH_HOME/.local/bin" > "$WATCH_UNIT_DIR/zz-old-name-watch.service"
+mkdir -p "$WATCH_UNIT_DIR/zz-old-name.timer.d"
+printf '[Timer]\nOnUnitInactiveSec=9min\n' \
+    > "$WATCH_UNIT_DIR/zz-old-name.timer.d/interval.conf"
+# Another program's timer sits in the same directory. It is not this script's to
+# point at, and uninstall.sh applies the same test before it turns a pair off.
+printf '[Unit]\nDescription=something else\n[Service]\nExecStart=/usr/bin/true\n' \
+    > "$WATCH_UNIT_DIR/zz-not-ours.service"
+printf '[Timer]\nOnUnitInactiveSec=9min\n' > "$WATCH_UNIT_DIR/zz-not-ours.timer"
+# A pair from an install that used a different --prefix, which is the same
+# migration as a renamed unit: the search for the old pair was anchored to the
+# prefix this run installs into, so this one was never reported.
+printf '[Unit]\nDescription=old install\n[Service]\nExecStart=%s/bin/onedrive-sync\n' \
+    "$WATCH_HOME/.local-old" > "$WATCH_UNIT_DIR/zz-old-prefix.service"
+printf '[Timer]\nOnUnitInactiveSec=9min\n' > "$WATCH_UNIT_DIR/zz-old-prefix.timer"
+SIBLING_OUT="$(env HOME="$WATCH_HOME" XDG_CONFIG_HOME="$WATCH_HOME/.config" \
+    XDG_CACHE_HOME="$WATCH_HOME/.cache" XDG_DATA_HOME="$WATCH_HOME/.data" \
+    PATH="$WATCH_STUB_DIR:$PATH" \
+    bash "$SRC_DIR/install.sh" --prefix "$WATCH_HOME/.local" --no-start 2>&1)"
+SIBLING_RC=$?
+if [ "$SIBLING_RC" -eq 0 ]; then
+    ok "a leftover unit name does not stop the install"
+else
+    bad "an install beside a leftover unit name exits $SIBLING_RC"
+    printf '%s\n' "$SIBLING_OUT" | head -3 | sed 's/^/        /'
+fi
+if grep -qF -- "disable --now zz-old-name.timer zz-old-name-watch.service" \
+    <<<"$SIBLING_OUT"; then
+    ok "the warning turns off both halves of the leftover pair"
+else
+    bad "the warning leaves the leftover watcher enabled"
+    printf '%s\n' "$SIBLING_OUT" | grep -F 'old-name' | head -4 | sed 's/^/        /'
+fi
+if grep -qF "zz-old-name.timer.d" <<<"$SIBLING_OUT"; then
+    ok "and names the interval drop-in that goes with the pair"
+else
+    bad "the warning never mentions the leftover drop-in directory"
+fi
+if grep -qF "zz-not-ours" <<<"$SIBLING_OUT"; then
+    bad "another program's timer was reported as this install's leftover"
+    printf '%s\n' "$SIBLING_OUT" | grep -F 'zz-not-ours' | head -2 | sed 's/^/        /'
+else
+    ok "another program's timer in the same directory is left alone"
+fi
+if grep -qF -- "disable --now zz-old-prefix.timer" <<<"$SIBLING_OUT"; then
+    ok "and a pair installed under an older prefix is named as well"
+else
+    bad "a pair left by an install under another prefix went unreported"
+    printf '%s\n' "$SIBLING_OUT" | grep -i 'prefix' | head -3 | sed 's/^/        /'
+fi
 
 # ---------------------------------------------------------------- a prefix with a space
 # Exec= in a desktop entry is not a shell word list: the parser splits it on
@@ -2058,6 +2108,37 @@ if [ "$(result_count "$CAP/sync.log")" = 1 ] &&
 else
     bad "a failed dry run: $(grep 'ONEDRIVE_RESULT' "$CAP/sync.log" | tail -1)"
 fi
+
+# A refusal ends the run before rclone is invoked, and it used to leave no trace
+# beyond a line on stderr, which systemd puts in the journal. The log stayed
+# empty, so onedrive-doctor reported that nothing had ever run through the
+# wrapper, the tray showed an unknown state, and the sentence explaining it was
+# nowhere either of them reads. Every refusal now writes the ERROR line the log is
+# there for and one marker of its own.
+cap_config "LOCAL=\"$CAP/missing-local\""
+: > "$CAP/sync.log"; : > "$WORK/cap-args"
+REFUSED_OUT="$(cap_env CAP_STDERR= CAP_RC=0 "$HOME/.local/bin/onedrive-sync" 2>&1)"
+REFUSED_RC=$?
+if [ "$REFUSED_RC" -eq 1 ] && grep -qF "does not exist" <<<"$REFUSED_OUT"; then
+    ok "a run whose LOCAL is not there still refuses"
+else
+    bad "a missing LOCAL exited $REFUSED_RC: $(head -1 <<<"$REFUSED_OUT")"
+fi
+if [ "$(result_count "$CAP/sync.log")" = 1 ] &&
+        [ "$(result_field "$CAP/sync.log" state)" = stopped ] &&
+        [ "$(result_field "$CAP/sync.log" tag)" = other ]; then
+    ok "and leaves one marker, state=stopped tag=other"
+else
+    bad "a refused run: $(result_count "$CAP/sync.log") marker(s), last '$(grep ONEDRIVE_RESULT "$CAP/sync.log" | tail -1)'"
+fi
+check "and an ERROR line, which is what the doctor reads" \
+    grep -qF "ERROR: $CAP/missing-local does not exist" "$CAP/sync.log"
+if grep -qF "$CAP/missing-local" <<<"$(result_field "$CAP/sync.log" msg)"; then
+    ok "and the marker's msg names the directory that is missing"
+else
+    bad "marker msg does not name the missing LOCAL: '$(result_field "$CAP/sync.log" msg)'"
+fi
+check "and rclone was never invoked" test ! -s "$WORK/cap-args"
 cap_config
 
 # ------------------------------------------------- the help text and the flags
@@ -2979,6 +3060,15 @@ printf '[Unit]\nDescription=old install\n[Service]\nExecStart=%s/onedrive-sync\n
     "$HOME/.local/bin" > "$UNIT_DIR/$STALE.service"
 printf '[Unit]\nDescription=old install\n[Timer]\nOnUnitInactiveSec=5min\n' \
     > "$UNIT_DIR/$STALE.timer"
+# The same pair, installed from a prefix this uninstall is not using. Its
+# ExecStart names the same script, so it is this project's to turn off; the
+# search for an orphan was anchored to the running uninstall's own prefix, which
+# left a timer firing at a script this run has just deleted.
+STALE_ELSEWHERE="zz-stale-elsewhere"
+printf '[Unit]\nDescription=old install\n[Service]\nExecStart=%s/bin/onedrive-sync\n' \
+    "$HOME/.local-old" > "$UNIT_DIR/$STALE_ELSEWHERE.service"
+printf '[Unit]\nDescription=old install\n[Timer]\nOnUnitInactiveSec=5min\n' \
+    > "$UNIT_DIR/$STALE_ELSEWHERE.timer"
 # The stub above records `start` calls for the watcher case; from here on what it
 # records is the systemctl this run asks for, so start it empty.
 : > "$SYSTEMCTL_CALLS"
@@ -2998,6 +3088,8 @@ check_absent "removes the units" \
     "$UNIT_DIR/$UNIT.service" "$UNIT_DIR/$UNIT.timer" "$UNIT_DIR/$UNIT-watch.service"
 check_absent "removes a unit pair left by an earlier name" \
     "$UNIT_DIR/$STALE.service" "$UNIT_DIR/$STALE.timer"
+check_absent "and one left by an install under another prefix" \
+    "$UNIT_DIR/$STALE_ELSEWHERE.service" "$UNIT_DIR/$STALE_ELSEWHERE.timer"
 # The watcher half is a long-lived process: taking its unit file away while it
 # is still enabled leaves systemd restarting a script this run has just deleted,
 # so the uninstaller has to turn both halves of the pair off.

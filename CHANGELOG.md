@@ -36,6 +36,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A run that refused before invoking rclone wrote nothing to the sync log. The
+  refusal went to stderr, which systemd keeps in the journal, so the log stayed
+  empty: `onedrive-doctor` reported that nothing had ever run through the wrapper
+  and the tray showed an unknown state with no reason in it. The log is opened and
+  `log_line` and `result_line` are defined before the first refusal now, and a
+  refusal writes the `ERROR:` line the log is there for plus one
+  `state=stopped tag=other` marker of its own: a `LOCAL` that does not exist, a
+  missing rclone or `flock`, a numeric key that is not a number, a `BISYNC_ARGS`
+  token that begins or ends with a quote, or a lock file that cannot be opened.
+- `install.sh` warned about a unit pair left behind by an earlier `UNIT_NAME` by
+  naming the timer alone, so a user who ran the command it printed left
+  `<name>-watch.service` enabled and syncing on its own schedule, and the
+  interval drop-in with it. The warning lists every file this installer writes
+  under that name and turns off both halves of the pair, and it stays quiet about
+  another program's timer sitting in the same directory. Both it and
+  `uninstall.sh` also looked for such a pair by matching the prefix they were
+  running from, so a pair left by an install under a different `--prefix` was
+  reported by neither: the warning said nothing and the uninstaller left a timer
+  firing at a script it had just deleted. They match the scripts by name now.
 - `install.sh` wrote `ExecStart=` into the systemd unit without quoting, so a
   prefix containing a space produced a unit whose command systemd read as two
   arguments, and `systemd-analyze verify` rejected it outright. Both templates
@@ -426,6 +445,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fails instead of skipping, which is how that gate could be defeated by a space.
 - `install.sh` prints its "Installed" summary from the same list the install loop
   iterates, instead of a second hand-kept list of the scripts it ships.
+- The single-pair limit is written down where a user meets it. `onedrive-doctor`,
+  the wrapper and the tray each read the one `REMOTE` and `LOCAL` in the one
+  config file, so the three app-wide names it used to be blamed on (the wrapper's
+  `sync.lck`, the tray's `paused-until`, the tray's single-instance lock) are not
+  what makes it one. `docs/COMPATIBILITY.md` now says which files those are and
+  what a second account should do, and both READMEs carry the limit in their
+  list; it was filed under "not verified", where it read as something nobody had
+  tried rather than something the design does not do.
 - `tests/docs.sh` gained gates for the README menu diagram against the labels the
   tray itself builds, the README `BISYNC_ARGS` sample against the wrapper's
   default, the script list in `docs/UPDATING.md` against what `install.sh`

@@ -86,9 +86,11 @@ The paragraph above is the exception: a `--resync` replaces instead of renaming.
 
 Every run ends with one machine-readable line, `ONEDRIVE_RESULT v=1
 state=<synced|error|stopped> tag=<tag|none> when=HH:MM msg=<sentence>`, and that line is
-what the tray reads for the icon, the time and the reason. The English around it is what
-older versions wrote, and it is still what the tray and the doctor read when the line is
-not there. The log rotates at 5 MB, and the tray reads only the last 64 KB of it. A sync every five minutes
+what the tray reads for the icon, the time and the reason. The exception is a run that
+found another sync already holding the lock: it leaves the verdict to that one. The
+English around it is what older versions wrote, and it is still what the tray and the
+doctor read when the line is not there. The log rotates at 5 MB, and the tray reads only the
+last 64 KB of it. A sync every five minutes
 writes roughly 240 KB a day, which is harmless for the disk but not for a `readlines()` call
 running every three seconds for a year.
 
@@ -463,6 +465,10 @@ the one moment the notification matters.
 - The tray icon needs an AppIndicator-compatible shell. Stock GNOME needs the AppIndicator
   extension; KDE, Xfce and Cinnamon work out of the box.
 - Linux only.
+- One sync pair per account. The config file, the cache directory and the tray
+  icon are one per user, so a second account wants its own Unix user rather than
+  a second copy in the same session. [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)
+  names the files that make it one.
 - No Files On-Demand. Every synced file is a real file on disk, so the folder
   takes its full size. Unticking a folder in the tray and deleting the local copy
   is the way to reclaim space.

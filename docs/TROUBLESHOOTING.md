@@ -105,6 +105,14 @@ class the `[tag]` hints above use. `onedrive-doctor` reads that line when the lo
 and falls back to the `[tag]` prose above for a log written by an older version, or by a
 run killed before its last line.
 
+Two runs carry no line of their own. A run that finds the lock already held writes
+`NOTICE: another run holds the lock, skipping` and exits, because the verdict belongs to the
+run that is still going; and a run that stops before the log can be opened, which means no
+config or a log that cannot be written, has nowhere to write it. Everything else leaves one,
+including a refusal before rclone was ever invoked: a missing `LOCAL`, an rclone or `flock`
+that is not installed, a numeric key that is not a number. Those used to end on stderr alone,
+so the log stayed empty and both readers reported that nothing had run.
+
 **There was nothing to click.** The tray now has a **Re-authorise OneDrive…**
 item. It asks for confirmation, opens a terminal and the browser, and runs
 

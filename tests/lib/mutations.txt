@@ -250,47 +250,6 @@ sync-result-when-not-a-time	bin/onedrive-sync	s|when=\$(LC_ALL=C date '+%H:%M')|
 doctor-marker-ignored	bin/onedrive-doctor	s|^    if \[ -n "\$marker_line" \]; then|    if false; then|	install-flow
 doctor-marker-synced-not-success	bin/onedrive-doctor	s|^            last_ok="\$marker_at"$|            :|	install-flow
 doctor-marker-prose-wins	bin/onedrive-doctor	s|^        if \[ -z "\$hint_at" \].*then$|        if false; then|	install-flow
-Verdicts, all measured on the final code:
-| id | what it removes | verdict | suite's closing line |
-|---|---|---|---|
-| tray-marker-ignored | the marker path itself | caught | 264 passed, 11 failed |
-| tray-marker-state-known-only | the permissive `state` group; only `state=synced` then parses, so `error`/`stopped`/unknown fall back to prose | caught | 268 passed, 7 failed |
-| tray-marker-unknown-state-synced | the rule that anything but `synced` is a failure | caught | 273 passed, 2 failed |
-| tray-marker-tag-none | the `tag=none` → `""` mapping | caught | 273 passed, 2 failed |
-| tray-marker-truncated-unguarded | the guard around a marker that did not parse (`and` → `or`), so a truncated marker raises instead of falling back | caught | 259 passed, 1 failed |
-| tray-marker-beats-later-success | tracking of the newest success, so an older marker outranks a later success | caught | 274 passed, 1 failed |
-| tray-marker-own-line-success | the inclusive index test (`>=` → `>`), so a success marker is outranked by its own `msg` line | caught | 274 passed, 1 failed |
-| tray-marker-msg-ends-at-space | `msg` running to the end of the line (`(.*)` → `([^ ]*)`) | caught | 269 passed, 6 failed |
-`bash tests/lib/mutate.sh <ids>` reported `8 caught, 0 survived, 0 skipped,
-0 unresolved` across the eight (run as 7 + 1 because the guard text changed
-between two verification passes; both passes ran on the final tree).
-1. `read_progress()` / `PROG_RE` — `Transferred: 1.2 MiB / 3.4 MiB, 35%, 0.5 MiB/s`.
-   rclone's own stats block. The wrapper neither writes nor rewrites those lines,
-   and the marker is one outcome line per run with no percentage in it, so there
-   is nothing to point `read_progress` at. Stays.
-2. `BUSY_RE` — `* some/file.md: 35%`, the same stats block, per-file line. Same
-   reason. Stays.
-3. `STAMP_RE` — the leading timestamp, not prose at all.
-4. `HINT_RE` (`[tag] msg`) and the five prose keywords in `read_last_result`
-   (`Bisync successful`, `ERROR`, `Failed to`, `Bisync aborted`, `critical
-   error`) — now the fallback path only. They are what reads a log an older
-   wrapper wrote, and a log already in the cache directory outlives an upgrade of
-   either program. The marker makes them redundant for a new log, not for an old
-   one, so they stay for this release. The `[tag]` regex is deliberately not
-   replaced: it is also the only reader of a marker line whose `msg` was cut off.
-5. `unit_states()` — `lines[0] in ("active", "activating")` and
-   `answer.startswith(("enabled", "linked", "alias"))` /
-   `("disabled", "masked", ...)`. That is `systemctl`'s own vocabulary, not the
-   shared log; the wrapper cannot annotate it and there is no marker to give it.
-   Stays.
-6. The diagnostics dialog — `onedrive-doctor` and `onedrive-check` output is
-   shown verbatim; the tray classifies none of it. (The doctor's own English
-   matching is a different file and outside this round's ownership.)
-7. Everything else that looks like parsing is not prose: `remote_folders()`
-   splits `rclone lsf` output on newlines, `KEY_RE`/`truthy()` read the config
-   file's own format, and `read_progress`'s age check reads a timestamp.
-The clone is left dirty with both files changed. To see the failing-first run,
-revert the implementation alone and leave the tests in place:
 tray-marker-ignored	bin/onedrive-tray	s|if found and index >= success_at:|if False:|	tray
 tray-marker-state-known-only	bin/onedrive-tray	s|state=(\\S+)|state=(synced)|	tray
 tray-marker-unknown-state-synced	bin/onedrive-tray	s|return ("synced" if state == "synced" else "error", mark_when,|return ("synced" if state != "error" else "error", mark_when,|	tray
@@ -299,3 +258,16 @@ tray-marker-truncated-unguarded	bin/onedrive-tray	s|if found and index >= succes
 tray-marker-beats-later-success	bin/onedrive-tray	s|success_at = index|success_at = -1|	tray
 tray-marker-own-line-success	bin/onedrive-tray	s|if found and index >= success_at:|if found and index > success_at:|	tray
 tray-marker-msg-ends-at-space	bin/onedrive-tray	s|msg=(.*)\$|msg=([^ ]*)|	tray
+# as a whole pair rather than as a bare timer
+# round eleven: the leftover a changed UNIT_NAME or --prefix leaves behind.
+# install.sh warned about the timer alone and about the current prefix only;
+# uninstall.sh removed the current prefix only.
+install-sibling-watch-named	install.sh	s|disable --now $sibling_name $sibling_unit-watch.service|disable --now $sibling_name|	install-flow
+install-sibling-not-ours	install.sh	s#grep -qE 'onedrive-(sync|watch)' "$UNIT_DIR/$sibling_unit.service"#grep -qE 'zz-never-matches' "$UNIT_DIR/$sibling_unit.service"#	install-flow
+install-sibling-dropin-unlisted	install.sh	s|"$sibling_unit-watch.service" "$sibling_name.d"|"$sibling_unit-watch.service"|	install-flow
+install-sibling-prefix-anchored	install.sh	s#grep -qE 'onedrive-(sync|watch)' "$UNIT_DIR/$sibling_unit.service"#grep -qE "$BIN_DIR/onedrive-" "$UNIT_DIR/$sibling_unit.service"#	install-flow
+uninstall-stale-prefix-anchored	uninstall.sh	s#grep -qE 'onedrive-(sync|watch)' "$orphan_service"#grep -qE "$BIN_DIR/onedrive-" "$orphan_service"#	install-flow
+# round eleven, the wrapper half: a refusal has to leave the same trace as any
+# other run, or both readers report that nothing ever ran.
+sync-refusal-marker-dropped	bin/onedrive-sync	s|result_line stopped other|:|	install-flow
+sync-local-refusal-unlogged	bin/onedrive-sync	s|    refuse "$LOCAL does not exist|    die "$LOCAL does not exist|	install-flow
