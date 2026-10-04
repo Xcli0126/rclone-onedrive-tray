@@ -361,10 +361,28 @@ carry_assign() {  # carry_assign <KEY> <default> -> the whole assignment, as wri
     line="$(printf '%s\n' "$OLD_CONFIG" |
         grep -E "^[[:space:]]*(export[[:space:]]+)?$key=" | tail -1 |
         sed -e 's/^[[:space:]]*//' -e 's/^export[[:space:]]\{1,\}//')"
+    # Only a line that is the whole assignment is carried: the key, then either one
+    # double-quoted string with no quote or backslash inside it, or a bare word of
+    # characters a value plausibly uses. Anything else falls back to the value the
+    # reader can see, which is what the writer did before. A value written over two
+    # lines is valid shell, and copying only its first line produced a config that
+    # was not: measured on the version that took any matching line,
+    # OPEN_APP_CMD="one<newline>two" came back with the first line alone, bash -n
+    # refused the result, and the wizard still printed "Wrote". A trailing comment,
+    # a continuation, a CR and an unterminated quote are excluded the same way, and
+    # bash -n below is the net for anything this pattern still lets through.
+    if ! printf '%s' "$line" |
+            grep -qE "^${key}=(\"([^\"\\\\]*)\"|[A-Za-z0-9_@%+=:,./-]*)$"; then
+        line=""
+    fi
     if [ -n "$line" ]; then
         printf '%s' "$line"
     else
-        printf '%s="%s"' "$key" "$(config_quote "$default")"
+        # The value the reader can see, quoted the way every written value is, so a
+        # line this function will not copy whole is still carried the way the writer
+        # carried it before: a multi-line value and a broken quote both come back as
+        # the empty string the reader answers, not as the template default.
+        printf '%s="%s"' "$key" "$(config_quote "$(carry "$key" "$default")")"
     fi
 }
 
@@ -396,7 +414,12 @@ else
     WATCH="$(carry WATCH 1)"
 fi
 
-cat > "$CONFIG_FILE" <<EOF
+# Written to a side file and moved into place only once bash agrees it is shell.
+# The heredoc carries the old file's own lines through, so a value this project has
+# never seen is a way to write a config nothing can source; refusing leaves the
+# previous file untouched instead.
+CONFIG_NEW="$CONFIG_FILE.new$$"
+cat > "$CONFIG_NEW" <<EOF
 # Written by setup.sh on $(date '+%Y-%m-%d %H:%M')
 REMOTE="$(config_quote "$REMOTE")"
 LOCAL="$(config_quote "$LOCAL_IN")"
@@ -432,7 +455,14 @@ $(carry_assign NOTIFY_ON_SUCCESS 1)
 # The rclone binary to run, by name or by path.
 $(carry_assign RCLONE "")
 EOF
-chmod 0644 "$CONFIG_FILE" "$FILTERS_FILE"
+if ! bash -n "$CONFIG_NEW" 2>"$CONFIG_FILE.syntax"; then
+    printf '%s\n' "$(sed -n '1,3p' "$CONFIG_FILE.syntax")" >&2
+    rm -f "$CONFIG_NEW" "$CONFIG_FILE.syntax"
+    die "refusing to replace $CONFIG_FILE: the config this run would write is not shell (the line above is bash's complaint). The file on disk is unchanged."
+fi
+rm -f "$CONFIG_FILE.syntax"
+chmod 0644 "$CONFIG_NEW" "$FILTERS_FILE"
+mv -f "$CONFIG_NEW" "$CONFIG_FILE"
 
 echo
 say "Wrote $CONFIG_FILE"

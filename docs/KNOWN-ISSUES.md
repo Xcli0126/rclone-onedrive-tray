@@ -30,11 +30,14 @@ still open from that review:
   ordering rather than the observability. The case is what would retire the row.
 - The cache directory is one expression in two shells and one `expanduser` call in
   Python, with `XDG_CACHE_HOME` unset and `HOME` handled three different ways.
-  Measured: with `HOME` unset both shells stop at their first use of it
-  (`bash: HOME: unbound variable`, exit 127, under their `set -uo pipefail`), with
-  `HOME=` both compute `/.cache/rclone-onedrive-tray` (the doctor's `pause_dir` and
-  the wrapper's `CACHE_DIR` are the same expression with a different name), and
-  Python's `expanduser("~")` answers the passwd home instead. No shell this project
+  Measured: with `HOME` unset both scripts stop at their first use of it
+  (`bin/onedrive-sync: line 32: HOME: unbound variable`, exit 1, under their
+  `set -uo pipefail`; a bare `bash -c` holding the same expression exits 127, which
+  is where the number in the earlier version of this bullet came from). With `HOME=`
+  both compute `/.cache/rclone-onedrive-tray`, since the doctor's `pause_dir` and the
+  wrapper's `CACHE_DIR` are the same expression with a different name. Python 3.14's
+  `expanduser("~")` answers the passwd home with `HOME` unset and "/" with `HOME=`,
+  so it disagrees with the shells only in the unset case. No shell this project
   ships runs with `HOME` unset or empty, so the divergence is a note rather than a
   defect, and it is written down here rather than fixed because a `HOME` default
   would change what every one of the three resolves on the machines that do set it.
@@ -61,7 +64,7 @@ first item, and it is narrower than it read.
 
 `tests/install-flow.sh` installs `extras/networkmanager-dispatcher.sh` and then reads
 the installed file: the `is-enabled --quiet` gate, the unit it asks about, and that
-the gate comes before the start. Measured: of the twenty-four places the suite names
+the gate comes before the start. Measured: of the twenty-five places the suite names
 the hook, none runs it - they print it, grep it, or stat it. Neutering the gate while
 keeping that text and its position (`: runuser ... || continue`) leaves the whole
 suite green, so a hook that asks nothing and starts the service anyway passes every

@@ -406,6 +406,38 @@ check "and a key the file never set is written from the template" \
 check "and a quoted default is still quoted" \
     grep -qxF 'OPEN_APP_NAME="the app"' "$CARRY_CFG"
 
+# A carried line is copied only when it is the whole assignment. A value written
+# over two lines is valid shell, and the first version of carry_assign copied its
+# first physical line alone: the new config ended at OPEN_APP_CMD="one, bash -n
+# refused it, and the wizard printed "Wrote" and exited 0 over a file that no
+# longer sourced. The reader can see only the first line either, so the fallback
+# is the empty value the writer before it produced.
+title "a carried line that is not a whole assignment"
+{ grep -v '^OPEN_APP_CMD=' "$CARRY_CFG"; printf 'OPEN_APP_CMD="one\ntwo"\n'; } \
+    > "$CARRY_CFG.new" && mv -f "$CARRY_CFG.new" "$CARRY_CFG"
+run "a re-run over a config whose value spans two lines finishes" 0 "Wrote" \
+    wizard_run --interval 9
+check "and the config it wrote is still shell" bash -n "$CARRY_CFG"
+check "and the value it could not carry is the empty one the reader sees" \
+    grep -qxF 'OPEN_APP_CMD=""' "$CARRY_CFG"
+# An unterminated quote in the old file is the same class: the value is not
+# something this writer can reproduce, so it falls back rather than copying it.
+sed -i 's|^LOG=.*|LOG="/tmp/unterminated|' "$CARRY_CFG"
+run "a re-run over a config with an unterminated quote finishes" 0 "Wrote" \
+    wizard_run --interval 9
+check "and that config is shell too" bash -n "$CARRY_CFG"
+check "and the key with the broken quote came back quoted and closed" \
+    grep -qxF 'LOG=""' "$CARRY_CFG"
+# And the writer refuses rather than replacing a working config when the result is
+# not shell: a value whose bare form is not a word this grammar carries goes through
+# the quoting path, which closes it.
+sed -i 's|^MAX_DELETE=.*|MAX_DELETE=1(x|' "$CARRY_CFG"
+run "a re-run over a config with a value no shell word can hold finishes" 0 "Wrote" \
+    wizard_run --interval 9
+check "and it wrote that value quoted rather than bare" \
+    grep -qxF 'MAX_DELETE="1(x"' "$CARRY_CFG"
+check "and the file is still shell" bash -n "$CARRY_CFG"
+
 # ------------------------------------------------- the shipped config and XDG
 # install.sh copies config/config.example verbatim when no config exists, and the
 # example hardcoded $HOME/.config and $HOME/.cache while every script resolves

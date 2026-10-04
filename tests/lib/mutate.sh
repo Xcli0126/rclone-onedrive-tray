@@ -40,7 +40,7 @@ wanted=("$@")
 # by construction and is written down in docs/KNOWN-ISSUES.md as the one branch
 # without a case. Without this list the harness could never exit 0, and every full
 # sweep would be red for a reason that is already recorded.
-KNOWN_SURVIVORS=" check-name-limit tray-setunits-invalidate "
+KNOWN_SURVIVORS=" check-name-limit tray-setunits-invalidate tray-local-root-guard "
 # The second is a decision rather than an unreachable branch, and the reason is
 # narrower than it first read. The generation bump inside _set_units() is not
 # unobservable: a case shaped like stale-state() but calling _set_units() with an
@@ -49,6 +49,11 @@ KNOWN_SURVIVORS=" check-name-limit tray-setunits-invalidate "
 # ordering - no pause scenario straddles a _set_units() call - and the alternative
 # was a case rather than the row. Removing the row would drop the mutation; keeping
 # it here with this note says the coverage is missing rather than unnoticed.
+# The third is unreachable by construction: _local_delete_path() resolves LOCAL with
+# the same expanduser+realpath that local_path_problem() refuses the filesystem root
+# with, so no value can be accepted by the first and land on "/" in the second. The
+# case for it is the tilde shape in tests/tray.sh - which fails if the two
+# resolutions ever come apart again, and did, for one commit, before this note.
 survived=0
 known=0
 
@@ -112,17 +117,33 @@ lint_table() {  # lint_table <table> <root>  -> 0 when every row is usable
             printf 'lint: %s: no such suite: tests/%s.sh\n' "$id" "$suite" >&2
             problems=$((problems + 1)); continue
         fi
-        # cmp stops at the first difference, so sed is left writing into a
-        # closed pipe and says so on stderr on nearly every row.
-        sed "$expr" "$root/$target" > "$WORK/lint.out" 2>/dev/null
+        # An expression sed refuses is not a mutation. It exits non-zero, and the
+        # comparison below then reads empty output as "matches nothing" or, with a
+        # partial write, as a change: a row holding `s|zzz` passed this lint while
+        # sed was saying "unterminated `s' command". Status and content both count.
+        if ! sed "$expr" "$root/$target" >"$WORK/lint.out" 2>"$WORK/lint.err"; then
+            printf 'lint: %s: sed refused the expression: %s\n' "$id" \
+                "$(head -1 "$WORK/lint.err")" >&2
+            problems=$((problems + 1)); continue
+        fi
         if cmp -s "$WORK/lint.out" "$root/$target"; then
             printf 'lint: %s: the expression matches nothing in %s\n' "$id" "$target" >&2
             problems=$((problems + 1))
         fi
+        # The range rule, applied to the address and not to the whole expression: a
+        # replacement can hold the same three characters, and a substring test called
+        # those rows broken. Everything before the command is the address, and the
+        # whitespace around a range comma is not part of it, so `/, /^$/ s|...|` is
+        # the same row as `/,/^$/ s|...|` for this check.
         case "$expr" in
-            *'/^$/,'*|*',/^$/'*|*',/^$ '*)
-                printf 'lint: %s: the range is addressed by an empty line, which is the first blank line of the block it aims at\n' "$id" >&2
-                problems=$((problems + 1)) ;;
+            /*)
+                addr="${expr%% s*}"
+                addr="${addr//[[:space:]]/}"
+                case "$addr" in
+                    *',/^$/'*|*'/^$/,/'*)
+                        printf 'lint: %s: the range is addressed by an empty line, which is the first blank line of the block it aims at\n' "$id" >&2
+                        problems=$((problems + 1)) ;;
+                esac ;;
         esac
     done < "$table"
     return "$problems"
@@ -190,10 +211,15 @@ FIXTURE
         "blank-range\ttarget.sh\t/^g() {/,/^$/ s/^    y=1$/    y=2/\tprobe" \
         "missing-file\tnope.sh\ts/^x$/y/\tprobe" \
         "missing-suite\ttarget.sh\ts/^    x=1$/    x=2/\tno-such-suite" \
+        "bad-expression\ttarget.sh\ts|zzz\tprobe" \
+        "spaced-range\ttarget.sh\t/^g() {/, /^$/ s/^    y=1$/    y=2/\tprobe" \
+        "plain-range\ttarget.sh\t/^f() {/,/^}/ s/^    x=1$/    x=2/\tprobe" \
+        "range-text-in-replacement\ttarget.sh\ts|^    y=1$|    y=1 ,/^$/,|\tprobe" \
         > "$LINT_FIX/table"
     lint_out="$(lint_table "$LINT_FIX/table" "$LINT_FIX" 2>&1)"
     lint_rc=$?
-    for want_id in dead-row blank-range missing-file missing-suite; do
+    for want_id in dead-row blank-range missing-file missing-suite bad-expression \
+                   spaced-range; do
         case "$lint_out" in
             *"$want_id"*) ;;
             *) printf 'self-test: the lint said nothing about %s\n' "$want_id" >&2; bad=1 ;;
@@ -207,14 +233,14 @@ FIXTURE
         bad=1
     fi
     grep -v -e dead-row -e blank-range -e missing-file -e missing-suite \
-        "$LINT_FIX/table" > "$LINT_FIX/table-good"
+        -e bad-expression -e spaced-range "$LINT_FIX/table" > "$LINT_FIX/table-good"
     if ! lint_table "$LINT_FIX/table-good" "$LINT_FIX" >/dev/null 2>&1; then
         printf 'self-test: the lint reported a table of good rows\n' >&2
         bad=1
     fi
 
     if [ "$bad" -eq 0 ]; then
-        echo "self-test: the classifier reads all six lines, and the lint names four bad rows and no good one"
+        echo "self-test: the classifier reads all six lines, and the lint names six bad rows and no good one"
     fi
     exit "$bad"
 fi

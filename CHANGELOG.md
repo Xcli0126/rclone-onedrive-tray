@@ -35,20 +35,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   opposite of what the tray is for.
 - `tests/lib/mutate.sh --lint` checks the mutation table itself, in a second
   rather than in a sweep: every row names a file that exists and a suite that
-  exists, its expression still changes that file, and no row is addressed by an
-  empty line. CI runs it beside `--self-test`. A row whose expression quietly
-  stopped matching mutates nothing, so the sweep can only report it as skipped
-  hours later, and that is what had happened to three rows: one still pointed at a
-  `setup.sh` line an earlier round had rewritten, one renamed a `KNOWN-ISSUES.md`
-  heading that had been deleted by an even earlier round, and the row for the
-  invalidation inside `_set_units()` stopped matching when a docstring gained a
-  blank line, because a sed range ending on `^$` stops at the first blank line of
-  the block it aims at. All three point at the lines they name now, and the reason
-  recorded for the dropped heading row - "SURVIVED, so the suite must read a
-  different copy" - was wrong: it reported SKIPPED, and a row that mutates nothing
-  is the one thing the lint is for.
+  exists, `sed` accepts its expression, the expression still changes that file, and
+  no range is addressed by an empty line. CI runs it beside `--self-test`. A row
+  whose expression quietly stopped matching mutates nothing, so the sweep can only
+  report it as skipped hours later. Three rows were in that state for different
+  reasons: the one for the invalidation inside `_set_units()` stopped matching when
+  a docstring gained a blank line, because a sed range ending on `^$` stops at the
+  first blank line of the block it aims at; `setup-access-check-carry` was left
+  behind by this release's own rewrite of the `setup.sh` line it named; and
+  `docs-duplicate-heading` had been dropped for a year with a reason that was false,
+  "SURVIVED, so the suite must read a different copy", when the harness had been
+  reporting SKIPPED - the heading it renamed had been deleted long before. All three
+  point at lines that exist now, and the restored one is caught. The lint cannot see
+  a row that mutates the wrong occurrence of the line it names, or one pointed at a
+  suite that does not cover the behaviour; `docs/COMPATIBILITY.md` says so rather
+  than leaving the check looking stronger than it is.
 
 ### Fixed
+
+- The wizard no longer carries a line it cannot carry whole. Writing the old file's
+  own line fixed the frozen `$` above, and the first version took any line that
+  started with the key: a value written over two lines is valid shell, so
+  `OPEN_APP_CMD="one` went into the new config on its own, the file stopped being
+  shell, and the wizard still printed "Wrote" and exited 0. A line is carried only
+  when it is the whole assignment (`KEY=word` or `KEY="one quoted string"`), the rest
+  falls back to the value the reader can see, and the config is now written to a side
+  file and checked with `bash -n` before it replaces the one on disk: an unterminated
+  quote or a trailing backslash in the old file leaves the old file alone instead of
+  producing a config nothing can source.
+- The tray's delete guard resolves `LOCAL` the way `local_path_problem()` does, `~`
+  included, and joins the folder onto the resolved root. Those two resolutions came
+  apart: with `LOCAL="~/.."` and the process in `/`, the first expanded the tilde and
+  accepted the value while the guard read `~` as an ordinary directory name, landed
+  on the filesystem root, and handed back `/etc` for the folder `etc` - outside the
+  root the config names, one confirmation dialog away from `shutil.rmtree`. Measured
+  before the fix: `local_path_problem("~/..") == ""` and
+  `_local_delete_path("etc") == "/etc"`. The root check inside the guard came back
+  with it, as the net that would have caught the drift; it was removed earlier in
+  this release for being unreachable, which was true only while the two agreed.
+- A stamp holding a NUL byte is the pause the shells read. Bash's command
+  substitution drops NUL bytes with a warning and reads the rest, so
+  `9999999999\0` is `9999999999` to `onedrive-sync` and `onedrive-doctor` - a pause
+  they honour - and "not a time" to the tray, which showed automatic sync as on. The
+  bytes go before the decoder now.
+- The tray expands a variable inside the fallback of `${VAR:-fallback}`. The shipped
+  `LOG="${XDG_CACHE_HOME:-$HOME/.cache}/..."` therefore read as a path with a literal
+  `$HOME` in it whenever `XDG_CACHE_HOME` was unset, which is the default on a stock
+  desktop: the tray named a log file the wrapper never writes. `$VAR`, `${VAR}` and a
+  nested fallback are one function now, applied to the fallback as well.
 
 - The tray read the pause stamp as text where the wrapper and the doctor read it as
   bytes. Two shapes got through: a stamp ending in `\r` or `\r\n` was translated into

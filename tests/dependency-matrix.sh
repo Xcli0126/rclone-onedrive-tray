@@ -446,6 +446,7 @@ CHECK_FILENAME="quote\"dollar\$tick\`slash\\end"
 SINGLE='${HOME}/literal'
 ESCAPED="\$HOME/cost"
 FALLBACK="${READERS_UNSET:-fallback}/x"
+NESTED="${READERS_UNSET:-$HOME}/nested"
 EMPTY=""
 UNQUOTED=simple
 HASH=abc#def
@@ -455,7 +456,7 @@ INTERVAL_MIN=7
 SHOW_ICON="1"
 SHOW_ICON="0"
 CFGEOF
-READER_KEYS="REMOTE LOCAL CHECK_FILENAME SINGLE ESCAPED FALLBACK EMPTY UNQUOTED HASH SPACED UNIT_NAME INTERVAL_MIN SHOW_ICON"
+READER_KEYS="REMOTE LOCAL CHECK_FILENAME SINGLE ESCAPED FALLBACK NESTED EMPTY UNQUOTED HASH SPACED UNIT_NAME INTERVAL_MIN SHOW_ICON"
 
 # The shared sed reader, which answers values as written: it does not expand
 # `${VAR}` because the keys it is asked for are a binary name, a unit name, a
@@ -498,8 +499,8 @@ else
 fi
 # The installers' reader is deliberately narrower: no expansion, and a value it is
 # not asked for cannot drift. Compared on the shapes it is asked for.
-sed_narrow="$(printf '%s\n' "$sed_dump" | grep -vE '^(LOCAL|SINGLE|ESCAPED|FALLBACK)=')"
-src_narrow="$(printf '%s\n' "$src_dump" | grep -vE '^(LOCAL|SINGLE|ESCAPED|FALLBACK)=')"
+sed_narrow="$(printf '%s\n' "$sed_dump" | grep -vE '^(LOCAL|SINGLE|ESCAPED|FALLBACK|NESTED)=')"
+src_narrow="$(printf '%s\n' "$src_dump" | grep -vE '^(LOCAL|SINGLE|ESCAPED|FALLBACK|NESTED)=')"
 if [ "$sed_narrow" = "$src_narrow" ]; then
     ok "and the installers' shared reader agrees on the values it is asked for"
 else
@@ -507,6 +508,13 @@ else
     diff <(printf '%s\n' "$src_narrow") <(printf '%s\n' "$sed_narrow") |
         sed 's/^/        /' | head -8
 fi
+# The fallback of `${VAR:-...}` is a shell word of its own, and the reader expands
+# it: NESTED is `${READERS_UNSET:-$HOME}/nested`, and with READERS_UNSET unset bash
+# answers the home directory. The line above compares the two dumps, and this is the
+# shape that made them differ before expand_shell_text() recursed.
+check "and a variable inside a \${VAR:-fallback} expands the way bash expands it" \
+    grep -qxF "NESTED=<$READERS/home/nested>" <<<"$py_dump"
+
 # The difference is the documented one, not an accident: a variable in a value the
 # installers read comes back as written.
 # shellcheck disable=SC2016  # the ${VAR} is the text being searched for

@@ -307,6 +307,20 @@ def shell_value(raw: str) -> str:
     quoted = len(text) >= 2 and text[0] == '"' and text[-1] == '"'
     if quoted:
         text = text[1:-1]
+    return expand_shell_text(text, quoted)
+
+
+def expand_shell_text(text: str, quoted: bool) -> str:
+    """One shell word: `$VAR`, `${VAR}`, `${VAR:-fallback}`.
+
+    The fallback is a shell word of its own and is expanded as one, which is the
+    half that was missing. `LOG="${XDG_CACHE_HOME:-$HOME/.cache}/sync.log"` is the
+    value this project ships, and with `XDG_CACHE_HOME` unset bash answers
+    `/home/you/.cache/sync.log` while this reader answered a path with a literal
+    `$HOME` in it - a different log file for the tray and for the wrapper that
+    writes it. The variable's own value is inserted as it stands; bash does not
+    expand the result of an expansion either.
+    """
     out = []
     index = 0
     while index < len(text):
@@ -323,7 +337,7 @@ def shell_value(raw: str) -> str:
                 # `:-` takes the fallback for an empty value too, `-` only for an
                 # unset one, which is the difference between the two forms.
                 if value == "" and (op == ":-" or name not in os.environ):
-                    value = fallback
+                    value = expand_shell_text(fallback, quoted)
                 out.append(value)
                 index += match.end()
                 continue
@@ -2073,20 +2087,31 @@ class Tray:
         process's own working directory rather than from the directory rclone
         syncs, and all of them would pass. The sentence that says so is
         local_path_problem()'s, the one main() prints.
+
+        The root is resolved here exactly as that function resolves it, `~`
+        included, and the join below is made from the resolved root rather than
+        from the raw value. Those two resolutions came apart once: with
+        LOCAL="~/.." and the process in "/", local_path_problem() expanded the
+        tilde to the home directory and accepted the value, while this method
+        resolved "~" as an ordinary directory name, landed on "/", and handed
+        back "/etc" for the folder "etc", because the separator-anchored prefix
+        for that root is "/" itself. Measured on the commit that removed the
+        root check below, with the tray's own module and cwd "/":
+        local_path_problem("~/..") == "" and _local_delete_path("etc") == "/etc".
+        The check stayed, and it is the thing that would have caught that drift.
         """
         if local_path_problem(self.local):
             return None
         if not name or name in (".", "..") or os.path.basename(name) != name:
             return None
-        root = os.path.realpath(self.local)
-        # The filesystem root cannot reach this line: local_path_problem() above
-        # refuses it, and that is the only refusal this method needs, because the
-        # value it reads comes from main() or from _reload_config(), both of which
-        # ask the same function first. A second check on os.path.dirname(root) sat
-        # here and no case could reach it without monkeypatching the first one
-        # away; measured over "/", "//", "///", "/./", "/../", "/tmp/.." and
-        # "/tmp/../.", which are every spelling whose realpath has no parent.
-        target = os.path.realpath(os.path.join(self.local, name))
+        root = os.path.realpath(os.path.expanduser(self.local))
+        # Unreachable while the line above uses the same expansion as
+        # local_path_problem(), and kept for the case where the two drift apart
+        # again: a root with no parent is never a sync root, and the prefix check
+        # below cannot see that, because for "/" the prefix is "/".
+        if os.path.dirname(root) == root:
+            return None
+        target = os.path.realpath(os.path.join(root, name))
         # The separator on the end matters: without it a sibling directory such
         # as "/data/OneDrive-old" would pass for the root "/data/OneDrive".
         prefix = root if root.endswith(os.sep) else root + os.sep
@@ -2894,6 +2919,13 @@ class Tray:
         so such a file fails the grammar here exactly where the shells call it
         "not a time".
 
+        Bash's command substitution drops NUL bytes, with a warning on stderr and
+        no other effect: a file holding `9999999999\0` is the pause `9999999999`
+        to the wrapper and the doctor, and it was "not a time" here. Measured:
+        `v="$(cat stamp)"` on those bytes gives `9999999999` and the wrapper's
+        length rule calls it a pause. So NUL bytes go before the decode, which is
+        the whole of the difference between `$(cat ...)` and this function.
+
         A value longer than ten digits is later than any clock this will meet, and
         it is answered by length rather than by arithmetic: `time.localtime()`
         raises on one, and the shell's `[ -gt ]` errors on one, which is how a
@@ -2910,7 +2942,7 @@ class Tray:
                 raw = fh.read()
         except OSError:
             return None
-        text = raw.decode("utf-8", "replace").rstrip("\n")
+        text = raw.replace(b"\0", b"").decode("utf-8", "replace").rstrip("\n")
         if not re.fullmatch(r"[0-9]+", text):
             return None
         if len(text) > 10:

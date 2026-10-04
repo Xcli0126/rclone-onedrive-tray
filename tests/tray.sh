@@ -1785,6 +1785,11 @@ def scenario_pause_recovery():
         # of the poll's idle callback before the decode was told to replace it.
         with open(stamp, "wb") as fh:
             fh.write(b"\xff" + b"9" * 10 + b"\n")
+    elif case == "nul":
+        # `$(cat ...)` drops a NUL byte and reads the rest, so this is the pause
+        # 9999999999 to the wrapper and the doctor.
+        with open(stamp, "wb") as fh:
+            fh.write(b"9999999999\0")
     else:
         with open(stamp, "w", encoding="utf-8") as fh:
             fh.write(str(due))
@@ -4359,6 +4364,30 @@ def scenario_relative_local():
 
     data["root_guard_refused"] = MODULE.Tray._local_delete_path(RootBare(), "etc")
 
+    # The one spelling where the two resolutions of LOCAL came apart, and the
+    # reason the root check inside the guard is still there. local_path_problem()
+    # expands "~" and the guard did not, so with LOCAL="~/.." and the process in
+    # "/" the first accepted the value (the home directory's parent) while the
+    # guard resolved "~" as an ordinary directory name, landed on the filesystem
+    # root, and handed back "/etc" for the folder "etc" - outside the root the
+    # config names. It is also the case that shows the fix, because the guard has
+    # to resolve the value the way the rest of the tray does and a folder that
+    # really is inside the expanded root still has to come back.
+    class TildeBare:
+        local = "~/.."
+
+    expanded = os.path.dirname(os.path.realpath(os.path.expanduser("~/..")))
+    here = os.getcwd()
+    try:
+        os.chdir("/")
+        data["tilde_etc"] = MODULE.Tray._local_delete_path(TildeBare(), "etc")
+        data["tilde_inside"] = MODULE.Tray._local_delete_path(
+            TildeBare(), os.path.basename(os.path.realpath(os.path.expanduser("~"))))
+    finally:
+        os.chdir(here)
+    data["tilde_inside_expected"] = os.path.realpath(os.path.expanduser("~"))
+    data["tilde_prefix"] = expanded
+
     # And the real main(), which has to refuse before it builds a window.
     env = dict(os.environ)
     env["XDG_CONFIG_HOME"] = home
@@ -4943,6 +4972,19 @@ if run_driver pause-recovery TRAY_PAUSE_CASE=binary; then
 if d["auto_seen"] == "paused" or "paused" in d["pause_label"].lower():
     print("the tray read a bad byte as a pause: auto_seen=%r label=%r"
           % (d["auto_seen"], d["pause_label"]))
+    raise SystemExit(1)
+'
+fi
+
+# The third shape: a NUL byte, which bash's command substitution drops with a
+# warning and nothing else, so the two shells read this file as the pause 9999999999
+# and the tray did not. Measured with the shells themselves: v="$(cat stamp)" on
+# these bytes gives 9999999999 and the wrapper's length rule calls it a pause.
+if run_driver pause-recovery TRAY_PAUSE_CASE=nul; then
+    check "a stamp whose bytes include a NUL is the pause the shells read" json_py '
+if d["auto_seen"] != "paused" or not d["stamp_left"]:
+    print("the tray read %r as auto_seen=%r, stamp_left=%r, while $(cat ...) reads "
+          "the pause 9999999999" % ("9999999999\\0", d["auto_seen"], d["stamp_left"]))
     raise SystemExit(1)
 '
 fi
@@ -7519,6 +7561,19 @@ if "LOCAL" not in d["root_problem"]:
 if d["root_guard_refused"] is not None:
     print("the guard returned %r for LOCAL=\"/\", so a top-level folder was "
           "resolved against the filesystem root" % (d["root_guard_refused"],))
+    raise SystemExit(1)
+'
+    # The tilde shape, measured by the review that found the guard had been
+    # removed for being unreachable: the two resolutions of LOCAL come apart and
+    # the guard's root becomes "/", whose separator-anchored prefix is "/" itself.
+    check "a tilde in LOCAL is resolved the way the rest of the tray resolves it" json_py '
+if d["tilde_etc"] is not None:
+    print("LOCAL=\"~/..\" with the process in / made the guard return %r, which is "
+          "outside the root the config names (%r)" % (d["tilde_etc"], d["tilde_prefix"]))
+    raise SystemExit(1)
+if d["tilde_inside"] != d["tilde_inside_expected"]:
+    print("a folder inside the expanded root came back as %r, expected %r"
+          % (d["tilde_inside"], d["tilde_inside_expected"]))
     raise SystemExit(1)
 '
 fi

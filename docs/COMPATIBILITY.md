@@ -29,10 +29,12 @@ so the tree is also put through a mutation pass: deliberate changes to the shipp
 scripts, one at a time, each run against the suite that covers it. `tests/lib/mutate.sh`
 runs it, `tests/lib/mutations.txt` lists the rows, and the run prints how many were
 caught. `tests/lib/mutate.sh --lint` is the cheap half and CI runs it with
-`--self-test`: it checks in a second that every row still names a file and a suite
-and that its expression still matches the line it was written against, because a row
-that quietly stopped matching mutates nothing and a sweep is the only other thing
-that would say so. Almost every row was a change no suite noticed before its assertion was
+`--self-test`: it checks in a second that every row names a file and a suite, that
+`sed` accepts its expression, and that the expression still changes that file,
+because a row that quietly stopped matching mutates nothing and a sweep is the only
+other thing that would say so. What it cannot see is a row that changes the wrong
+occurrence of the line it names, or a row pointed at a suite that does not cover the
+behaviour: those two still need a sweep. Almost every row was a change no suite noticed before its assertion was
 written; the one that survives is named below rather than counted here, because
 these numbers went stale twice when they were written out.
 

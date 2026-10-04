@@ -100,7 +100,9 @@ setup-notty-first-sync	setup.sh	s|    elif \[ ! -t 0 \]; then|    elif false; th
 tray-comment-hash-rule	bin/onedrive-tray	s|char == "#" and index > 0 and value\[index - 1\].isspace()|char == "#"|	tray
 # the same rule applied after the value was stripped, which loses the difference
 # between KEY=#x and KEY=   #x
-tray-stamp-strip-everything	bin/onedrive-tray	s|raw.decode("utf-8", "replace").rstrip("\\n")|raw.decode("utf-8", "replace").strip()|	tray
+tray-stamp-strip-everything	bin/onedrive-tray	s|raw.replace(b"\\0", b"").decode("utf-8", "replace").rstrip("\\n")|raw.replace(b"\\0", b"").decode("utf-8", "replace").strip()|	tray
+# NUL bytes, which bash's command substitution drops and this reader did not.
+tray-stamp-keeps-nul	bin/onedrive-tray	s|raw.replace(b"\\0", b"")|raw|	tray
 # the file read as bytes and decoded, which is the half of the stamp grammar the
 # shells had and the tray did not: text mode turns a CR into a newline, and an
 # undecodable byte raises out of the poll instead of failing the digit rule.
@@ -199,9 +201,14 @@ tray-relative-local-guard	bin/onedrive-tray	s|^        if local_path_problem(sel
 tray-delete-dialog-path	bin/onedrive-tray	s|"again downloads it back.", path=target)|"again downloads it back.")|	tray
 # round eight (agenttray9)
 tray-local-root-refused	bin/onedrive-tray	s#^    if os.path.dirname(root) == root:$#    if False:#	tray
-# The row that sat here, for the same check inside _local_delete_path(), is gone
-# with the check: every value whose realpath has no parent is refused by
-# local_path_problem() first, which is what tray-local-root-refused above pins.
+# The same check inside _local_delete_path(), which is unreachable while that
+# method resolves LOCAL the way local_path_problem() does - and was reachable, for
+# one commit, when it did not: with LOCAL="~/.." and the process in "/" the guard's
+# root became the filesystem root and its prefix "/" let "/etc" through. The row
+# stays, and the tilde case in tests/tray.sh pins the resolution it depends on.
+tray-local-root-guard	bin/onedrive-tray	s#^        if os.path.dirname(root) == root:$#        if False:#	tray
+# The resolution itself, which is the half that was wrong.
+tray-local-root-expanduser	bin/onedrive-tray	s|root = os.path.realpath(os.path.expanduser(self.local))|root = os.path.realpath(self.local)|	tray
 tray-pause-unarmed-leaves-off	bin/onedrive-tray	s#^                self._set_units("enable", "--now")$#                pass#	tray
 # tray-pause-unarmed-silent was dropped: it named the line that called _pause_lost(), and the
 # old pause design that function belonged to is gone.
@@ -371,3 +378,8 @@ docs-duplicate-heading	docs/KNOWN-ISSUES.md	s|^### What the pause audit left$|##
 # round twenty-six: resuming a pause enabled the watcher even with WATCH off.
 tray-resume-ignores-watch	bin/onedrive-tray	s|        watched = truthy(self.cfg.get("WATCH", "1"))|        watched = True|	tray
 setup-carry-assign-fallback	setup.sh	s|^    if \[ -n "$line" \]; then|    if [ -z "$line" ]; then|	install-flow
+# The fallback itself: with a multi-line value carried as its first line, the
+# config this writes is not shell, which is what the bash -n gate in setup.sh
+# now refuses. The gate has no row of its own: no input reaches it while the
+# grammar above holds, and the grammar's row is this one.
+setup-carry-assign-keeps-broken-line	setup.sh	s|^        line=""$|        :|	install-flow
