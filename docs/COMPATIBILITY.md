@@ -40,7 +40,12 @@ done, torn and left to run, and the exit status is non-zero if any recorded verd
 not a clean catch, whether the pass ran anything or only looked. The fast three suites were swept in full at `47cbedb`:
 32 rows, 31 caught, 1 survived-by-design, 0 skipped, 0 unresolved. The two slow suites
 have been swept row by row around each change rather than end to end, and that is the
-coverage that exists. `tests/lib/mutate.sh --lint` is the cheap half and CI runs it with
+coverage that exists. `--lint` also prints how many rows change more than one line of their file: that is a
+wider mutation rather than a wrong one, but its verdict is not attributable to the single
+line the row names, and knowing how many those are is what makes a caught verdict
+readable.
+
+`tests/lib/mutate.sh --lint` is the cheap half and CI runs it with
 `--self-test`: it checks in a second that every row names a file and a suite, that
 `sed` accepts its expression, and that the expression still changes that file,
 because a row that quietly stopped matching mutates nothing and a sweep is the only

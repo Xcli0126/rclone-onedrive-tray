@@ -178,6 +178,18 @@ lint_table() {  # lint_table <table> <root>  -> 0 when every row is usable
     return "$problems"
 }
 
+multi_site_rows() {  # rows whose expression changes more than one line of the file
+    local id target expr suite changed n=0
+    while IFS=$'\t' read -r id target expr suite; do
+        case "$id" in ''|'#'*) continue ;; esac
+        [ -f "$REPO/$target" ] || continue
+        changed="$(diff <(sed "$expr" "$REPO/$target" 2>/dev/null) "$REPO/$target" 2>/dev/null |
+            grep -c '^<')"
+        [ "${changed:-0}" -gt 1 ] && n=$((n + 1))
+    done < "$TABLE"
+    printf '%s' "$n"
+}
+
 if [ "${1:-}" = "--lint" ]; then
     status=0
     lint_table "$TABLE" "$REPO" || status=$?
@@ -189,6 +201,14 @@ if [ "${1:-}" = "--lint" ]; then
     done
     if [ "$status" -eq 0 ]; then
         echo "lint: $(grep -cvE '^#|^$' "$TABLE") rows, every one targeting a file, naming a suite, and matching its file"
+        # Not a failure: a row that changes several lines is a wider mutation, not a
+        # wrong one. But its verdict is then not attributable to the single line its
+        # comment names, which matters when reading a caught verdict, so the count is
+        # printed. Changed lines are what is counted, so a row that inserts a line does
+        # not inflate it.
+        multi="$(multi_site_rows)"
+        [ "$multi" -gt 0 ] &&
+            echo "lint: $multi of those change more than one line, so a catch there is not one site's"
     fi
     exit "$status"
 fi
