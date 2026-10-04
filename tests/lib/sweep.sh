@@ -12,12 +12,13 @@
 # the tree was dirty, and the rows the run covered.
 #
 # A suite counts as done only when its file holds as many verdicts as the table has rows
-# for it, so a run that was interrupted is torn rather than done and is started again;
-# the file is rewritten when it is. A suite whose file is complete and was measured at
-# another commit is reported as stale rather than reused. The exit status is non-zero if
-# any file holds a verdict that is not a clean catch (survived, skipped, no result), so
-# the caller can tell a clean pass from a broken instrument - including on a run that
-# does nothing but look at what is already there.
+# for it, so a run that was interrupted is torn rather than done and is resumed. A suite
+# whose file is complete but was measured at another commit is reported as stale and left
+# alone (--force runs it again), and being stale makes the exit status non-zero: its
+# verdicts are evidence about that commit, not about this one. The exit status is also
+# non-zero when any file holds a verdict that is not a clean catch (survived, skipped, no
+# result) or cannot be read, so the caller can tell a clean pass from a broken instrument
+# - including on a run that does nothing but look at what is already there.
 #
 # Not named tests/*.sh on purpose: the documentation check counts those as suites, and
 # this is a driver for one of them.
@@ -35,10 +36,15 @@ list_only=0
 suites=()
 while [ $# -gt 0 ]; do
     case "$1" in
-        --out) out="${2:-}"; [ -n "$out" ] || { echo "--out needs a directory" >&2; exit 2; }; shift 2 ;;
+        --out)
+            out="${2:-}"
+            case "$out" in
+                ''|--*) echo "--out needs a directory, not '$out'" >&2; exit 2 ;;
+            esac
+            shift 2 ;;
         --force) force=1; shift ;;
         --list) list_only=1; shift ;;
-        -h|--help) sed -n '3,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) awk 'NR > 2 && !/^#/ { exit } NR > 2 { sub(/^# ?/, ""); print }' "$0"; exit 0 ;;
         -*) echo "unknown option: $1" >&2; exit 2 ;;
         *) suites+=("$1"); shift ;;
     esac
@@ -62,8 +68,8 @@ verdicts_in() {  # verdicts_in <file> -- how many verdict lines it holds
 problems_in() {  # problems_in <file> -- verdicts that are not a clean catch
     grep -E 'SURVIVED|SKIPPED|NO RESULT' "$1" 2>/dev/null || true
 }
-measured_at() {  # measured_at <file> -- the commit its header names
-    sed -n 's/^# commit //p' "$1" 2>/dev/null | head -1
+measured_at() {  # measured_at <file> -- the commit its header names, without "(dirty)"
+    sed -n 's/^# commit //p' "$1" 2>/dev/null | head -1 | awk '{ print $1 }'
 }
 
 # Every suite the table names, in the order the table mentions them, so a default run
@@ -88,7 +94,18 @@ for suite in "${suites[@]}"; do
         continue
     fi
     have=0
-    [ -f "$file" ] && have="$(verdicts_in "$file")"
+    if [ -e "$file" ] && [ ! -r "$file" ]; then
+        echo "$suite: $file exists and cannot be read, so what it covers is unknown" >&2
+        status=1
+    elif [ -e "$file" ]; then
+        have="$(verdicts_in "$file")"
+        case "$have" in
+            ''|*[!0-9]*)
+                echo "$suite: $file cannot be read, so what it covers is unknown" >&2
+                have=0
+                status=1 ;;
+        esac
+    fi
     complete=0
     [ "$have" -ge "$rows" ] && complete=1
     state="to run"
@@ -97,7 +114,10 @@ for suite in "${suites[@]}"; do
     at=""
     [ "$complete" = 1 ] && at="$(measured_at "$file")"
     stale=""
-    [ "$complete" = 1 ] && [ -n "$at" ] && [ "$at" != "$head_at" ] && stale=" (measured at $at)"
+    if [ "$complete" = 1 ] && [ -n "$at" ] && [ "$at" != "$head_at" ]; then
+        stale=" (measured at $at, stale)"
+        status=1
+    fi
     if [ "$list_only" = 1 ]; then
         printf '%-18s %-7s %3s/%-3s rows%s\n' "$suite" "$state" "$have" "$rows" "$stale"
         # A torn file's verdicts still count for the exit status: what is there was
@@ -136,8 +156,24 @@ for suite in "${suites[@]}"; do
     else
         RESULTS="$file" "$MUTATE" --suite "$suite" | tail -3 || status=1
     fi
-    if [ "$(verdicts_in "$file")" -lt "$rows" ]; then
-        echo "$suite: the run wrote fewer verdicts than rows, so it is torn" >&2
+    # What the run wrote is read back rather than trusted to its exit status: a driver
+    # that reports a survivor and exits 0, or writes no file at all, has to fail here.
+    if [ ! -f "$file" ]; then
+        echo "$suite: the run wrote no results file at $file" >&2
+        status=1
+        continue
+    fi
+    after="$(verdicts_in "$file")"
+    case "$after" in
+        ''|*[!0-9]*) after=0 ;;
+    esac
+    if [ "$after" -lt "$rows" ]; then
+        echo "$suite: the run wrote $after verdicts for $rows rows, so it is torn" >&2
+        status=1
+    fi
+    problems="$(problems_in "$file")"
+    if [ -n "$problems" ]; then
+        printf '%s\n' "$problems" | sed 's/^/    /'
         status=1
     fi
 done

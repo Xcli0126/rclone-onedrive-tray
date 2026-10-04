@@ -22,15 +22,18 @@ not have to be rediscovered.
 ## Accepted, with the reason
 
 - The tray and the two shells disagree about one environment none of the shipped ways of
-  starting them produces: `HOME` unset with no `XDG_CACHE_HOME` either. Measured:
-  `bin/onedrive-sync` stops at line 32 with `HOME: unbound variable` and exit 1
-  under its `set -uo pipefail`, while the tray's `expanduser` answers the passwd
-  home and it runs. `HOME` empty, or `HOME` unset with the XDG variable set, has
-  all three agreeing. It is recorded rather than guarded because a guard would have to
-  refuse a tray that works: with the four `XDG_*` variables set the shells never expand
-  `HOME`, and the tray expands it only for a value that spells a `~`, so a `HOME`-less
-  invocation is one that can run; autostart, a systemd unit and a login session all set
-  `HOME` anyway.
+  starting them produces: `HOME` unset with the `XDG_*` variables also unset. Measured
+  with `HOME` unset: `bin/onedrive-sync` stops at line 32 with `HOME: unbound variable`
+  and exit 1, and with `XDG_CONFIG_HOME` given it stops at line 34 with the same message,
+  so it needs `XDG_CONFIG_HOME` and `XDG_CACHE_HOME` to run at all; `bin/onedrive-doctor`
+  needs a third, stopping at line 36 until `XDG_STATE_HOME` is set as well; the tray's
+  three directory constants use `XDG_CONFIG_HOME`, `XDG_CACHE_HOME` and `XDG_DATA_HOME`,
+  and its `expanduser` answers the passwd home where a shell would stop. With all four
+  variables set, all three run and agree, and `HOME` empty has them agreeing on
+  `/.cache/rclone-onedrive-tray`. It is recorded rather than guarded because a guard would
+  have to refuse a tray that works: with the four set, no shipped script expands `HOME`
+  unless a config value spells a `~`; autostart, a systemd unit and a login session all
+  set `HOME` anyway.
 
 - A line that assigns and then runs a command is read as the assignment. `KEY=a true`
   leaves `KEY` unset in the shell that sources the file - the assignment is a prefix of
@@ -76,7 +79,7 @@ not have to be rediscovered.
   user on the other end. The decision the ledger entry asked for is this: a test may
   touch the tray's own attributes, and the class stays one until a change makes the
   seam obvious rather than theoretical.
-- - A lone CR is read differently by the two readers of the log, and the tray's answer
+- A lone CR is read differently by the two readers of the log, and the tray's answer
   is the one that stays. Python's `splitlines()` breaks on `\r` and grep does not, so
   one file holding CR-separated lines gives the tray a synced run and the doctor a
   failure. The tray also treats a marker whose `msg=` contains a failure's own prose
