@@ -287,3 +287,14 @@ tray-icon-warning-dropped	bin/onedrive-tray	s|^    if failed:$|    if False:|	tr
 tray-notify-identity-clock	bin/onedrive-tray	s|^    return failure\[1:\]$|    return failure|	tray
 watch-unit-no-start-limit	systemd/onedrive-watch.service.in	s|^StartLimitIntervalSec=300$||	install-flow
 doctor-watch-failed-as-inactive	bin/onedrive-doctor	s|^            elif \[ "\$watch_active" = failed \]; then$|            elif false; then|	install-flow
+# round fourteen: the log cap, whose size used to come from GNU stat and whose
+# failure was turned into a zero byte log by the `|| echo 0` beside it.
+sync-rotation-never	bin/onedrive-sync	s|\[ "$log_bytes" -gt "$MAX_LOG_BYTES" \]|[ "$log_bytes" -gt 999999999 ]|	install-flow
+sync-rotation-silent-unreadable	bin/onedrive-sync	s|        log_line "WARNING: cannot read the size of $LOG, so it was not rotated"|        :|	install-flow
+# round fourteen: the language spellings, the message versions, the entry a
+# Chinese desktop shows, and the two ways update_config_file() missed.
+lang-normalize-literal-only	bin/onedrive-tray	s|    text = text.split("@", 1)\[0\].split(".", 1)\[0\].replace("_", "-")|    return text if text in STRINGS or text == DEFAULT_LANG else ""|	tray
+hint-oldrclone-version	bin/onedrive-tray	s|需要 rclone 1.66 或更新版本|需要 1.65 或更新版本|	tray
+autostart-no-zh-name	bin/onedrive-tray	s|            f"Name\[zh\]={APP_NAME} 状态图标\\n"||	tray
+config-dupkey-first-only	bin/onedrive-tray	s|shell_quote_value(wanted\[key\])|shell_quote_value(wanted.pop(key))|	tray
+config-badbyte-uncaught	bin/onedrive-tray	s|        raise ConfigFault(config_utf8_problem(exc, path)) from exc|        raise exc|	tray

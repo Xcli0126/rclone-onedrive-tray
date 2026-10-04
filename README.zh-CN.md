@@ -48,9 +48,11 @@ Linux 上没有官方 OneDrive 客户端。`rclone bisync` 能承担同步，但
 
 两个同步不可能撞在一起。包装器在整轮运行期间持有 `flock`，所以定时器正在跑时点「立即同步」只会排队等待。同一对文件上跑两个 bisync 进程，它们会互相删掉对方的清单文件，而恢复的代价是一次完整的 `--resync`。
 
-删除有上限，每轮最多 `MAX_DELETE` 个文件。本地目录被清空时同步会中止，不至于一路传到云端。代价是确属正常的大批量删除，需要跑一次 `onedrive-sync --force` 放行这一轮。`--resync` 看着更稳妥，其实相反：resync 不删任何东西，你本地删掉的每一个文件都会被拉回来。
+删除有上限，但这个数字最后是按百分比交给 rclone 的，所以只能尽量贴近：表达不出来的小数值会被放宽，`MAX_DELETE=1` 在 397 个文件的目录上会变成 `--max-delete 1%`，实际放行约 3 个，日志里会写明这一轮真正允许多少。本地目录被清空时同步会中止，不至于一路传到云端。代价是确属正常的大批量删除，需要跑一次 `onedrive-sync --force` 放行这一轮。`--resync` 看着更稳妥，其实相反：resync 不删任何东西，你本地删掉的每一个文件都会被拉回来。
 
 冲突时两份都留。一个文件两边都改过，rclone 会把两个版本都重命名保留，而不是替你选一个赢家，所以不会丢东西。代价是合并要你手动做。
+
+每轮同步都会在日志末尾留一行机读结果，`ONEDRIVE_RESULT v=1 state=<synced|error|stopped> tag=<tag|none> when=HH:MM msg=<句子>`，托盘照这行决定图标、时间和失败原因。`state=stopped` 是再来一次也不会好的失败，`state=error` 是重试次数用完，`tag=` 对应上面那些提示类别。它周围那些英文是旧版本写的，也是托盘和 doctor 在看不到这行时的退路。只有两种情况没有这行：发现已经有同步在跑（胜负归那一轮），以及日志根本打不开（无处可写）。
 
 日志到 5 MB 轮转，托盘只读它末尾 64 KB。每五分钟一次同步大约每天写 240 KB，对磁盘无所谓，但每三秒调一次 `readlines()` 再跑上一年就不是了。
 
@@ -101,7 +103,7 @@ cd rclone-onedrive-tray
 ./setup.sh --remote onedrive:Notes --local ~/OneDrive --filters obsidian --yes
 ```
 
-`--yes` **故意不触发首次同步**。那一步会把云端全部拉下来且不能中断，所以它应该由你决定，而不是"一路回车"的副作用。
+`--yes` **故意不触发首次同步**。那一步会把云端全部拉下来且不能中断，所以它应该由你决定，而不是"一路回车"的副作用。带上配置项（`--remote`、`--local` 等）再给 `--yes` 时，它会直接覆盖已有的配置文件，脚本重跑不必先手动删文件；不给 `--yes` 时，遇到已有配置它会停下问你。
 
 所有东西都装进你的家目录，两个脚本都不会调用 `sudo`。下面这些是默认位置，每一项都跟随对应的 `XDG_*` 变量：设了 `XDG_CONFIG_HOME=/somewhere`，三条配置路径都会跟着搬过去。
 
@@ -109,9 +111,12 @@ cd rclone-onedrive-tray
 ~/.local/bin/onedrive-sync, onedrive-tray, onedrive-watch, onedrive-check,
              onedrive-check-access, onedrive-doctor
 ~/.config/rclone-onedrive-tray/config, filters.txt, exclude-folders.txt
+             （exclude-folders.txt 由 setup.sh 和托盘的「同步的文件夹」菜单写入，
+             ./install.sh 不建这个文件；文件不存在等于全部同步）
 ~/.config/systemd/user/onedrive-sync.{service,timer}
 ~/.config/systemd/user/onedrive-sync-watch.service
 ~/.config/autostart/rclone-onedrive-tray.desktop
+~/.local/share/rclone-onedrive-tray/icons/          首次启动时绘制
 ```
 
 想手工配置就改用 `./install.sh`，然后自己编辑配置文件：
@@ -430,8 +435,7 @@ tests/docs.sh                   # 文档互链、写字规矩、文档里点名�
 
 五个脚本都不需要 rclone 远程。前两个会把 `HOME` 和各个 XDG 目录指向临时目录，用替身脚本顶掉
 rclone、systemctl 和 sudo，并使用专门的单元名；`filters.sh` 拿真的 rclone 在一个临时目录上跑；
-`docs.sh` 只读仓库。五个都不会打扰正在工作的那套安装。加 `--verbose` 可以看到每条命令及其输出。CI 会在
-`ubuntu-latest` 上跑一遍，那台机器的发行版、systemd 和 rclone 都跟开发机不同。
+`docs.sh` 只读仓库。五个都不会打扰正在工作的那套安装。加 `--verbose` 可以看到每条命令及其输出。CI 会在 `ubuntu-latest` 和 `ubuntu-22.04` 两个 runner 上各跑一遍，两者的发行版、systemd 和 rclone 都跟开发机不同。
 [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) 记录了它们覆盖了什么、在哪些版本上真的跑过，以及
 还有哪些环境没人试过。
 

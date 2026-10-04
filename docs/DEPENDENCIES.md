@@ -41,6 +41,16 @@ some distributions is too old to sync safely.
 
 ## Not a package
 
+A GNU userland. The scripts are written for it and Ubuntu ships it: `stat -c`,
+`find -mindepth`, `sed -i`, `getent passwd`, `install -o`, `nl -w2` and `mktemp`
+without a template all appear in the shell half, and the tray suite's fixtures use
+some of them as well. BusyBox and the BSD userlands are untested and not supported,
+which is what [COMPATIBILITY.md](COMPATIBILITY.md) says about the platforms too.
+The one place where a missing GNU tool used to fail quietly was the wrapper's log
+rotation, which took the log's size from `stat -c%s` and turned that failure into a
+zero: it uses `wc -c` now, which every userland has, and a size it cannot read is a
+warning in the log rather than a silent "empty".
+
 An authorised rclone remote. Run `rclone config` once and confirm with
 `rclone lsd yourremote:`. Without it there is nothing to sync, and the log says
 so in plain terms. The walkthrough, including work accounts and machines with no

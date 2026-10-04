@@ -199,9 +199,18 @@ or
 ERROR : Bisync critical error: cannot read prior listing: open ...path2.lst: no such file
 ```
 
-**Cause:** On **rclone < 1.66** an interrupted run invalidates the baseline and the only way out (`--resilient` exists from 1.65, `--recover` only from 1.66)
+**Cause:** On **rclone < 1.66** an interrupted run invalidates the baseline and the only way out (`--resilient` exists from 1.64, `--recover` only from 1.66)
 is a manual `--resync`. On a laptop this is not an edge case: closing the lid mid-sync is
 enough.
+
+An rclone older than 1.66 is not a slower route to the same place, though. The
+shipped `BISYNC_ARGS` names `--recover`, `--max-lock`, `--conflict-resolve` and
+`--conflict-loser`, all four of which arrived in 1.66, and rclone refuses the whole
+command line over the first flag it does not know, so every run fails before an
+interruption is even possible. `install.sh` warns about exactly those four on a
+machine whose rclone lacks them: the flags in `BISYNC_ARGS` "will be refused and
+every run will fail". The paragraph below is about the interruption itself, and it
+assumes an rclone new enough to run at all.
 
 **Fix:** Upgrade rclone to 1.66 or newer and run with:
 
@@ -657,12 +666,25 @@ with open(path, "rb") as fh:
 
 ### Two icons appear
 
-Use a single-instance lock:
+Use a single-instance lock, and put it somewhere only you can write. `onedrive-tray`
+keeps its own in `$XDG_RUNTIME_DIR` (falling back to `$TMPDIR`), opened `O_NOFOLLOW`:
 
 ```python
-handle = open("/tmp/rclone-onedrive-tray.lock", "w")
+path = os.path.join(os.environ.get("XDG_RUNTIME_DIR")
+                    or os.environ.get("TMPDIR") or "/tmp",
+                    "rclone-onedrive-tray.lock")
+handle = os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+                           | os.O_NOFOLLOW, 0o600), "w")
 fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)   # raises if already held
 ```
+
+A fixed name in `/tmp`, opened for writing without `O_NOFOLLOW`, is the version not
+to ship: the directory is world-writable, so any local user can point the path at a
+file you can write and have it truncated, or hold the lock and keep every later tray
+from starting. That was this project's own bug until 1.4.0, which is why the lock
+moved to `$XDG_RUNTIME_DIR` and why the open carries `O_NOFOLLOW`; the same
+reasoning moved the sync lock out of `/tmp` in "Two runs at once corrupt everything"
+above.
 
 ### Editing a running shell script corrupts it
 

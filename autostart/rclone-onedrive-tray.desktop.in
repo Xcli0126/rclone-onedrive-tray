@@ -1,7 +1,12 @@
 [Desktop Entry]
 Type=Application
 Name=OneDrive status icon
+# What a Chinese desktop shows. `zh`, not `zh_CN`: GLib falls back from the full
+# locale to the language, and the tray writes the same pair into the entry it
+# creates when the "Start tray at login" box is ticked.
+Name[zh]=OneDrive 状态图标
 Comment=rclone bisync tray icon
+Comment[zh]=rclone bisync 托盘图标
 Exec=%TRAY_SCRIPT%
 Terminal=false
 X-GNOME-Autostart-enabled=true

@@ -86,8 +86,10 @@ The paragraph above is the exception: a `--resync` replaces instead of renaming.
 
 Every run ends with one machine-readable line, `ONEDRIVE_RESULT v=1
 state=<synced|error|stopped> tag=<tag|none> when=HH:MM msg=<sentence>`, and that line is
-what the tray reads for the icon, the time and the reason. The exception is a run that
-found another sync already holding the lock: it leaves the verdict to that one. The
+what the tray reads for the icon, the time and the reason. Two runs carry no line of
+their own: one that found another sync already holding the lock, which leaves the
+verdict to that run, and one that stopped before the log could be opened at all, which
+has nowhere to write it. docs/TROUBLESHOOTING.md lists both. The
 English around it is what older versions wrote, and it is still what the tray and the
 doctor read when the line is not there. The log rotates at 5 MB, and the tray reads only the
 last 64 KB of it. A sync every five minutes
@@ -160,6 +162,9 @@ when it is set, so `XDG_CONFIG_HOME=/somewhere` moves all three config lines.
 ~/.local/bin/onedrive-sync, onedrive-tray, onedrive-watch, onedrive-check,
              onedrive-check-access, onedrive-doctor
 ~/.config/rclone-onedrive-tray/config, filters.txt, exclude-folders.txt
+             (the exclude list is written by setup.sh and by the tray's "Folders to
+             sync" menu; ./install.sh leaves it to them, and a missing file means
+             "sync everything")
 ~/.config/systemd/user/onedrive-sync.{service,timer}
 ~/.config/systemd/user/onedrive-sync-watch.service
 ~/.config/autostart/rclone-onedrive-tray.desktop
@@ -210,8 +215,8 @@ echo "hello from the cloud" > /tmp/trial/cloud/hello.txt
 ```
 
 Run `setup.sh` rather than `install.sh`. The wizard calls the installer itself,
-and running the installer first writes the config that `setup.sh` then refuses to
-overwrite.
+and running the installer first writes the config from the shipped example, with
+`onedrive:` as the remote, a moment before the wizard replaces it.
 
 Three things make the difference. `--unit-name` keeps the trial units away from
 the real ones, because systemd unit names are global to your session and two
@@ -480,7 +485,8 @@ the one moment the notification matters.
   [docs/FEATURE-PARITY.md](docs/FEATURE-PARITY.md).
 - What this project knows is still wrong, and what it decided to live with, is in
   [docs/KNOWN-ISSUES.md](docs/KNOWN-ISSUES.md). If something breaks, run
-  `onedrive-doctor` before reading anything else.
+  `onedrive-doctor` before reading anything else, or pick `Diagnostics…` in the tray
+  menu, which runs it and shows the same report in a window.
 
 ---
 
@@ -538,8 +544,9 @@ The first two point `HOME` and the XDG directories at a temporary tree, replace 
 and sudo with stubs, and use a probe unit name. `filters.sh` runs the real rclone over a fixture
 directory, `tray.sh` builds the real GTK menu on a private Broadway display and activates
 every handler against stub commands, and `docs.sh` only reads the repository. None of them can disturb a working install.
-`--verbose` shows every command and its output. CI runs all five on `ubuntu-latest`, which is a
-different distribution, systemd and rclone from the machine they were written on.
+`--verbose` shows every command and its output. CI runs all five on two runners,
+`ubuntu-latest` and `ubuntu-22.04`, each a different distribution, systemd and rclone
+from the machine they were written on.
 [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) records what they cover, the versions they have
 been run against, and what nobody has tried yet.
 

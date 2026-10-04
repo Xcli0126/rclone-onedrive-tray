@@ -36,6 +36,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `UI_LANG` written the way a locale is spelled was ignored. `zh_CN`, `zh-CN`,
+  `zh-Hans`, `zh_CN.UTF-8` and `ZH` are the values a person reaching for a locale
+  writes, and `resolve_lang()` knew only the literal `zh`, so the menu stayed
+  English. The settings window's Language row matched the raw string against its
+  three ids as well, so those values left the row empty and a Save wrote `""` over
+  a setting that was in use. One normalizer answers both: `_` and `-` are one
+  separator, the territory and the encoding are dropped, and a value naming no
+  language is the "follow the system" row.
+- A Chinese reader got three pieces of English: the `[oldrclone]` hint named
+  rclone 1.65 while the wrapper and every page say 1.66, so upgrading to 1.65 left
+  the failure; the desktop entry the tray writes had no `Name[zh]`, so GNOME's
+  startup list showed `OneDrive status icon` beside a checkbox reading
+  开机自动启动托盘; and the pause-failure notification glued an ASCII `:` and
+  systemd's own English onto a translated clause. The hint, the entry and the
+  sentence are fixed where they are written.
+- A config file with one non-UTF-8 byte crashed `--show-icon`/`--hide-icon` with a
+  traceback, and in the settings window it killed the save worker before it could
+  report anything: `busy` stayed true, the Save button stayed insensitive and the
+  window said nothing at all. `update_config_file()` raises the same fault
+  `load_config()` answers that file with, and both callers print it.
+- `update_config_file()` rewrote only the first line of a key that appears twice,
+  and every reader of the format lets the last assignment win, so `--hide-icon`
+  printed `SHOW_ICON=0 written` and the icon stayed. Every line carrying the key is
+  rewritten now, and the key is not appended as well.
+- The log cap stopped being a cap on a userland without GNU `stat`: the wrapper
+  read the log's size with `stat -c%s` and the `|| echo 0` beside it turned the
+  failure into a zero byte log, so the rotation silently stopped happening. The
+  size comes from `wc -c`, which every userland has, and a size that cannot be
+  read (a log the user may write but not read, say) is a warning in the log.
 - A sync that keeps failing was announced on every run. The guard whose comment
   says the same failure is not announced twice compared the run's own clock along
   with the tag and the log line, and a run's clock is different every time, so a
@@ -472,6 +501,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Eleven things the pages said that the code does not do, found by walking the
+  documentation as a reader with no knowledge of the tree. `config.example` said a
+  missing `LOCAL` is created while the wrapper refuses one; the troubleshooting
+  page still prescribed the fixed lock file in `/tmp` that 1.4.0 replaced with a
+  lock in `$XDG_RUNTIME_DIR`; two pages disagreed about what an rclone older than
+  1.66 costs; the CI section named one runner where the workflow uses two; the
+  trial route warned that `setup.sh` refuses to overwrite a config, which is true
+  without `--yes` and false with it; the Chinese README stated the delete cap as a
+  flat count where the code passes a percentage; the result line's list of
+  exceptions was missing the run that cannot open its log; `exclude-folders.txt`
+  was listed as installed by `./install.sh`, which does not write it; the tray's
+  own `Diagnostics…` item was only in the menu diagram; and `--resilient`'s
+  arrival version was wrong in one place. All of them are corrected, and the
+  Chinese README gained the result-line paragraph the English one has.
 - `docs/TROUBLESHOOTING.md` says what the journal costs. A sync that succeeds
   writes nothing and one that fails writes about four lines and 413 bytes per run,
   which a five minute timer turns into roughly 120 kB a day for as long as the

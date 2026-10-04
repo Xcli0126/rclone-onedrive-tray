@@ -28,20 +28,6 @@ hits it. The fix worth doing is one reader, which is a new runtime file and pull
 the installers and the documentation along with it; that is larger than the cost of
 the remaining duplication, so the four stay and the escaping is what had to agree.
 
-### Non-GNU userlands are a guess
-
-`stat -c%s` in the wrapper's log rotation, `getent passwd` in the installer,
-`find -mindepth` in the checker, `sed -i` in a test fixture, `install -o root -g
-root`, `nl -w2`, and two `mktemp` calls without a template.
-
-On BusyBox the log rotation stops happening, because `stat -c%s` fails and the
-`|| echo 0` beside it turns the failure into a zero-size log, so the 5 MiB cap
-stops being a cap. The checker's walk returns nothing and reports an incomplete
-walk, which reads as a permissions problem rather than an unsupported option.
-
-The supported target is Ubuntu, and [COMPATIBILITY](COMPATIBILITY.md) says so.
-Changing this is a support-matrix decision rather than a cleanup.
-
 ### `Tray` is one 900-line class
 
 Menu construction, the three-second poll, the six actions, the folder submenu and
@@ -54,8 +40,47 @@ It moves attributes the test suite reaches into directly (`tray.menu`,
 test is allowed to touch before anyone starts.
 
 
+### Re-authorise says it worked before the sign-in is done
+
+`_wait_for_remote()` is documented as waiting for the remote to answer again, and
+it probes once: with the credentials still valid at that moment the first probe
+succeeds, so "Signed in. Syncing now." appears about 0.05 seconds after the
+terminal opens, `reauth_busy` drops (which makes a second concurrent
+`rclone config reconnect` one click away, the race the guard exists for), and a
+sync is requested while the sign-in window is still open. Measured by the round
+eleven reviewer, with the scenario the suite has to plant a slow `rclone lsd` to
+reproduce at all.
+
+The tray hands the reconnect to a terminal and never sees its exit status, so
+there is nothing to wait for. Either the sentence stops claiming success and says
+what to do in the window (a one-line change, no signal needed), or the flow gains
+a signal the tray can read and the text stays. The first is what this entry is
+waiting for.
+
+
 ## Accepted, with the reason
 
+- The tools' own report text is English, and that is now the same answer in the
+  GUI. `onedrive-check-access`'s report inside the settings window, and
+  `onedrive-doctor`'s rows inside the Diagnostics window, are English blocks with
+  Chinese labels and buttons around them. The alternative is translating two
+  programs' output, and every row of it is a sentence about rclone's or systemd's
+  own English, which a translation would have to leave in place anyway. The tray's
+  own windows are fully translated; what is not is the output of a command-line
+  tool the tray runs, and `onedrive-check` already declared that about itself
+  before this was found. The tray's own command-line and stderr text is English
+  for the same reason: it is read in a terminal, and no page promises otherwise.
+- A GNU userland is a requirement rather than an accident. The shell half uses
+  `stat -c`, `find -mindepth`, `sed -i`, `getent passwd`, `install -o`, `nl -w2`
+  and a `mktemp` with no template, and the supported target is Ubuntu, which has
+  all of them. BusyBox and the BSD userlands stay untested and unsupported, and
+  `docs/DEPENDENCIES.md` says so where a reader looks for what the project needs,
+  which is where the entry was missing an answer. The one failure in that list
+  which was silent is fixed: the wrapper took the log's size from `stat -c%s` and
+  the `|| echo 0` beside it turned an unreadable size into a zero byte log, so the
+  cap stopped being a cap on a userland without it. The size comes from `wc -c`
+  now, which every userland has, and a size it cannot read is a warning in the
+  log. The rest of the list is closed as a requirement rather than a cleanup.
 - The tray writes a failure to read its config, and a failure to write its icons,
   to stderr, and says the icon problem once rather than once per poll. A launch
   from a desktop entry gives stderr no window, which is why the two facts are also

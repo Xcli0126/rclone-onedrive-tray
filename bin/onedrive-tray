@@ -252,16 +252,19 @@ class ConfigFault(Exception):
     """
 
 
-def config_utf8_problem(exc: UnicodeDecodeError) -> str:
+def config_utf8_problem(exc: UnicodeDecodeError, path: str = CONFIG_FILE) -> str:
     """The sentence for a config file that is not the UTF-8 it has to be.
 
     The offending byte is named because that is all the reader can honestly say
     about where the fault is: the file is opened as UTF-8 and nothing else, and
     "invalid UTF-8" alone leaves a hand-edited file to be searched byte by byte.
+    `path` is the file the sentence is about, because both readers of the format
+    raise this: load_config() opens CONFIG_FILE, and update_config_file() is
+    handed the path by its caller.
     """
     byte = exc.object[exc.start:exc.start + 1]
     where = "0x" + byte.hex() if byte else "?"
-    return (f"{CONFIG_FILE} is not valid UTF-8 (byte {where}); "
+    return (f"{path} is not valid UTF-8 (byte {where}); "
             f"fix the file or run setup.sh.")
 
 
@@ -486,25 +489,46 @@ def update_config_file(path: str, changes: dict) -> list:
     no line to take one from.
 
     Returns the keys that had to be appended. Raises OSError when the file cannot
-    be read or written.
+    be read or written, and ConfigFault - with config_utf8_problem()'s sentence,
+    the one load_config() answers the same file with - when it is there but is not
+    the UTF-8 this format has to be.
     """
-    with open(path, encoding="utf-8") as fh:
-        text = fh.read()
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except UnicodeDecodeError as exc:
+        # The same fault load_config() turns into a sentence. Raised as a bare
+        # UnicodeDecodeError it went past both callers, which catch OSError:
+        # --show-icon and --hide-icon died with a traceback, and a Save in the
+        # settings window killed its worker before _finish() could be scheduled,
+        # so the button stayed insensitive for the life of the window and nothing
+        # was ever reported. The bytes are not guessed at, for the same reason
+        # load_config() does not guess: the values in it are paths.
+        raise ConfigFault(config_utf8_problem(exc, path)) from exc
 
     wanted = dict(changes)
     lines = text.split("\n")
     trailing = lines.pop() if lines and lines[-1] == "" else None
 
+    # Every line carrying the key, not only the first. The file is read with `.`
+    # by onedrive-sync and by load_config(), and both let the last assignment win,
+    # so rewriting the first occurrence wrote a value the file still did not
+    # mean: a hand-edited file with the key on two lines answered --hide-icon
+    # with "SHOW_ICON=0 written" and then kept the icon, because the second line
+    # was still what every reader saw. Rewriting all of them leaves every reader
+    # with the same answer.
+    replaced = set()
     for index, line in enumerate(lines):
         found = KEY_RE.match(line)
         if not found:
             continue
         key = found.group("key")
         if key in wanted:
+            replaced.add(key)
             lines[index] = (f"{found.group('prefix')}{key}="
-                            f"{shell_quote_value(wanted.pop(key))}")
+                            f"{shell_quote_value(wanted[key])}")
 
-    appended = sorted(wanted)
+    appended = sorted(key for key in wanted if key not in replaced)
     if appended:
         if lines and lines[-1].strip():
             lines.append("")
@@ -592,11 +616,20 @@ def autostart_contents(script: str = "") -> str:
     `script` is the program to run; the tray itself when it is not given, and a
     parameter so that a test can hand it a path a home directory could really
     have.
+
+    Name and Comment carry a `[zh]` translation: a desktop entry is a key file,
+    and GLib looks a localized key up for the session's locale, so without one a
+    Chinese desktop lists the entry in English (`OneDrive status icon`) while the
+    checkbox that writes it reads 开机自动启动托盘 in the same window. `zh` rather
+    than `zh_CN`, because the lookup falls back from the full locale to the
+    language, and the project has one Chinese.
     """
     return ("[Desktop Entry]\n"
             "Type=Application\n"
             f"Name={APP_NAME} status icon\n"
+            f"Name[zh]={APP_NAME} 状态图标\n"
             "Comment=rclone bisync tray icon\n"
+            "Comment[zh]=rclone bisync 托盘图标\n"
             f"Exec={desktop_exec(script or os.path.realpath(__file__))}\n"
             "Terminal=false\n"
             "X-GNOME-Autostart-enabled=true\n")
@@ -721,7 +754,7 @@ STRINGS = {
         "Resume now": "立即恢复",
         "Paused until {when}": "已暂停，{when} 自动恢复",
         "Paused for {n}": "已暂停 {n}",
-        "Could not schedule the resume": "无法安排自动恢复",
+        "Could not schedule the resume: {why}": "无法安排自动恢复：{why}",
         "Could not restore the resume timer, so automatic sync is on again":
             "无法恢复暂停的定时器，已重新开启自动同步",
         "Could not change the login setting": "无法修改开机自启动设置",
@@ -781,7 +814,7 @@ STRINGS = {
         "network": "网络或 DNS 暂时不可用，稍后自动重试",
         "emptyremote": "远端一侧是空的，rclone 拒绝增量同步；在任意一侧放一个文件，或在放入文件后重新建立基线（onedrive-sync --resync），随后的定时同步即可继续",
         "resync": "同步基线失效，请运行 onedrive-sync --resync",
-        "oldrclone": "rclone 版本过旧，不认识 BISYNC_ARGS 里的参数；--resilient/--recover 需要 1.65 或更新版本",
+        "oldrclone": "rclone 版本过旧，不认识 BISYNC_ARGS 里的参数；这个包装器传的参数需要 rclone 1.66 或更新版本",
         "auth": "授权可能已过期，需要重新授权 rclone 远程",
         "access": "访问检查在两侧没找到标记文件，本次没有改动任何东西；用 onedrive-check-access 建回标记，或先修好读不到的那一侧。不要为此跑 --resync",
         "Check file names": "检查文件名",
@@ -840,10 +873,28 @@ STRINGS = {
 DEFAULT_LANG = "en"
 
 
+def normalize_lang(value) -> str:
+    """The language the table names, from any spelling a config can hold.
+
+    UI_LANG is hand-edited, and the value a person reaches for is the one their
+    own locale holds: `zh_CN.UTF-8`, `zh-CN`, `ZH`. The table names one Chinese,
+    so the territory, the script modifier and the encoding are not part of the
+    answer: `_` and `-` are one separator, everything from the first `.` or `@`
+    goes, and what is left has to name a language here. "" when it does not,
+    which is the answer an unsupported value already got.
+    """
+    text = str(value or "").strip().lower()
+    text = text.split("@", 1)[0].split(".", 1)[0].replace("_", "-")
+    for candidate in (text, text.split("-", 1)[0]):
+        if candidate in STRINGS or candidate == DEFAULT_LANG:
+            return candidate
+    return ""
+
+
 def resolve_lang(cfg: dict) -> str:
     """UI_LANG wins; otherwise follow the locale, defaulting to English."""
-    pref = (cfg.get("UI_LANG") or "").strip().lower()
-    if pref in STRINGS or pref == DEFAULT_LANG:
+    pref = normalize_lang(cfg.get("UI_LANG"))
+    if pref:
         return pref
     env = (os.environ.get("LC_ALL") or os.environ.get("LC_MESSAGES")
            or os.environ.get("LANG") or "").lower()
@@ -2577,8 +2628,12 @@ class Tray:
             # One fault, one outcome: this is the sentence the startup recovery
             # uses for the same failure, and the units are already back on by the
             # time it is shown. The reason is still reported beside it.
+            # The colon is part of the sentence, not glued on beside it: the zh
+            # table writes "：" and an ASCII ":" after a Chinese clause is the
+            # tell that the two halves were assembled rather than translated.
             self.notify(APP_NAME,
-                        f"{self.t('Could not schedule the resume')}: {err[:70]}")
+                        self.t("Could not schedule the resume: {why}",
+                               why=err[:70]))
             return self._pause_lost()
         try:
             os.makedirs(CACHE_DIR, exist_ok=True)
@@ -3178,7 +3233,14 @@ def _settings_dialog_class():
             for value, text in (("", self.t("Follow the system")),
                                 ("en", "English"), ("zh", "中文")):
                 self.combo_lang.append(value, text)
-            self.combo_lang.set_active_id(self.original["UI_LANG"] or "")
+            # The row is set by the language the resolver read, not by the string
+            # the config happens to spell: `zh_CN.UTF-8` and `ZH` are both Chinese
+            # to resolve_lang() and neither is a combo id, so the raw value left
+            # the row blank and a Save then wrote "" over a setting that was in
+            # use. A value naming no language here falls back to the row for
+            # "follow the system", which is what it already meant.
+            wanted = normalize_lang(self.original["UI_LANG"])
+            self.combo_lang.set_active_id(wanted)
             row(0, self.t("Language"), self.combo_lang)
 
             self.check_show = Gtk.CheckButton(label=self.t("Show the icon in the panel"))
@@ -3362,7 +3424,11 @@ def _settings_dialog_class():
             if changed:
                 try:
                     update_config_file(CONFIG_FILE, changed)
-                except OSError as exc:
+                except (OSError, ConfigFault) as exc:
+                    # ConfigFault is the config that is not the UTF-8 this format
+                    # has to be. Left uncaught it killed this worker before
+                    # _finish() was scheduled: busy stayed True, the Save button
+                    # stayed insensitive and the window reported nothing.
                     failures.append(self.t("Could not write the config file: {why}",
                                            why=str(exc)))
             if values["INTERVAL_MIN"] != self.original["INTERVAL_MIN"]:
@@ -3572,6 +3638,12 @@ def main(argv=None):
         value = "1" if args[last] == "--show-icon" else "0"
         try:
             update_config_file(CONFIG_FILE, {"SHOW_ICON": value})
+        except ConfigFault as exc:
+            # A file that is not UTF-8 is the fault load_config() already has a
+            # sentence for, and rewriting it from what could be decoded would
+            # replace bytes nobody asked about.
+            print(f"{APP_ID}: {exc}", file=sys.stderr)
+            return 1
         except OSError as exc:
             print(f"{APP_ID}: could not write {CONFIG_FILE}: {exc}",
                   file=sys.stderr)

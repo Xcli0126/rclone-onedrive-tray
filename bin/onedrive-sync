@@ -212,8 +212,20 @@ sweep_stale_locks() {
 sweep_stale_locks
 
 # ---------------------------------------------------------------- log rotation
-if [ -f "$LOG" ] && [ "$(stat -c%s "$LOG" 2>/dev/null || echo 0)" -gt "$MAX_LOG_BYTES" ]; then
-    mv -f "$LOG" "$LOG.1"
+# The size is read with wc, which every userland has, rather than with stat -c%s,
+# which is GNU. On a system without it the old line read the failure as a zero
+# byte log (the `|| echo 0` beside it), so rotation silently stopped happening and
+# the cap stopped being a cap; a size that cannot be read is now a warning rather
+# than a quiet zero.
+if [ -f "$LOG" ]; then
+    if log_bytes="$(wc -c <"$LOG" 2>/dev/null)"; then
+        log_bytes="${log_bytes//[^0-9]/}"
+        if [ -n "$log_bytes" ] && [ "$log_bytes" -gt "$MAX_LOG_BYTES" ]; then
+            mv -f "$LOG" "$LOG.1"
+        fi
+    else
+        log_line "WARNING: cannot read the size of $LOG, so it was not rotated"
+    fi
 fi
 
 # ---------------------------------------------------------------- delete cap

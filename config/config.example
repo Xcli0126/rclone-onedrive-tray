@@ -15,7 +15,10 @@
 #     rclone lsd onedrive:   # list what rclone sees
 REMOTE="onedrive:"
 
-# The local directory to keep in sync. Created if missing.
+# The local directory to keep in sync. It has to exist before a run: onedrive-sync
+# refuses a LOCAL that does not, rather than creating one, because a typo or an
+# unmounted share would otherwise become the sync root. setup.sh creates it on the
+# run that writes the config; after that, mkdir it yourself.
 LOCAL="$HOME/OneDrive"
 
 # ------------------------------------------------------------------ scheduling

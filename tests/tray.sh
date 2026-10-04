@@ -867,6 +867,96 @@ def scenario_reauth():
 
 
 # ---------------------------------------------------------------- settings
+def scenario_lang_spellings():
+    """A language is named by its language, not by the string a config spells.
+
+    UI_LANG is hand-edited, and the value a person reaches for is the one their
+    own locale holds: `zh_CN.UTF-8`, `zh-CN`, `ZH`. resolve_lang() accepted only
+    the literal ids the table uses, so those values were ignored and the menu
+    stayed English; and the settings combo matched the same raw string against
+    its ids, so the row came up blank and a Save wrote "" over a setting that was
+    in use. A value naming no language here is the "follow the system" row.
+    """
+    spellings = ["zh", "zh_CN", "zh-CN", "zh-Hans", "zh_CN.UTF-8", "ZH",
+                 "zh@latin", "en", "en_US", "fr", ""]
+    resolved = {"None": MODULE.resolve_lang({"UI_LANG": None})}
+    for value in spellings:
+        resolved[value] = MODULE.resolve_lang({"UI_LANG": value})
+    rows = {}
+    for value in ("zh_CN.UTF-8", "ZH", "fr", ""):
+        cfg = dict(CFG)
+        cfg["UI_LANG"] = value
+        dialog = MODULE.SettingsDialog(None, cfg=cfg)
+        rows[value] = {"active": dialog.combo_lang.get_active_id() or "",
+                       "saved": str(dialog.values()["UI_LANG"])}
+        dialog.destroy()
+    return {"resolved": resolved, "rows": rows,
+            "translator": {lang: MODULE.make_translator(lang)("Quit")
+                           for lang in ("en", "zh")},
+            # The colon belongs to the sentence: a translated clause with an ASCII
+            # ":" glued after it is the tell that the two halves were assembled
+            # rather than translated, and the table writes "：".
+            "resume_zh": MODULE.make_translator("zh")(
+                "Could not schedule the resume: {why}", why="systemd-run failed")}
+
+
+def scenario_config_duplicate_key():
+    """A key on two lines is rewritten on both of them, not only the first.
+
+    The file is read with `.` by onedrive-sync and by load_config(), and both let
+    the last assignment win. update_config_file() dropped the key from its work
+    list on the first match, so a hand-edited file holding SHOW_ICON on two lines
+    answered --hide-icon with "SHOW_ICON=0 written" and kept the icon, because the
+    second line was still the one every reader saw.
+    """
+    import subprocess
+
+    path = os.path.join(WORK, "dupkey", "config")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write('SHOW_ICON="1"\n')
+        fh.write('REMOTE="dupkey:"\n')
+        fh.write('LOCAL="%s"\n' % os.path.join(WORK, "dupkey", "local"))
+        fh.write('SHOW_ICON="1"\n')
+    appended = MODULE.update_config_file(path, {"SHOW_ICON": "0"})
+    seen = subprocess.run(
+        ["bash", "-c", '. "$1"; printf "%s" "$SHOW_ICON"', "_", path],
+        capture_output=True, text=True)
+    real_config = MODULE.CONFIG_FILE
+    MODULE.CONFIG_FILE = path
+    try:
+        cfg = MODULE.load_config()
+    finally:
+        MODULE.CONFIG_FILE = real_config
+    return {"appended": sorted(appended), "after": read_text(path),
+            "bash": seen.stdout, "tray": str(cfg.get("SHOW_ICON"))}
+
+
+def scenario_config_badbyte_icon():
+    """--hide-icon on a config that is not UTF-8 answers with the sentence.
+
+    update_config_file() opened the file as UTF-8 and let the UnicodeDecodeError
+    out; the command catches OSError, so what the user got was a traceback, for
+    the same file load_config() already describes in one sentence.
+    """
+    import subprocess
+
+    home = os.environ["TRAY_BADBYTE_HOME"]
+    os.makedirs(os.path.join(home, "rclone-onedrive-tray"), exist_ok=True)
+    path = os.path.join(home, "rclone-onedrive-tray", "config")
+    with open(path, "wb") as fh:
+        fh.write(b'REMOTE="badbyte:"\n')
+        fh.write(b'LOCAL="%s"\n' % os.path.join(home, "OneDrive").encode())
+        fh.write(b'SHOW_ICON="1"\n')
+        fh.write(b'# \xff\xfe\n')
+    env = dict(os.environ)
+    env["XDG_CONFIG_HOME"] = home
+    proc = subprocess.run([sys.executable, sys.argv[2], "--hide-icon"],
+                          capture_output=True, text=True, timeout=120, env=env)
+    return {"exit_code": proc.returncode, "stderr": proc.stderr,
+            "stdout": proc.stdout, "config_file": path}
+
+
 def scenario_settings_view():
     """What the settings window opens with, before anything is touched.
 
@@ -2757,6 +2847,18 @@ def scenario_hint_langs():
             data[lang] = {"tag": tag, "raw": raw,
                           "hint": tray._hint(tag, raw),
                           "is_raw": tray._hint(tag, raw) == raw}
+        # The version a hint names is part of the hint: the wrapper decides by
+        # flag which rclone knows what, and a table entry left on an older number
+        # sends the reader to an upgrade that does not fix it. English shows the
+        # wrapper's own sentence, so the raw line here is the one it writes.
+        old_line = ("2026/10/03 22:41:00 ERROR: attempt 3/3 failed (rc=1) "
+                    "[oldrclone] this rclone does not know --recover; that flag "
+                    "arrived in rclone 1.66 (check: rclone version)")
+        for lang in ("en", "zh"):
+            tray.t = MODULE.make_translator(lang)
+            _, _, old_tag, old_raw = MODULE.read_last_result(old_line)
+            data["old_" + lang] = {"tag": old_tag,
+                                   "hint": tray._hint(old_tag, old_raw)}
     finally:
         MODULE.Notify = real_notify
     return data
@@ -4205,6 +4307,9 @@ SCENARIOS = {
     "no-remote": scenario_no_remote,
     "icons": scenario_icons,
     "icons-unwritable": scenario_icons_unwritable,
+    "lang-spellings": scenario_lang_spellings,
+    "config-duplicate-key": scenario_config_duplicate_key,
+    "config-badbyte-icon": scenario_config_badbyte_icon,
     "cli-settings": scenario_cli_settings,
 }
 
@@ -5349,6 +5454,16 @@ if not any("see log: /tmp/sync.log" in body for body in d["bodies"]):
     print("bodies=%r" % (d["bodies"],))
     raise SystemExit(1)
 '
+    check "the old-rclone hint names the version the wrapper needs, in both languages" json_py '
+for lang in ("en", "zh"):
+    text = d["old_" + lang]["hint"]
+    if "1.66" not in text:
+        print("%s hint does not name 1.66: %r" % (lang, text))
+        raise SystemExit(1)
+    if "1.65" in text:
+        print("%s hint still names 1.65: %r" % (lang, text))
+        raise SystemExit(1)
+'
 fi
 
 title "A reload that moves the log it reads"
@@ -5969,6 +6084,82 @@ X-GNOME-Autostart-enabled=true
 EOF
 
 title "The settings window"
+title "A language spelled the way a locale is"
+# UI_LANG is hand-edited, and the spelling a person reaches for is their own
+# locale's: zh_CN.UTF-8, zh-CN, ZH. resolve_lang() accepted only the literal ids
+# the table uses, so those values were ignored and the menu stayed English, and
+# the settings row matched the raw string against its ids, came up blank, and let
+# a Save write "" over a setting that was in use.
+if run_driver lang-spellings; then
+    check "every spelling of Chinese resolves to the Chinese table" json_py '
+want = {"zh": "zh", "zh_CN": "zh", "zh-CN": "zh", "zh-Hans": "zh",
+        "zh_CN.UTF-8": "zh", "ZH": "zh", "zh@latin": "zh"}
+bad = {k: d["resolved"][k] for k, v in want.items() if d["resolved"][k] != v}
+if bad:
+    print("spellings that did not resolve to zh: %r" % (bad,))
+    raise SystemExit(1)
+if d["translator"]["zh"] == "Quit":
+    print("the Chinese table is not in use: %r" % (d["translator"],))
+    raise SystemExit(1)
+'
+    check "and English, an empty value and an unknown one still fall back" json_py '
+for key in ("en", "en_US", "None", "fr"):
+    if d["resolved"][key] != "en":
+        print("UI_LANG=%s resolves to %r" % (key, d["resolved"][key]))
+        raise SystemExit(1)
+'
+    check "the settings row shows the language in use, whatever the spelling" json_py '
+for value, want in (("zh_CN.UTF-8", "zh"), ("ZH", "zh"), ("fr", ""), ("", "")):
+    row = d["rows"][value]
+    if row["active"] != want or row["saved"] != want:
+        print("UI_LANG=%r: row %r, saved %r, wanted %r"
+              % (value, row["active"], row["saved"], want))
+        raise SystemExit(1)
+'
+    check "the pause failure is one sentence, with the table's own colon" json_py '
+if "：" not in d["resume_zh"] or ": " in d["resume_zh"]:
+    print("the sentence carries the wrong colon: %r" % (d["resume_zh"],))
+    raise SystemExit(1)
+if "systemd-run failed" not in d["resume_zh"]:
+    print("the reason is missing: %r" % (d["resume_zh"],))
+    raise SystemExit(1)
+'
+fi
+
+title "A key the config holds twice"
+# Every reader of the format lets the last assignment win, so a rewrite that
+# touches only the first line reports a change the file does not have.
+if run_driver config-duplicate-key; then
+    check "both lines are rewritten, so every reader sees the new value" json_py '
+if d["bash"] != "0" or d["tray"] != "0":
+    print("bash reads %r and the tray reads %r, wanted 0"
+          % (d["bash"], d["tray"]))
+    print(d["after"])
+    raise SystemExit(1)
+if d["appended"]:
+    print("the key was appended as well as rewritten: %r" % (d["appended"],))
+    raise SystemExit(1)
+'
+fi
+
+title "A config that is not UTF-8, written to"
+# update_config_file() let the UnicodeDecodeError out and its callers catch
+# OSError, so the command printed a traceback and the settings window's worker
+# died before it could report anything.
+if run_driver config-badbyte-icon TRAY_BADBYTE_HOME="$WORK/badbyte"; then
+    check "the command exits 1 with the sentence load_config() uses" json_py '
+if d["exit_code"] != 1:
+    print("exit %r" % (d["exit_code"],))
+    raise SystemExit(1)
+if "Traceback" in d["stderr"]:
+    print("a traceback reached the user: %r" % (d["stderr"],))
+    raise SystemExit(1)
+if d["config_file"] not in d["stderr"] or "not valid UTF-8" not in d["stderr"]:
+    print("the sentence does not name the file and the fault: %r" % (d["stderr"],))
+    raise SystemExit(1)
+'
+fi
+
 if run_driver settings-view; then
     check "the window names where the config lives" json_py '
 want = "Config file: %s" % d["config_file"]
@@ -6290,6 +6481,7 @@ check "a path with a space, a % or a backslash is quoted and reads back whole" \
 import importlib.machinery
 import importlib.util
 import os
+import subprocess
 import sys
 
 # env -i above means no PYTHONDONTWRITEBYTECODE is inherited, and loading bin/
@@ -6343,6 +6535,37 @@ for index, path in enumerate(paths):
     argv = [arg.replace("%%", "%") for arg in argv]
     if argv != [path]:
         problems.append("%r reads back as %r" % (path, argv))
+    # The entry is what a Chinese desktop lists at login, and without a Name[zh]
+    # the window that reads 开机自动启动托盘 lists "OneDrive status icon" in the
+    # startup applications. The lines are read from the text rather than through
+    # GLib, because GLib hides localized keys whose language is not in the
+    # process locale: under this suite's C.UTF-8 the key list of a file that has
+    # them is exactly the English one, which is what the subprocess below is for.
+    written = open(entry, encoding="utf-8").read()
+    for line in ("Name[zh]=OneDrive 状态图标", "Comment[zh]=rclone bisync 托盘图标"):
+        if line + "\n" not in written:
+            problems.append("%r does not carry %r" % (path, line))
+
+# What GLib itself answers, in the process locale a Chinese desktop has. The key
+# check above proves the file carries the translation; this proves the lookup a
+# desktop performs finds it, which is the half that depends on the locale names
+# the file uses.
+probe = os.path.join(work, "locale-probe.py")
+with open(probe, "w", encoding="utf-8") as fh:
+    fh.write("from gi.repository import GLib\n"
+             "kf = GLib.KeyFile()\n"
+             "kf.load_from_file(%r, GLib.KeyFileFlags.NONE)\n"
+             "print(kf.get_locale_string('Desktop Entry', 'Name', 'zh_CN.UTF-8'))\n"
+             % os.path.join(work, "entry-0.desktop"))
+env = dict(os.environ)
+env["LANG"] = "zh_CN.UTF-8"
+env["LC_ALL"] = "zh_CN.UTF-8"
+env["PYTHONDONTWRITEBYTECODE"] = "1"
+probe_run = subprocess.run(
+    [sys.executable, probe], capture_output=True, text=True, env=env)
+if probe_run.stdout.strip() != "OneDrive 状态图标":
+    problems.append("GLib under a Chinese locale reads the name as %r"
+                    % (probe_run.stdout.strip() or probe_run.stderr.strip()))
 if problems:
     print("; ".join(problems))
     raise SystemExit(1)

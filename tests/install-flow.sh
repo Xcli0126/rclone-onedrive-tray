@@ -675,6 +675,17 @@ fi
 # there; on a re-run whose entry was removed, it stays removed.
 title "the autostart entry on a re-run"
 AUTOSTART_FILE="$XDG_CONFIG_HOME/autostart/rclone-onedrive-tray.desktop"
+# The entry install.sh writes is the same file the tray's own "Start tray at
+# login" box writes, and a desktop entry is a key file: GLib looks Name up for the
+# session's locale. Without a [zh] entry a Chinese desktop lists it in English
+# while the box that wrote it reads 开机自动启动托盘 in the same window.
+if [ -f "$AUTOSTART_FILE" ] &&
+        grep -qxF 'Name[zh]=OneDrive 状态图标' "$AUTOSTART_FILE" &&
+        grep -qxF 'Comment[zh]=rclone bisync 托盘图标' "$AUTOSTART_FILE"; then
+    ok "the installed autostart entry carries a Chinese name and comment"
+else
+    bad "the autostart entry has no [zh] name: $( [ -f "$AUTOSTART_FILE" ] && grep -c '' "$AUTOSTART_FILE" || echo absent ) lines"
+fi
 rm -f "$AUTOSTART_FILE"
 run "a re-run leaves a removed autostart entry removed" 0 "left absent" \
     bash "$SRC_DIR/install.sh" --prefix "$HOME/.local" --no-start
@@ -1264,6 +1275,62 @@ if grep -qF 'onedrive-check was not found' "$CHK/cache/sync.log" &&
     ok "a missing checker is reported instead of skipping the check in silence"
 else
     bad "the resync ran with no checker and said nothing: $(tail -1 "$CHK/cache/sync.log")"
+fi
+
+# ------------------------------------------------------------ the log cap
+# The cap is only a cap while the rotation happens, and the size used to be read
+# with `stat -c%s` and its failure turned into a zero by the `|| echo 0` beside
+# it. On a userland without GNU stat the log stopped rotating and nothing said so;
+# a size that cannot be read is a warning now, and wc reads it everywhere.
+title "the log cap and the rotation"
+ROT="$WORK/rotate"
+rm -rf "$ROT"
+mkdir -p "$ROT/bin" "$ROT/cfg/rclone-onedrive-tray" "$ROT/cache" "$ROT/local"
+cp "$SRC_DIR/bin/onedrive-sync" "$ROT/bin/"
+printf '#!/bin/bash\nexit 0\n' > "$ROT/rclone"
+chmod +x "$ROT/rclone"
+rot_config() {  # rot_config <MAX_LOG_BYTES>
+    cat > "$ROT/cfg/rclone-onedrive-tray/config" <<EOF
+REMOTE="rotfake:Vault"
+LOCAL="$ROT/local"
+LOG="$ROT/cache/sync.log"
+RCLONE="rclone"
+MAX_DELETE="0"
+RETRIES="1"
+MAX_LOG_BYTES="$1"
+EOF
+}
+rot_run() {  # the wrapper against the rotation fixture, no arguments
+    env PATH="$ROT:/usr/bin:/bin" XDG_CONFIG_HOME="$ROT/cfg" \
+        XDG_CACHE_HOME="$ROT/cache" "$ROT/bin/onedrive-sync"
+}
+rot_config 100
+printf 'x%.0s' $(seq 1 200) > "$ROT/cache/sync.log"
+printf '\n' >> "$ROT/cache/sync.log"
+rm -f "$ROT/cache/sync.log.1"
+rot_run >/dev/null 2>&1
+if [ -f "$ROT/cache/sync.log.1" ] &&
+        [ "$(wc -c < "$ROT/cache/sync.log.1")" -gt 100 ] &&
+        [ ! -e "$ROT/cache/sync.log.2" ]; then
+    ok "a log over MAX_LOG_BYTES is rotated to .1 and the run starts a fresh one"
+else
+    bad "the log was not rotated: $(cd "$ROT/cache" && printf '%s ' *)"
+fi
+
+# A directory the wrapper may write to but not read: the append in the log check
+# succeeds and the size cannot be taken, which is exactly the case the old line
+# read as an empty log.
+rot_config 100
+printf 'y\n' > "$ROT/cache/sync.log"
+rm -f "$ROT/cache/sync.log.1"
+chmod 200 "$ROT/cache/sync.log"
+rot_run >/dev/null 2>&1
+chmod 600 "$ROT/cache/sync.log"
+if grep -qF 'cannot read the size of' "$ROT/cache/sync.log" &&
+        [ ! -e "$ROT/cache/sync.log.1" ]; then
+    ok "a log whose size cannot be read says so instead of passing for empty"
+else
+    bad "an unreadable log size was silent: rotation $( [ -e "$ROT/cache/sync.log.1" ] && echo happened || echo did not happen )"
 fi
 
 # Three names from the same documented list were invisible to the checker:
