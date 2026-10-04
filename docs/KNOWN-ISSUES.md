@@ -15,30 +15,22 @@ were found in the first place.
 
 ## Open
 
-### What the pause audit left
-
-Round twenty-two's audit found ten things; the code, the grammar, the instrument and
-the watcher question are fixed and in the changelog, and the mutation table has no
-dead rows (seven were re-pointed to the lines they name and two dropped with their
-reasons; `tests/lib/mutate.sh --lint` now says so in a second, because two rows had
-since stopped matching their files and only a sweep would have noticed). What is
-still open from that review:
-
-- The cache directory is one expression in two shells and one `expanduser` call in
-  Python, with `XDG_CACHE_HOME` unset and `HOME` handled three different ways.
-  Measured: with `HOME` unset both scripts stop at their first use of it
-  (`bin/onedrive-sync: line 32: HOME: unbound variable`, exit 1, under their
-  `set -uo pipefail`; a bare `bash -c` holding the same expression exits 127, which
-  is where the number in the earlier version of this bullet came from). With `HOME=`
-  both compute `/.cache/rclone-onedrive-tray`, since the doctor's `pause_dir` and the
-  wrapper's `CACHE_DIR` are the same expression with a different name. Python 3.14's
-  `expanduser("~")` answers the passwd home with `HOME` unset and "/" with `HOME=`,
-  so it disagrees with the shells only in the unset case. No shell this project
-  ships runs with `HOME` unset or empty, so the divergence is a note rather than a
-  defect, and it is written down here rather than fixed because a `HOME` default
-  would change what every one of the three resolves on the machines that do set it.
+Nothing. What follows is decisions rather than work: each one was found by a review,
+measured, and settled one way or the other, and the reason is written down so it does
+not have to be rediscovered.
 
 ## Accepted, with the reason
+
+- The tray and the two shells disagree about one environment none of the shipped ways of
+  starting them produces: `HOME` unset with no `XDG_CACHE_HOME` either. Measured:
+  `bin/onedrive-sync` stops at line 32 with `HOME: unbound variable` and exit 1
+  under its `set -uo pipefail`, while the tray's `expanduser` answers the passwd
+  home and it runs. `HOME` empty, or `HOME` unset with the XDG variable set, has
+  all three agreeing. It is recorded rather than guarded because a guard would have to
+  refuse a tray that works: with the four `XDG_*` variables set the shells never expand
+  `HOME`, and the tray expands it only for a value that spells a `~`, so a `HOME`-less
+  invocation is one that can run; autostart, a systemd unit and a login session all set
+  `HOME` anyway.
 
 - A line that assigns and then runs a command is read as the assignment. `KEY=a true`
   leaves `KEY` unset in the shell that sources the file - the assignment is a prefix of
