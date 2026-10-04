@@ -308,3 +308,8 @@ config-reader-no-unescape	bin/onedrive-tray	s|    return "".join(out)|    return
 config-reader-single-quotes	bin/onedrive-tray	s|    if len(text) >= 2 and text\[0\] == "'" and text\[-1\] == "'":|    if False:|	dependency-matrix
 lib-bare-hash-rule	lib/config.sh	s|sed -e 's/\[\[:space:\]\]#.\*\$//' -e 's/\[\[:space:\]\].\*\$//'|sed -e 's/#.*$//'|	dependency-matrix
 install-config-reader-local	install.sh	s|^. "$SRC_DIR/lib/config.sh"$|:|	install-flow
+# round seventeen: the shared log. A refusal the doctor called healthy, a NUL
+# byte that silenced it, a file name that forged a verdict, a cached failed read.
+doctor-tag-other-not-a-failure	bin/onedrive-doctor	s|            if \[ "\${marker_state:-}" = stopped \]; then|            if false; then|	install-flow
+doctor-log-grep-binary	bin/onedrive-doctor	s|grep -a -iE "$ALL_HINTS"|grep -iE "$ALL_HINTS"|	install-flow
+tray-marker-unanchored	bin/onedrive-tray	s|    r"^(?:\\d{4}/\\d{2}/\\d{2} \\d{2}:\\d{2}:\\d{2} )?"|    r"(?:\\d{4}/\\d{2}/\\d{2} \\d{2}:\\d{2}:\\d{2} )?"|	tray

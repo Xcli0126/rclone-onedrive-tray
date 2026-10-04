@@ -2977,6 +2977,40 @@ else
     bad "token EOF: exit $DOCTOR_RC, $(head -1 <<<"$DOCTOR_OUT")"
 fi
 
+# A run that refused before it invoked rclone ends state=stopped tag=other: that is
+# what every refuse() in the wrapper writes, and the doctor's report had no branch
+# for the tag, so a permanently refusing install was certified as "no failure hint
+# in it" with exit 0 while the tray painted red.
+doc_fixture refusal-other
+cat >> "$DOC_FX/cache/sync.log" <<'EOF'
+2026/10/04 03:54:31 ERROR: /home/u/OneDrive does not exist. Create it first:  mkdir -p "/home/u/OneDrive"  (or point LOCAL at the right directory in the config)
+2026/10/04 03:54:31 ONEDRIVE_RESULT v=1 state=stopped tag=other when=03:54 msg=/home/u/OneDrive does not exist. Create it first:  mkdir -p "/home/u/OneDrive"  (or point LOCAL at the right directory in the config)
+EOF
+DOCTOR_OUT="$(doc_run "$DOC_FX" --quiet --offline 2>&1)"; DOCTOR_RC=$?
+if [ "$DOCTOR_RC" -eq 1 ] && grep -q "stopped this run before it synced" <<<"$DOCTOR_OUT"; then
+    ok "a wrapper refusal is a failure, not a log with nothing in it"
+else
+    bad "tag=other refusal: exit $DOCTOR_RC, $(head -1 <<<"$DOCTOR_OUT")"
+fi
+check "and the sentence points at the log for the reason" \
+    grep -q "the log says why" <<<"$DOCTOR_OUT"
+
+# One byte that is not text used to silence every log check in the doctor: GNU grep
+# calls such a file binary and prints nothing for it, so a log holding a NUL was
+# reported as one nothing had ever run through, while the tray read the same file
+# and went red. rclone logs file names raw, so such a byte is reachable from a real
+# run. The fixture carries no marker on purpose: the diagnosis has to come from the
+# prose hint, which is the read that goes silent.
+doc_fixture nul-in-log
+{ printf '2026/10/04 03:54:31 CRITICAL: invalid_grant: maybe token expired?\n'; } >> "$DOC_FX/cache/sync.log"
+printf '2026/10/04 03:54:32 INFO  : bad\000name.txt: Copied (new)\n' >> "$DOC_FX/cache/sync.log"
+DOCTOR_OUT="$(doc_run "$DOC_FX" --quiet --offline 2>&1)"; DOCTOR_RC=$?
+if [ "$DOCTOR_RC" -eq 1 ] && grep -q "expired sign-in" <<<"$DOCTOR_OUT"; then
+    ok "a log with a NUL byte in it is still read"
+else
+    bad "NUL in the log: exit $DOCTOR_RC, $(head -1 <<<"$DOCTOR_OUT")"
+fi
+
 # The shape rclone 1.75.1 really writes, one line carrying a network phrase and an
 # auth marker. The tables are asked in an order, so the order is what decides
 # whether the user is told the sign-in is not the problem.

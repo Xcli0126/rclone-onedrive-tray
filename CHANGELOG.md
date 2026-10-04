@@ -36,6 +36,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The doctor's log check could not read a log with a byte that is not text in it.
+  GNU grep calls such a file binary and prints nothing, so one stray byte turned
+  every check below into "nothing has ever run through the wrapper" with exit 0,
+  while the tray read the same file and painted the icon red; rclone logs file names
+  raw, so such a byte is reachable from a real run. `grep -a` throughout, a log or a
+  `FILTERS_FILE` that is not a regular file is a warning rather than a read that
+  waits for a writer, and a `FILTERS_FILE` that is a directory is named as one.
+- The doctor certified a permanently refusing install as healthy. Every refusal in
+  the wrapper ends `state=stopped tag=other`, and the report's `case` had no branch
+  for the tag, so it printed "no failure hint in it" and exited 0 while the tray
+  showed the wrapper's own sentence. `state=stopped` fails now, `state=error`
+  warns, and the sentence points at the log for the reason.
+- One file name could forge a run's verdict in both readers. rclone logs names raw,
+  so a line can quote text shaped like the marker; the tray matched it anywhere in
+  the line and the doctor grepped it unanchored, so a failure two lines above was
+  painted green. Both anchor it to the line, require all four fields, and therefore
+  also ignore a marker cut off mid-write. Nine of the tray suite's marker fixtures
+  carried a `NOTICE: ` prefix the writer never writes, which is what kept the
+  unanchored match covered; they carry the real shape now.
+- The tray read its log tail through a fifo, which blocks `open()` on the GTK main
+  loop and freezes the icon with no error, and it cached a read that had failed as
+  its answer, so a log that became readable again still said "No sync recorded yet".
+  Only a regular file is read, and only a read that answered is remembered.
 - The tray read the config file differently from the shell that sources it. A value
   the writer had escaped came back with the backslashes still in it, a
   single-quoted `${HOME}` was expanded although bash leaves it alone, and an escaped

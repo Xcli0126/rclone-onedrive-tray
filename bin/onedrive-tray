@@ -25,6 +25,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -1235,9 +1236,17 @@ def terminal_command(script: str):
 
 
 def tail_text(path: str, max_bytes: int = 64 * 1024) -> str:
-    """Read only the tail of a file that grows forever."""
+    """Read only the tail of a file that grows forever.
+
+    Only a regular file is read. LOG comes from the config, and a fifo there
+    would block open() until a writer appears, on the GTK main loop, so the icon
+    would freeze with no error and no way back.
+    """
     try:
-        size = os.path.getsize(path)
+        info = os.stat(path)
+        if not stat.S_ISREG(info.st_mode):
+            return ""
+        size = info.st_size
         with open(path, "rb") as fh:
             if size > max_bytes:
                 fh.seek(size - max_bytes)
@@ -1261,6 +1270,7 @@ HINT_RE = re.compile(r"\[(\w+)\]\s*(.*)$")
 # other side of the choice is a green icon for a run nobody has classified; a
 # state missing altogether still fails the match and takes the prose path.
 RESULT_RE = re.compile(
+    r"^(?:\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2} )?"
     r"ONEDRIVE_RESULT v=\d+ state=(\S+) tag=([a-z]+|none) "
     r"when=(\d{2}:\d{2}) msg=(.*)$")
 
@@ -1283,7 +1293,7 @@ def read_last_result(text: str):
     marker = None                  # (line index, line) of the newest marker
     success_at = -1                # line index of the newest prose success
     for index, line in enumerate(text.splitlines()):
-        if "ONEDRIVE_RESULT " in line:
+        if RESULT_RE.search(line):
             marker = (index, line)
         match = TS_RE.match(line)
         if not match:
@@ -3193,9 +3203,17 @@ class Tray:
         except OSError:
             signature = None
         if signature != self.log_signature:
-            self.log_signature = signature
-            self.log_tail = tail_text(self.log)
-            self.log_result = read_last_result(self.log_tail)
+            tail = tail_text(self.log)
+            # A read that failed - a permission problem, a rotation, a file
+            # removed between the stat and the open - is not an answer: caching
+            # it left the tray saying "No sync recorded yet" for a log that was
+            # readable again, until the next run wrote to it. Only a read that
+            # answered, or a file that is genuinely empty, is remembered.
+            read_ok = bool(tail) or (signature is not None and signature[0] == 0)
+            if read_ok:
+                self.log_signature = signature
+                self.log_tail = tail
+                self.log_result = read_last_result(tail)
         return self.log_tail, self.log_result
 
     def _apply_state(self, syncing, timer_state, generation=None):

@@ -104,7 +104,7 @@ file_age() {
 line_age() {
     local ts epoch age
     ts="$(printf '%s\n' "$1" |
-        grep -oE '^[0-9]{4}/[0-9]{2}/[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}' |
+        grep -a -oE '^[0-9]{4}/[0-9]{2}/[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}' |
         head -1 || true)"
     [ -n "$ts" ] || return 0
     epoch="$(date -d "$ts" +%s 2>/dev/null || true)"
@@ -241,11 +241,19 @@ fi
 # The same optional `export ` as the key scan above: without it a config whose
 # only FILTERS_FILE line carried the prefix got no mention of the path here.
 if grep -qE '^[[:space:]]*(export[[:space:]]+)?FILTERS_FILE=' "$CONFIG_FILE" 2>/dev/null; then
-    rules="$(grep -cvE '^[[:space:]]*(#|$)' "$FILTERS_FILE" 2>/dev/null || true)"
+    rules=""
+    [ -f "$FILTERS_FILE" ] && \
+        rules="$(grep -a -cvE '^[[:space:]]*(#|$)' "$FILTERS_FILE" 2>/dev/null || true)"
     if [ -z "$FILTERS_FILE" ]; then
         paths_msg="$paths_msg; FILTERS_FILE is empty, so no filter rules are applied"
-    elif [ ! -f "$FILTERS_FILE" ]; then
+    elif [ ! -e "$FILTERS_FILE" ]; then
         paths_msg="$paths_msg; FILTERS_FILE $FILTERS_FILE does not exist, so runs apply no filters; create it or empty the key"
+        paths_verdict=fail
+    elif [ ! -f "$FILTERS_FILE" ]; then
+        # A directory (or a fifo) is not a missing file, and grep on one either
+        # errors or waits forever; the wrapper passes no --filters-file for it,
+        # so this is still a failure, with a sentence that matches what it is.
+        paths_msg="$paths_msg; FILTERS_FILE $FILTERS_FILE is not a regular file, so runs apply no filters; point it at a file or empty the key"
         paths_verdict=fail
     elif [ ! -r "$FILTERS_FILE" ]; then
         paths_msg="$paths_msg; FILTERS_FILE $FILTERS_FILE is not readable; fix its permissions"; paths_verdict=fail
@@ -374,8 +382,15 @@ if [ ! -e "$LOG" ]; then
     report warn log "no log at $LOG yet, so no run has written one; the first sync creates it"
 elif [ ! -r "$LOG" ]; then
     report fail log "$LOG exists but is not readable by this user; fix its permissions or your groups"
+elif [ ! -f "$LOG" ]; then
+    # -e and -r are both true for a fifo, and every read below is a grep: the
+    # doctor would wait for a writer that never comes instead of answering.
+    report warn log "$LOG is not a regular file (a fifo, a socket or a device), and reading it would block this check; point LOG at a real file"
 else
-    last_ts="$(grep -E '^[0-9]{4}/[0-9]{2}/[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}' "$LOG" |
+    # -a throughout: GNU grep calls a file with a NUL byte in it binary and
+    # prints nothing for it, so one stray byte used to silence every check
+    # below - the log was then reported as one nothing had ever run through.
+    last_ts="$(grep -a -E '^[0-9]{4}/[0-9]{2}/[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}' "$LOG" |
         tail -1 | cut -c1-19 || true)"
     log_age=""
     if [ -n "$last_ts" ]; then
@@ -388,9 +403,9 @@ else
     # Line numbers rather than text throughout: the question is whether a
     # successful run came after the hint. Only the tools the doctor may call are
     # used here, so no awk.
-    last_ok="$(grep -n 'Bisync successful' "$LOG" | tail -1 | cut -d: -f1 || true)"
-    hint_at="$(grep -n -iE "$ALL_HINTS" "$LOG" | tail -1 | cut -d: -f1 || true)"
-    newest_hint="$(grep -iE "$ALL_HINTS" "$LOG" | tail -1 || true)"
+    last_ok="$(grep -a -n 'Bisync successful' "$LOG" | tail -1 | cut -d: -f1 || true)"
+    hint_at="$(grep -a -n -iE "$ALL_HINTS" "$LOG" | tail -1 | cut -d: -f1 || true)"
+    newest_hint="$(grep -a -iE "$ALL_HINTS" "$LOG" | tail -1 || true)"
     tag="none"; [ -n "$newest_hint" ] && tag="$(classify_hint "$newest_hint")"
     # ---- the wrapper's own verdict, when the log carries one ----------------
     # onedrive-sync ends a run with one ONEDRIVE_RESULT line, so a reader does
@@ -399,12 +414,22 @@ else
     # is what still reads a log from an older wrapper, or one whose last run was
     # killed before it could write its marker.
     marker_at=""
-    marker_line="$(grep -n 'ONEDRIVE_RESULT v=1 ' "$LOG" | tail -1 || true)"
+    # Anchored, and with all four fields required, exactly as the tray reads it:
+    # rclone logs file names raw, so a line that merely quotes a name shaped like
+    # a marker is not a run's verdict, and a marker truncated mid-write is not
+    # one either.
+    marker_line="$(grep -a -nE '^[0-9]{4}/[0-9]{2}/[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} ONEDRIVE_RESULT v=1 ' "$LOG" | tail -1 || true)"
     if [ -n "$marker_line" ]; then
         marker_at="${marker_line%%:*}"
         marker_text="${marker_line#*:}"
         marker_state="$(marker_field "$marker_text" state)"
         marker_tag="$(marker_field "$marker_text" tag)"
+        # Every field the tray's RESULT_RE requires, required here too: a line
+        # that stops after state=synced is a truncated write or a name that
+        # looks like a marker, and neither is a run's verdict.
+        printf '%s\n' "$marker_text" | grep -qaE \
+            '^[0-9]{4}/[0-9]{2}/[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} ONEDRIVE_RESULT v=1 state=[^ ]+ tag=([a-z]+|none) when=[0-9]{2}:[0-9]{2} msg=' ||
+            { marker_state=""; marker_tag=""; }
         # state=synced is this run's success line, which is what the
         # "a later run synced past it" comparison above works from.
         if [ "$marker_state" = synced ] &&
@@ -438,7 +463,7 @@ else
     # itself, hide the refused sign-in that was the reason nothing was syncing,
     # and the line then said the sign-in was not what failed.
     if [ "$tag" = network ]; then
-        standing="$(grep -n -iE "$ALL_HINTS" "$LOG" | grep -viE "$RE_NETWORK" |
+        standing="$(grep -a -n -iE "$ALL_HINTS" "$LOG" | grep -av -iE "$RE_NETWORK" |
             tail -1 || true)"
         standing_at="${standing%%:*}"
         if [ -n "$standing" ] &&
@@ -453,6 +478,19 @@ else
         [ -n "$hint_secs" ] && hint_age=" from ${hint_secs} ago"
     fi
     case "$tag" in
+        # The wrapper's own sentence, for a class this table has no name for.
+        # Every refuse() in onedrive-sync ends state=stopped tag=other, and the
+        # report below had no branch for it: a run that cannot start was
+        # reported as a log with no failure hint in it.
+        other)
+            # state=stopped is a refusal before rclone ever ran, which nothing
+            # but a person can clear, so it fails; state=error is a run that
+            # tried and failed unclassifiably, which the next run retries.
+            if [ "${marker_state:-}" = stopped ]; then
+                report fail log "${log_age}the wrapper stopped this run before it synced, in a class this check has no name for${hint_age}; the log says why: $LOG"
+            else
+                report warn log "${log_age}the last run failed with a message this check has no class for${hint_age}; tail the log: $LOG"
+            fi ;;
         auth) report fail log "${log_age}a refused or expired sign-in is in the log${hint_age}; re-authorise from the tray's 'Re-authorise OneDrive' item, or run: rclone config reconnect ${REMOTE%%:*}:." ;;
         network) report warn log "${log_age}the newest failure hint${hint_age} is a network problem, which the next run retries; the sign-in is not what failed${newest_hint:+: $(printf '%s\n' "$newest_hint" | head -1 | cut -c1-160)}" ;;
         lock|maxdelete|access|resync|oldrclone|emptyremote) report warn log "${log_age}a [$tag] failure is in the log${hint_age}; tail the log for the full message: $LOG" ;;

@@ -93,6 +93,14 @@ test is allowed to touch before anyone starts.
 
 ## Accepted, with the reason
 
+- A lone CR is read differently by the two readers of the log, and the tray's answer
+  is the one that stays. Python's `splitlines()` breaks on `\r` and grep does not, so
+  one file holding CR-separated lines gives the tray a synced run and the doctor a
+  failure. The tray also treats a marker whose `msg=` contains a failure's own prose
+  as the newer verdict, which is deliberate and tested; changing either to agree
+  would mean dropping one of those two rules for a shape no writer in this project
+  produces, since `log_line` ends every line with `\n`. Round sixteen's log reviewer
+  measured it, left it unfixed, and this is the reason.
 - One format, three readers, and the agreement is a test rather than a promise. The
   entry here used to count four readers of the config file and call the count the
   remaining cost. What changed is that the two installers share one implementation,

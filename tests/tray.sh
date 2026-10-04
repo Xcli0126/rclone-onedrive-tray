@@ -1888,6 +1888,18 @@ def scenario_config_reload():
     # remembered by identity: _build_menu() always makes new items, so the same
     # object is proof that the menu was not rebuilt for a key nothing live uses.
     item = tray.item_status
+    # The status row is written by the poll, and this case compares it before and
+    # after a write: a poll landing between the two captures changed the text for a
+    # reason that has nothing to do with the key under test, which is how this case
+    # failed about one run in four under load. Waiting for the row to stop changing
+    # first makes both captures describe the same settled state.
+    settled = None
+    for _ in range(40):
+        now = tray.item_status.get_label() or ""
+        if now == settled:
+            break
+        settled = now
+        pump(0.25)
     status_text = tray.item_status.get_label() or ""
     MODULE.update_config_file(MODULE.CONFIG_FILE, {"INTERVAL_MIN": "15"})
     pump(1.0)
@@ -2678,7 +2690,7 @@ def scenario_log_marker():
         "2026/10/04 04:05:00 ERROR : : error listing: dial tcp: i/o timeout",
         "2026/10/04 04:05:06 ERROR: attempt 3/3 failed (rc=1) [network] " + msg,
     ]) + "\n"
-    marker = ("2026/10/04 04:05:06 NOTICE: ONEDRIVE_RESULT v=1 state=error "
+    marker = ("2026/10/04 04:05:06 ONEDRIVE_RESULT v=1 state=error "
               "tag=network when=04:05 msg=" + msg + "\n")
 
     data = {}
@@ -2707,7 +2719,7 @@ def scenario_log_marker():
                 "re-authorise item, or run: rclone config reconnect remote:")
     auth_prose = ("2026/10/04 04:10:06 ERROR: attempt 3/3 failed (rc=1) "
                   "[network] " + msg + "\n")
-    auth_marker = ("2026/10/04 04:10:06 NOTICE: ONEDRIVE_RESULT v=1 "
+    auth_marker = ("2026/10/04 04:10:06 ONEDRIVE_RESULT v=1 "
                    "state=error tag=auth when=04:10 msg=" + auth_msg + "\n")
     data["auth_prose"] = list(MODULE.read_last_result(auth_prose))
     data["auth_marker"] = list(MODULE.read_last_result(auth_prose + auth_marker))
@@ -2724,7 +2736,7 @@ def scenario_log_marker():
     # msg is the last field and runs to the end of the line, so a URL, a comma
     # and a semicolon in it are text rather than a field or a separator.
     url_msg = "gave up on https://example.com/a?b=c&d=e; retry, later"
-    url_marker = ("2026/10/04 04:15:00 NOTICE: ONEDRIVE_RESULT v=1 "
+    url_marker = ("2026/10/04 04:15:00 ONEDRIVE_RESULT v=1 "
                   "state=error tag=network when=04:15 msg=" + url_msg + "\n")
     data["url_msg"] = list(MODULE.read_last_result(url_marker))
     data["url_msg_want"] = ["error", "04:15", "network", url_msg]
@@ -2732,7 +2744,7 @@ def scenario_log_marker():
     # state=synced is a success, and the line carries none of the words the
     # prose reader matched on, so only the marker can make this green. tag=none
     # is the empty tag the tray already uses.
-    synced_marker = ("2026/10/04 04:20:00 NOTICE: ONEDRIVE_RESULT v=1 "
+    synced_marker = ("2026/10/04 04:20:00 ONEDRIVE_RESULT v=1 "
                      "state=synced tag=none when=04:20 "
                      "msg=the run finished with nothing to transfer\n")
     synced_prose = "2026/10/04 04:20:00 INFO  : Bisync successful\n"
@@ -2742,7 +2754,7 @@ def scenario_log_marker():
     # A success whose message is the prose word itself, written a minute after
     # the when= it reports: the marker carries the run's own clock, so the marker
     # is the one that has to answer, not the line holding it.
-    collided = ("2026/10/04 04:20:07 NOTICE: ONEDRIVE_RESULT v=1 state=synced "
+    collided = ("2026/10/04 04:20:07 ONEDRIVE_RESULT v=1 state=synced "
                 "tag=none when=04:19 msg=Bisync successful\n")
     data["collided"] = list(MODULE.read_last_result(collided))
     # On a success the two readers differ in the fourth element alone: the prose
@@ -2753,22 +2765,22 @@ def scenario_log_marker():
 
     # state=stopped is the failed state the tray already paints, and the tag is
     # what tells it from state=error; nothing else reads the literal state.
-    stopped = ("2026/10/04 04:26:00 NOTICE: ONEDRIVE_RESULT v=1 state=stopped "
+    stopped = ("2026/10/04 04:26:00 ONEDRIVE_RESULT v=1 state=stopped "
                "tag=stopped when=04:26 msg=the run was asked to stop\n")
     data["stopped"] = list(MODULE.read_last_result(stopped))
 
     # An unknown state= is a failure, not a success: `error` and `stopped` are
     # the two that mean a run ended badly, and a value a later wrapper invents
     # is not something this tray may paint green.
-    unknown = ("2026/10/04 04:25:00 NOTICE: ONEDRIVE_RESULT v=1 state=future "
+    unknown = ("2026/10/04 04:25:00 ONEDRIVE_RESULT v=1 state=future "
                "tag=network when=04:25 msg=a state this tray does not know\n")
     data["unknown_state"] = list(MODULE.read_last_result(unknown))
 
     # A truncated write, and a rotation inside the line: a field is missing, so
     # the line is not a marker to trust and the prose scan answers instead.
-    cut_short = ("2026/10/04 04:30:00 NOTICE: ONEDRIVE_RESULT v=1 state=error "
+    cut_short = ("2026/10/04 04:30:00 ONEDRIVE_RESULT v=1 state=error "
                  "tag=net\n")
-    cut_earlier = ("2026/10/04 04:31:00 NOTICE: ONEDRIVE_RESULT v=1 "
+    cut_earlier = ("2026/10/04 04:31:00 ONEDRIVE_RESULT v=1 "
                    "state=error tag=networ\n")
     data["truncated"] = list(MODULE.read_last_result(prose + cut_short))
     data["truncated_earlier"] = list(MODULE.read_last_result(prose
@@ -4054,6 +4066,62 @@ def scenario_reauth_not_done():
     return data
 
 
+def scenario_log_forged_marker():
+    """A file name cannot forge a run's verdict.
+
+    rclone logs file names raw, so a line can quote text shaped like a marker:
+    `INFO  : ONEDRIVE_RESULT v=1 state=synced tag=none when=12:00 msg=ok.txt:
+    Copied (new)` is a real line about a file whose name begins that way. The
+    reader looked for the marker text anywhere in a line, so a refusal two lines
+    above it painted the icon green; the doctor had the same unanchored grep. The
+    marker is anchored to the start of the message and needs every field now, so a
+    line with no timestamp or a marker cut off mid-write is not a verdict either.
+    """
+    log = os.path.join(WORK, "forged", "sync.log")
+    os.makedirs(os.path.dirname(log), exist_ok=True)
+    with open(log, "w", encoding="utf-8") as fh:
+        fh.write("2026/10/04 17:04:40 ERROR: attempt 1/1 failed (rc=1) [auth] "
+                 "the sign-in was refused or has expired\n")
+        fh.write("2026/10/04 17:04:44 INFO  : ONEDRIVE_RESULT v=1 state=synced "
+                 "tag=none when=12:00 msg=ok.txt: Copied (new)\n")
+    cfg = dict(CFG)
+    cfg["LOG"] = log
+    tray = MODULE.Tray(cfg)
+    pump(0.6)
+    state, when, tag, raw = MODULE.read_last_result(read_text(log))
+    return {"state": state, "tag": tag, "when": when,
+            "tray_state": tray.state, "tray_hint": tray.log_result[3]}
+
+
+def scenario_log_read_failure_not_cached():
+    """A read that did not answer is not remembered as the answer.
+
+    _log_snapshot() stored the signature before knowing the read had worked, so a
+    log that was readable, then not, then readable again with the same size and
+    timestamp stayed "no sync recorded yet" until the next run wrote to it: the
+    file had not changed as far as the tray was concerned, and the cached answer
+    was the empty one.
+    """
+    log = os.path.join(WORK, "readfail", "sync.log")
+    os.makedirs(os.path.dirname(log), exist_ok=True)
+    with open(log, "w", encoding="utf-8") as fh:
+        fh.write("2026/10/04 12:00:00 INFO  : Bisync successful\n")
+        fh.write("2026/10/04 12:00:00 ONEDRIVE_RESULT v=1 state=synced tag=none "
+                 "when=12:00 msg=sync completed\n")
+    cfg = dict(CFG)
+    cfg["LOG"] = log
+    tray = MODULE.Tray(cfg)
+    pump(0.4)
+    data = {"good": tray.log_result[0]}
+    os.chmod(log, 0)
+    tray.poll()
+    data["unreadable"] = tray.log_result[0]
+    os.chmod(log, 0o600)
+    tray.poll()
+    data["again"] = tray.log_result[0]
+    return data
+
+
 def scenario_lock_inode():
     """release_lock() removes only the file it locked, and a second take works.
 
@@ -4339,6 +4407,8 @@ SCENARIOS = {
     "reauth": scenario_reauth,
     "reauth-twice": scenario_reauth_twice,
     "reauth-not-done": scenario_reauth_not_done,
+    "log-forged-marker": scenario_log_forged_marker,
+    "log-read-failure": scenario_log_read_failure_not_cached,
     "stale-state": scenario_stale_state,
     "stale-state-cache": scenario_stale_state_cache,
     "relative-local": scenario_relative_local,
@@ -6081,6 +6151,42 @@ if not d["busy_while_busy"] or not d["insensitive_while_busy"]:
 if not d["finished"] or d["busy_after"] or not d["sensitive_after"]:
     print("finished=%r busy_after=%r sensitive_after=%r"
           % (d["finished"], d["busy_after"], d["sensitive_after"]))
+    raise SystemExit(1)
+'
+fi
+
+title "A file name that looks like a verdict"
+# rclone logs file names raw, so a name can quote text shaped like the wrapper's
+# marker. Matched anywhere in the line, such a line was a verdict: a refusal two
+# lines above it painted the icon green, and the doctor called the failure synced
+# past. The marker is anchored and needs every field.
+if run_driver log-forged-marker; then
+    check "the forged marker is not read as a sync that worked" json_py '
+if d["state"] == "synced":
+    print("the file name forged a synced run: state=%r when=%r"
+          % (d["state"], d["when"]))
+    raise SystemExit(1)
+if d["tag"] != "auth":
+    print("the refusal above it was not the verdict: tag=%r" % (d["tag"],))
+    raise SystemExit(1)
+'
+    check "and the icon is not painted green by it" json_py '
+if d["tray_state"] != "error":
+    print("state=%r" % (d["tray_state"],))
+    raise SystemExit(1)
+'
+fi
+
+title "A log that was unreadable for a moment"
+# The snapshot stored the signature before knowing the read worked, so the empty
+# answer was cached against a signature that still described the file: the tray
+# kept saying nothing had been recorded for a log it could read again.
+if run_driver log-read-failure; then
+    check "a readable log reads as the run it holds" json_expr "d['good'] == 'synced'"
+    check "and reads that way again once it is readable, with no new write" json_py '
+if d["again"] != "synced":
+    print("good=%r unreadable=%r again=%r"
+          % (d["good"], d["unreadable"], d["again"]))
     raise SystemExit(1)
 '
 fi
