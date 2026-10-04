@@ -374,6 +374,38 @@ run "a re-run that does pass both flags changes them" 0 "Wrote" \
 check "and the interval follows the flag again" grep -qxF 'INTERVAL_MIN="11"' "$CARRY_CFG"
 check "and so does realtime sync" grep -qxF 'WATCH="1"' "$CARRY_CFG"
 
+# A carried value was read out and written back through config_quote(), which
+# escapes the `$` it finds: LOG="${XDG_CACHE_HOME:-$HOME/.cache}/sync.log" came
+# back as LOG="\${XDG_CACHE_HOME:-$HOME/.cache}/sync.log". The wrapper does not
+# expand a literal like that, so a re-run of the wizard moved the log to a
+# directory named "${XDG_CACHE_HOME:-$HOME/.cache}" under the working directory,
+# on an install whose log path worked before. A re-run now writes the old file's
+# own line for every key it carries, so what the user wrote stays what it says.
+title "a re-run writes carried values the way the file had them"
+# shellcheck disable=SC2016  # the ${VAR} in both strings is the text under test
+sed -i 's|^LOG=.*|LOG="${XDG_CACHE_HOME:-$HOME/.cache}/sync.log"|' "$CARRY_CFG"
+run "a re-run over a config whose LOG holds a variable finishes" 0 "Wrote" \
+    wizard_run --interval 9
+# shellcheck disable=SC2016  # the ${VAR} is what the check looks for in the file
+check "and the variable in LOG is still written as a variable" \
+    grep -qxF 'LOG="${XDG_CACHE_HOME:-$HOME/.cache}/sync.log"' "$CARRY_CFG"
+# Sourcing it is the point: this is what bin/onedrive-sync does with the file, so
+# the check is the log path bash resolves rather than the text in the file.
+# shellcheck disable=SC2016  # $LOG belongs to the sourcing shell, not this one
+check "and sourcing the config expands LOG to the cache directory" \
+    grep -qxF "LOG=\"$CARRY_HOME/.cache/sync.log\"" \
+    <(env HOME="$CARRY_HOME" XDG_CACHE_HOME="$CARRY_HOME/.cache" bash -c \
+        '. "$1"; echo "LOG=\"$LOG\""' _ "$CARRY_CFG")
+# A key the file does not set at all still lands from the template. The probe
+# config has no BW_LIMIT of its own, so it is the one that proves the default
+# path is not affected by carrying lines instead of values.
+run "a re-run over a config without a key finishes" 0 "Wrote" \
+    wizard_run --interval 9
+check "and a key the file never set is written from the template" \
+    grep -qxF 'BW_LIMIT=""' "$CARRY_CFG"
+check "and a quoted default is still quoted" \
+    grep -qxF 'OPEN_APP_NAME="the app"' "$CARRY_CFG"
+
 # ------------------------------------------------- the shipped config and XDG
 # install.sh copies config/config.example verbatim when no config exists, and the
 # example hardcoded $HOME/.config and $HOME/.cache while every script resolves

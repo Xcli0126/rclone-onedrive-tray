@@ -1774,8 +1774,20 @@ def scenario_pause_recovery():
     stamp = MODULE.PAUSE_STAMP
     os.makedirs(os.path.dirname(stamp), exist_ok=True)
     due = int(time.time()) + (-60 if case.startswith("expired") else 900)
-    with open(stamp, "w", encoding="utf-8") as fh:
-        fh.write(str(due))
+    if case == "cr":
+        # The same number with a carriage return, which `$(cat ...)` keeps and
+        # text mode used to translate away, so the shells call this file "not a
+        # time" and the tray called it a pause.
+        with open(stamp, "wb") as fh:
+            fh.write(b"9999999999\r\n")
+    elif case == "binary":
+        # One byte that is not UTF-8: a non-digit to the shells, and a raise out
+        # of the poll's idle callback before the decode was told to replace it.
+        with open(stamp, "wb") as fh:
+            fh.write(b"\xff" + b"9" * 10 + b"\n")
+    else:
+        with open(stamp, "w", encoding="utf-8") as fh:
+            fh.write(str(due))
 
     # The stub answers `is-enabled` for the timer from this marker, and a pair
     # paused by the old version is one whose timer is disabled.
@@ -1793,6 +1805,10 @@ def scenario_pause_recovery():
         tray = MODULE.Tray(CFG)
         if case.startswith("expired"):
             wait_for(lambda: not os.path.exists(stamp) or shown, 8.0)
+        elif case in ("cr", "binary"):
+            # Neither is a pause, so the answer under test is a verdict at all:
+            # the state the menu reads, whatever it turns out to be.
+            wait_for(lambda: getattr(tray, "auto_seen", None) is not None, 8.0)
         else:
             wait_for(lambda: getattr(tray, "auto_seen", None) == "paused", 8.0)
         pump(0.5)
@@ -4332,21 +4348,15 @@ def scenario_relative_local():
     finally:
         os.chdir(here)
 
-    # The guard's own rule, with local_path_problem() out of the way so the
-    # belt-and-braces check is the thing that answers. /etc is a directory at the
-    # filesystem root on any Linux, so without that check this hands it back.
+    # The guard asked about a root it cannot resolve a folder against. /etc is a
+    # directory at the filesystem root on any Linux, and this is the call that
+    # would hand it back if the root were accepted. The value is refused by
+    # local_path_problem() before the guard looks at it, which is the only place
+    # it can be refused: the tray's local comes from main() or _reload_config(),
+    # and both ask that function first.
     class RootBare:
         local = "/"
 
-    real_problem = MODULE.local_path_problem
-    MODULE.local_path_problem = lambda value: ""
-    try:
-        data["root_guard"] = MODULE.Tray._local_delete_path(RootBare(), "etc")
-    finally:
-        MODULE.local_path_problem = real_problem
-    # And the same call with the refusal in place, which is the whole path: the
-    # scenario's own config is not the one this uses, so the value is all that is
-    # being asked about.
     data["root_guard_refused"] = MODULE.Tray._local_delete_path(RootBare(), "etc")
 
     # And the real main(), which has to refuse before it builds a window.
@@ -4901,6 +4911,38 @@ if d["enabled"] or d["disabled"] or d["scheduled"]:
     raise SystemExit(1)
 if not d["stamp_left"] or d["auto_seen"] != "paused":
     print("stamp_left=%r auto_seen=%r" % (d["stamp_left"], d["auto_seen"]))
+    raise SystemExit(1)
+'
+fi
+
+# The stamp grammar has one reader in the tray and two readers in shell, and these
+# two shapes are the ones where reading the file as text parted company with
+# `$(cat ...)`: a CR survived the shell's read and was translated away here, and a
+# byte that is not UTF-8 was a non-digit to the shell and a UnicodeDecodeError
+# here, raised out of a GTK idle callback on every poll so the pause row never
+# painted. Neither shape is a time, to either reader.
+if run_driver pause-recovery TRAY_PAUSE_CASE=cr; then
+    check "a stamp with a carriage return is not a pause the tray reads" json_py '
+if d["auto_seen"] == "paused" or "paused" in d["pause_label"].lower():
+    print("the tray read %r as a pause: auto_seen=%r label=%r"
+          % ("9999999999\\r\\n", d["auto_seen"], d["pause_label"]))
+    raise SystemExit(1)
+'
+    check "and it says automatic sync is off rather than nothing at all" json_py '
+if not d["auto_seen"]:
+    print("the poll produced no verdict at all")
+    raise SystemExit(1)
+'
+fi
+
+if run_driver pause-recovery TRAY_PAUSE_CASE=binary; then
+    # shellcheck disable=SC2016  # $1 belongs to the inner bash, not this one
+    check "a stamp holding a byte that is not UTF-8 does not raise out of the poll" \
+        bash -c '! grep -q "Traceback (most recent call last)" "$1"' _ "$DRIVER_ERR"
+    check "and it is not a pause either" json_py '
+if d["auto_seen"] == "paused" or "paused" in d["pause_label"].lower():
+    print("the tray read a bad byte as a pause: auto_seen=%r label=%r"
+          % (d["auto_seen"], d["pause_label"]))
     raise SystemExit(1)
 '
 fi
@@ -7474,13 +7516,9 @@ if "LOCAL" not in d["root_problem"]:
     raise SystemExit(1)
 '
     check "and the delete guard has no root to resolve a folder against" json_py '
-if d["root_guard"] is not None:
-    print("with local_path_problem out of the way the guard returned %r, so a "
-          "top-level folder resolved against the filesystem root"
-          % (d["root_guard"],))
-    raise SystemExit(1)
 if d["root_guard_refused"] is not None:
-    print("the guard returned %r for LOCAL=\"/\"" % (d["root_guard_refused"],))
+    print("the guard returned %r for LOCAL=\"/\", so a top-level folder was "
+          "resolved against the filesystem root" % (d["root_guard_refused"],))
     raise SystemExit(1)
 '
 fi

@@ -350,6 +350,24 @@ fi
 # config already had.
 DEFAULT_BISYNC_ARGS="--resilient --recover --max-lock 2m --conflict-resolve none --conflict-loser num --stats 2s"
 OLD_CONFIG="$(cat "$CONFIG_FILE" 2>/dev/null || true)"
+carry_assign() {  # carry_assign <KEY> <default> -> the whole assignment, as written
+    # The old file's own line for this key, so what it already quoted stays quoted
+    # the way it was. Reading the value and writing it back through config_quote()
+    # escaped the `$` of a value like LOG="${XDG_CACHE_HOME:-$HOME/.cache}/sync.log",
+    # and the wrapper then read a literal directory name where it used to expand one:
+    # a wizard re-run broke the log path of an install that was working. A key the
+    # file does not set gets the default, quoted the way every written value is.
+    local key="$1" default="$2" line
+    line="$(printf '%s\n' "$OLD_CONFIG" |
+        grep -E "^[[:space:]]*(export[[:space:]]+)?$key=" | tail -1 |
+        sed -e 's/^[[:space:]]*//' -e 's/^export[[:space:]]\{1,\}//')"
+    if [ -n "$line" ]; then
+        printf '%s' "$line"
+    else
+        printf '%s="%s"' "$key" "$(config_quote "$default")"
+    fi
+}
+
 carry() {  # carry <KEY> <default> -> the value already in the config, or the default
     local key="$1" default="$2"
     # An empty quoted value is a value, so only a key the file does not set at all
@@ -384,35 +402,35 @@ REMOTE="$(config_quote "$REMOTE")"
 LOCAL="$(config_quote "$LOCAL_IN")"
 UNIT_NAME="$(config_quote "$UNIT_NAME")"
 INTERVAL_MIN="$INTERVAL"
-MAX_DELETE="$(config_quote "$(carry MAX_DELETE 100)")"
+$(carry_assign MAX_DELETE 100)
 # Bandwidth cap in rclone size syntax (1M, 500k, 1.5M). Empty means unlimited.
-BW_LIMIT="$(config_quote "$(carry BW_LIMIT "")")"
+$(carry_assign BW_LIMIT "")
 # The access check aborts a run when the marker file is missing on one side,
 # which is what a network or mount problem looks like from the other side. Off
 # until you create the markers: onedrive-check-access
-CHECK_ACCESS="$(config_quote "$(carry CHECK_ACCESS 0)")"
-CHECK_FILENAME="$(config_quote "$(carry CHECK_FILENAME "")")"
-BISYNC_ARGS="$(config_quote "$(carry BISYNC_ARGS "$DEFAULT_BISYNC_ARGS")")"
+$(carry_assign CHECK_ACCESS 0)
+$(carry_assign CHECK_FILENAME "")
+$(carry_assign BISYNC_ARGS "$DEFAULT_BISYNC_ARGS")
 FILTERS_FILE="$(config_quote "$FILTERS_FILE")"
 EXCLUDE_FOLDERS_FILE="$(config_quote "$EXCLUDE_FOLDERS_FILE")"
 
-LOG="$(config_quote "$(carry LOG "$CACHE_DIR/sync.log")")"
-OPEN_APP_CMD="$(config_quote "$(carry OPEN_APP_CMD "")")"
-OPEN_APP_NAME="$(config_quote "$(carry OPEN_APP_NAME "the app")")"
-UI_LANG="$(config_quote "$(carry UI_LANG "")")"
+$(carry_assign LOG "$CACHE_DIR/sync.log")
+$(carry_assign OPEN_APP_CMD "")
+$(carry_assign OPEN_APP_NAME "the app")
+$(carry_assign UI_LANG "")
 
 WATCH="$WATCH"
-WATCH_DEBOUNCE="$(config_quote "$(carry WATCH_DEBOUNCE 8)")"
-WATCH_SETTLE="$(config_quote "$(carry WATCH_SETTLE 12)")"
-WATCH_EXCLUDE="$(config_quote "$(carry WATCH_EXCLUDE "")")"
+$(carry_assign WATCH_DEBOUNCE 8)
+$(carry_assign WATCH_SETTLE 12)
+$(carry_assign WATCH_EXCLUDE "")
 
-RETRIES="$(config_quote "$(carry RETRIES 3)")"
-RETRY_DELAY="$(config_quote "$(carry RETRY_DELAY 60)")"
-MAX_LOG_BYTES="$(config_quote "$(carry MAX_LOG_BYTES 5242880)")"
-SHOW_ICON="$(config_quote "$(carry SHOW_ICON 1)")"
-NOTIFY_ON_SUCCESS="$(config_quote "$(carry NOTIFY_ON_SUCCESS 1)")"
+$(carry_assign RETRIES 3)
+$(carry_assign RETRY_DELAY 60)
+$(carry_assign MAX_LOG_BYTES 5242880)
+$(carry_assign SHOW_ICON 1)
+$(carry_assign NOTIFY_ON_SUCCESS 1)
 # The rclone binary to run, by name or by path.
-RCLONE="$(config_quote "$(carry RCLONE "")")"
+$(carry_assign RCLONE "")
 EOF
 chmod 0644 "$CONFIG_FILE" "$FILTERS_FILE"
 

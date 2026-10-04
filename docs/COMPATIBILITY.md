@@ -28,7 +28,11 @@ How much those cases would notice is a separate question from how many there are
 so the tree is also put through a mutation pass: deliberate changes to the shipped
 scripts, one at a time, each run against the suite that covers it. `tests/lib/mutate.sh`
 runs it, `tests/lib/mutations.txt` lists the rows, and the run prints how many were
-caught. Almost every row was a change no suite noticed before its assertion was
+caught. `tests/lib/mutate.sh --lint` is the cheap half and CI runs it with
+`--self-test`: it checks in a second that every row still names a file and a suite
+and that its expression still matches the line it was written against, because a row
+that quietly stopped matching mutates nothing and a sweep is the only other thing
+that would say so. Almost every row was a change no suite noticed before its assertion was
 written; the one that survives is named below rather than counted here, because
 these numbers went stale twice when they were written out.
 

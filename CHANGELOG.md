@@ -33,8 +33,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the dialog the name check already uses. The README's first instruction when
   something looks wrong was reachable only from a terminal until now, which is the
   opposite of what the tray is for.
+- `tests/lib/mutate.sh --lint` checks the mutation table itself, in a second
+  rather than in a sweep: every row names a file that exists and a suite that
+  exists, its expression still changes that file, and no row is addressed by an
+  empty line. CI runs it beside `--self-test`. A row whose expression quietly
+  stopped matching mutates nothing, so the sweep can only report it as skipped
+  hours later, and that is what had happened to three rows: one still pointed at a
+  `setup.sh` line an earlier round had rewritten, one renamed a `KNOWN-ISSUES.md`
+  heading that had been deleted by an even earlier round, and the row for the
+  invalidation inside `_set_units()` stopped matching when a docstring gained a
+  blank line, because a sed range ending on `^$` stops at the first blank line of
+  the block it aims at. All three point at the lines they name now, and the reason
+  recorded for the dropped heading row - "SURVIVED, so the suite must read a
+  different copy" - was wrong: it reported SKIPPED, and a row that mutates nothing
+  is the one thing the lint is for.
 
 ### Fixed
+
+- The tray read the pause stamp as text where the wrapper and the doctor read it as
+  bytes. Two shapes got through: a stamp ending in `\r` or `\r\n` was translated into
+  a newline by universal-newline mode and read as a pause, while `$(cat ...)` keeps
+  the carriage return and both shells call the same file "does not hold a time"; and
+  one byte that is not UTF-8 raised `UnicodeDecodeError` out of `_pause_due()`, which
+  every caller reaches from a GTK idle callback, on every poll, so the pause row never
+  painted. The file is opened in binary, decoded with `errors="replace"` - a
+  replacement character is not a digit, so such a stamp fails the same rule the shells
+  apply - and only a trailing newline is stripped, which is what `$(cat ...)` does.
+- A re-run of the wizard broke the log path of an install that was working. Every
+  key it carries over was read out of the old config and written back through the
+  quoting the template uses, which escapes a `$`;
+  `LOG="${XDG_CACHE_HOME:-$HOME/.cache}/sync.log"` came back as
+  `LOG="\${XDG_CACHE_HOME:-$HOME/.cache}/sync.log"`, and `onedrive-sync` appends to
+  that text as a path rather than expanding it, so the log moved under a directory
+  named `${XDG_CACHE_HOME:-$HOME/.cache}` and the old log stopped growing. Carried
+  keys are written as the old file's own lines now, so a value the user wrote
+  survives a re-run exactly as it was written, whether or not the wizard could have
+  produced it.
 
 - Resuming a pause turned realtime sync back on for a user who had switched it off.
   The pause never touches the units, so resuming only has to clear the stamp; when
@@ -43,9 +77,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   touched together. `WATCH` decides the watcher now.
 - The pause stamp had three readers with three grammars. The tray's `_pause_due()`
   was given digits and a length rule; `_paused_until()`, which the menu label reads,
-  kept the old `int()` and `time.localtime()`, so an eleven to nineteen digit stamp
-  raised `OverflowError` out of a GTK idle callback on every poll and the pause row
-  never painted; the tray's rule stopped at nineteen digits where the shells' stops
+  kept the old `int()` and `time.localtime()`, so a nineteen digit stamp raised
+  `OverflowError` out of a GTK idle callback (seventeen and eighteen raised
+  `OSError`, eleven raised nothing, and the raise reached the menu in one poll of
+  four, because `auto_seen` is assigned before the menu is refreshed); the tray's
+  rule stopped at nineteen digits where the shells' stops
   at ten, so a twenty digit stamp had the wrapper and the doctor reporting a pause
   the tray reported as automatic sync on; and the tray stripped whitespace the shells
   do not, so `" 1791117608 "` was a pause in the menu and a delete-and-sync for the
@@ -681,6 +717,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the length they need.
 
 ### Changed
+
+- `_local_delete_path()`'s second look at the sync root is gone. It refused a LOCAL
+  with no parent, which is the filesystem root, and `local_path_problem()` refuses
+  every spelling of that value first: the method reads `self.local`, which comes
+  from `main()` or `_reload_config()`, and both ask that function before they use
+  the value. The only way to reach the check was a case that monkeypatched the
+  first guard away, so it was a guard over a value no caller can hold. The case now
+  asks the guard about a top-level folder under `/` through the refusal that really
+  fires.
 
 - Eleven things the pages said that the code does not do, found by walking the
   documentation as a reader with no knowledge of the tree. `config.example` said a

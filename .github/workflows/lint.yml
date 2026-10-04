@@ -37,6 +37,14 @@ jobs:
           done
           sh -n extras/networkmanager-dispatcher.sh
 
+      - name: The mutation table is still an instrument
+        run: |
+          # The sweep itself is too slow for CI; these are the two parts of it
+          # that are not, and a row whose expression stopped matching its file is
+          # invisible to everything else in this workflow.
+          tests/lib/mutate.sh --self-test
+          tests/lib/mutate.sh --lint
+
       - name: Python syntax
         run: |
           python3 -m py_compile bin/onedrive-tray

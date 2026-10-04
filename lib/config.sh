@@ -28,10 +28,11 @@
 # write back: a config holding
 # `LOG="${XDG_CACHE_HOME:-$HOME/.cache}/sync.log"` comes back as
 # `LOG="\${XDG_CACHE_HOME:-\$HOME/.cache}/sync.log"`, which the wrapper then reads
-# as a literal directory name. `onedrive-sync` sources the file and the tray
-# expands the same forms, so a *path* key is expanded everywhere it is used
-# except in the wizard's copy of it; that is the open entry in
-# docs/KNOWN-ISSUES.md, not something this reader can decide on its own.
+# as a literal directory name. That was a real defect in setup.sh and it is fixed
+# there rather than here: the wizard writes a carried key as the old file's own
+# line, so this reader never sees it. What this reader decides is the value a
+# caller asks for, and "as written" is the only answer that can be quoted back
+# without changing what the file says.
 #
 # The tray writes a value with \, ", $ and the backtick escaped inside the quotes
 # (shell_quote_value), and the sed below undoes exactly that, left to right, which

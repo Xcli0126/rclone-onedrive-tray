@@ -392,7 +392,7 @@ elif [ ! -r "$LOG" ]; then
 elif [ ! -f "$LOG" ] && [ ! -c "$LOG" ]; then
     # -e and -r are both true for a fifo, and every read below is a grep: the
     # doctor would wait for a writer that never comes instead of answering.
-    report warn log "$LOG is not a regular file (a fifo or a socket), and reading it would block this check; point LOG at a real file"
+    report warn log "$LOG is not a regular file (a fifo, a socket or a device), and reading it would not be this check's to do; point LOG at a real file"
 elif [ ! -f "$LOG" ]; then
     # A character device is not a regular file either, and reading it is not what
     # would block: onedrive-sync appends to its log and its rotation guard skips

@@ -4,6 +4,7 @@
 #
 #   tests/lib/mutate.sh              every row
 #   tests/lib/mutate.sh <id>...      named rows only
+#   tests/lib/mutate.sh --lint       check the table itself, without running a suite
 #   tests/lib/mutate.sh --self-test  check the verdict classifier on its own
 #   RESULTS=mutations.txt tests/lib/mutate.sh     also write the table to a file
 #
@@ -15,9 +16,12 @@
 # branch in onedrive-check that no filesystem can reach, and one assertion of the
 # tray suite's delete scenario that could not fail, were found.
 #
-# Not part of CI: it takes ten minutes, and it answers a question rather than
-# guarding a door. It is not named tests/*.sh on purpose, so the documentation
-# check does not count it as a sixth suite.
+# The sweep is not part of CI: a full pass runs a suite per row and takes hours,
+# and it answers a question rather than guarding a door. `--lint` and `--self-test`
+# are, because between them they take a second and they are what says the table is
+# still an instrument: a row whose expression stopped matching mutates nothing and
+# can only be reported SKIPPED hours later. It is not named tests/*.sh on purpose,
+# so the documentation check does not count it as a sixth suite.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -28,59 +32,6 @@ trap 'rm -rf "$WORK"' EXIT
 
 [ -f "$TABLE" ] || { echo "no $TABLE" >&2; exit 1; }
 wanted=("$@")
-
-note() {
-    printf '%s\n' "$*"
-    [ -n "${RESULTS:-}" ] && printf '%s\n' "$*" >> "$RESULTS"
-}
-
-# classify <a suite's closing line> -> caught | survived | unresolved
-#
-# The count is read as a number. Matching the text "0 failed" called a suite that
-# reported "20 failed" a survivor, so one row here read caught at 18 failures and
-# SURVIVED at 20, which is the one answer this script exists to get right. A line
-# with no count at all is a suite that died before printing its summary, and that
-# is unresolved rather than a catch.
-classify() {
-    local failed_count
-    failed_count="$(printf '%s\n' "$1" |
-        grep -oE '[0-9]+ failed' | tail -1 | grep -oE '^[0-9]+' || true)"
-    if [ -z "$failed_count" ]; then
-        printf 'unresolved'
-    elif [ "$failed_count" -eq 0 ]; then
-        printf 'survived'
-    else
-        printf 'caught'
-    fi
-}
-
-# --self-test: the classifier decides every row's verdict, so it is checked
-# against lines it has to read correctly before any suite is run. It is the only
-# part of this script with an answer that can be wrong on its own.
-if [ "${1:-}" = "--self-test" ]; then
-    bad=0
-    while IFS='|' read -r line want; do
-        [ -n "$line" ] || continue
-        got="$(classify "$line")"
-        if [ "$got" != "$want" ]; then
-            printf 'self-test: %-44s want %s, got %s\n' "$line" "$want" "$got" >&2
-            bad=1
-        fi
-    done <<'ROWS'
-221 passed, 20 failed, 0 skipped|caught
-240 passed, 10 failed, 0 skipped|caught
-238 passed, 3 failed, 0 skipped|caught
-37 passed, 0 failed, 0 skipped|survived
-0 passed, 0 failed, 12 skipped|survived
-the suite printed no summary at all|unresolved
-ROWS
-    if [ "$bad" -eq 0 ]; then
-        echo "self-test: the classifier reads all six lines correctly"
-    fi
-    exit "$bad"
-fi
-
-[ -n "${RESULTS:-}" ] && : > "$RESULTS"
 
 # A row whose change no suite can notice, and that no suite can notice because the
 # branch is unreachable on this machine rather than because the suites are thin.
@@ -109,6 +60,167 @@ for known_id in $KNOWN_SURVIVORS; do
         exit 1
     }
 done
+
+note() {
+    printf '%s\n' "$*"
+    [ -n "${RESULTS:-}" ] && printf '%s\n' "$*" >> "$RESULTS"
+}
+
+# classify <a suite's closing line> -> caught | survived | unresolved
+#
+# The count is read as a number. Matching the text "0 failed" called a suite that
+# reported "20 failed" a survivor, so one row here read caught at 18 failures and
+# SURVIVED at 20, which is the one answer this script exists to get right. A line
+# with no count at all is a suite that died before printing its summary, and that
+# is unresolved rather than a catch.
+classify() {
+    local failed_count
+    failed_count="$(printf '%s\n' "$1" |
+        grep -oE '[0-9]+ failed' | tail -1 | grep -oE '^[0-9]+' || true)"
+    if [ -z "$failed_count" ]; then
+        printf 'unresolved'
+    elif [ "$failed_count" -eq 0 ]; then
+        printf 'survived'
+    else
+        printf 'caught'
+    fi
+}
+
+# --lint: the table is the instrument, so it is checked on its own, in a second
+# rather than in a sweep. A row whose expression no longer matches its file is not
+# a survivor and not a hole in a suite: it mutates nothing, so running it can only
+# say SKIPPED, and the sweep fails on that. That is how this pass earns its place -
+# the row for the invalidation inside _set_units() stopped matching when a docstring
+# gained a blank line, and only a full sweep would have said so.
+#
+# The last check is that failure's general shape: a sed range ending on an empty
+# line stops at the first blank line of the block it aims at, which in a script
+# with docstrings is often before the line it meant to change.
+lint_table() {  # lint_table <table> <root>  -> 0 when every row is usable
+    local table="$1" root="$2" problems=0 id target expr suite
+    while IFS=$'\t' read -r id target expr suite; do
+        case "$id" in ''|'#'*) continue ;; esac
+        if [ -z "$suite" ]; then
+            printf 'lint: %s: not four tab-separated fields\n' "$id" >&2
+            problems=$((problems + 1)); continue
+        fi
+        if [ ! -f "$root/$target" ]; then
+            printf 'lint: %s: no such file: %s\n' "$id" "$target" >&2
+            problems=$((problems + 1)); continue
+        fi
+        if [ ! -f "$root/tests/$suite.sh" ]; then
+            printf 'lint: %s: no such suite: tests/%s.sh\n' "$id" "$suite" >&2
+            problems=$((problems + 1)); continue
+        fi
+        # cmp stops at the first difference, so sed is left writing into a
+        # closed pipe and says so on stderr on nearly every row.
+        sed "$expr" "$root/$target" > "$WORK/lint.out" 2>/dev/null
+        if cmp -s "$WORK/lint.out" "$root/$target"; then
+            printf 'lint: %s: the expression matches nothing in %s\n' "$id" "$target" >&2
+            problems=$((problems + 1))
+        fi
+        case "$expr" in
+            *'/^$/,'*|*',/^$/'*|*',/^$ '*)
+                printf 'lint: %s: the range is addressed by an empty line, which is the first blank line of the block it aims at\n' "$id" >&2
+                problems=$((problems + 1)) ;;
+        esac
+    done < "$table"
+    return "$problems"
+}
+
+if [ "${1:-}" = "--lint" ]; then
+    status=0
+    lint_table "$TABLE" "$REPO" || status=$?
+    for known_id in $KNOWN_SURVIVORS; do
+        grep -q "^${known_id}	" "$TABLE" || {
+            echo "KNOWN_SURVIVORS names $known_id, which is not a row in $TABLE" >&2
+            status=$((status + 1))
+        }
+    done
+    if [ "$status" -eq 0 ]; then
+        echo "lint: $(grep -cvE '^#|^$' "$TABLE") rows, every one targeting a file, naming a suite, and matching its file"
+    fi
+    exit "$status"
+fi
+
+# --self-test: the classifier decides every row's verdict, so it is checked
+# against lines it has to read correctly before any suite is run. It is the only
+# part of this script with an answer that can be wrong on its own.
+if [ "${1:-}" = "--self-test" ]; then
+    bad=0
+    while IFS='|' read -r line want; do
+        [ -n "$line" ] || continue
+        got="$(classify "$line")"
+        if [ "$got" != "$want" ]; then
+            printf 'self-test: %-44s want %s, got %s\n' "$line" "$want" "$got" >&2
+            bad=1
+        fi
+    done <<'ROWS'
+221 passed, 20 failed, 0 skipped|caught
+240 passed, 10 failed, 0 skipped|caught
+238 passed, 3 failed, 0 skipped|caught
+37 passed, 0 failed, 0 skipped|survived
+0 passed, 0 failed, 12 skipped|survived
+the suite printed no summary at all|unresolved
+ROWS
+    # The lint has an answer of its own: which rows it can tell apart. Its two
+    # failures are the two that cost a sweep to find - a row that mutates nothing,
+    # and a range addressed by an empty line - so both are put in front of it here
+    # beside a row that has to come back clean.
+    LINT_FIX="$WORK/self-test-lint"
+    mkdir -p "$LINT_FIX/tests"
+    cat > "$LINT_FIX/target.sh" <<'FIXTURE'
+f() {
+    """A docstring with a blank line in it.
+
+    And a body.
+    """
+    x=1
+    return 1
+}
+g() {
+    y=1
+}
+FIXTURE
+    : > "$LINT_FIX/tests/probe.sh"
+    # Four tab-separated fields, one row per failure the lint exists to name.
+    printf '%b\n' \
+        "live-row\ttarget.sh\ts/^    x=1$/    x=2/\tprobe" \
+        "dead-row\ttarget.sh\t/^f() {/,/^$/ s/^    x=1$/    x=2/\tprobe" \
+        "blank-range\ttarget.sh\t/^g() {/,/^$/ s/^    y=1$/    y=2/\tprobe" \
+        "missing-file\tnope.sh\ts/^x$/y/\tprobe" \
+        "missing-suite\ttarget.sh\ts/^    x=1$/    x=2/\tno-such-suite" \
+        > "$LINT_FIX/table"
+    lint_out="$(lint_table "$LINT_FIX/table" "$LINT_FIX" 2>&1)"
+    lint_rc=$?
+    for want_id in dead-row blank-range missing-file missing-suite; do
+        case "$lint_out" in
+            *"$want_id"*) ;;
+            *) printf 'self-test: the lint said nothing about %s\n' "$want_id" >&2; bad=1 ;;
+        esac
+    done
+    case "$lint_out" in
+        *live-row*) printf 'self-test: the lint reported a row that is fine\n' >&2; bad=1 ;;
+    esac
+    if [ "$lint_rc" -eq 0 ]; then
+        printf 'self-test: the lint exited 0 over a table with four bad rows\n' >&2
+        bad=1
+    fi
+    grep -v -e dead-row -e blank-range -e missing-file -e missing-suite \
+        "$LINT_FIX/table" > "$LINT_FIX/table-good"
+    if ! lint_table "$LINT_FIX/table-good" "$LINT_FIX" >/dev/null 2>&1; then
+        printf 'self-test: the lint reported a table of good rows\n' >&2
+        bad=1
+    fi
+
+    if [ "$bad" -eq 0 ]; then
+        echo "self-test: the classifier reads all six lines, and the lint names four bad rows and no good one"
+    fi
+    exit "$bad"
+fi
+
+[ -n "${RESULTS:-}" ] && : > "$RESULTS"
+
 caught=0
 skipped=0
 unresolved=0

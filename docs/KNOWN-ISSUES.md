@@ -19,18 +19,59 @@ were found in the first place.
 
 Round twenty-two's audit found ten things; the code, the grammar, the instrument and
 the watcher question are fixed and in the changelog, and the mutation table has no
-dead rows for the first time in several rounds (seven were re-pointed to the lines
-they name and two dropped with their reasons). What is still open from that review:
+dead rows (seven were re-pointed to the lines they name and two dropped with their
+reasons; `tests/lib/mutate.sh --lint` now says so in a second, because two rows had
+since stopped matching their files and only a sweep would have noticed). What is
+still open from that review:
 
 - The mutation row `tray-setunits-invalidate` still survives, and the reason recorded
   beside it is narrower than it reads: the generation bump is observable in a
   stale-state-shaped probe that calls `_set_units()`, and what the suite lacks is that
   ordering rather than the observability. The case is what would retire the row.
-- With `HOME` unset the three readers disagree about the cache directory: the shells
-  compute `/.cache/rclone-onedrive-tray` and the tray's `expanduser` answers the same,
-  but the doctor's `${XDG_CACHE_HOME:-$HOME/.cache}` expands to an empty `HOME` and
-  then to `/rclone-onedrive-tray`. No shell this project ships runs with `HOME` unset,
-  so it is a note rather than a defect.
+- The cache directory is one expression in two shells and one `expanduser` call in
+  Python, with `XDG_CACHE_HOME` unset and `HOME` handled three different ways.
+  Measured: with `HOME` unset both shells stop at their first use of it
+  (`bash: HOME: unbound variable`, exit 127, under their `set -uo pipefail`), with
+  `HOME=` both compute `/.cache/rclone-onedrive-tray` (the doctor's `pause_dir` and
+  the wrapper's `CACHE_DIR` are the same expression with a different name), and
+  Python's `expanduser("~")` answers the passwd home instead. No shell this project
+  ships runs with `HOME` unset or empty, so the divergence is a note rather than a
+  defect, and it is written down here rather than fixed because a `HOME` default
+  would change what every one of the three resolves on the machines that do set it.
+
+### Two test-side items from the meta-reviews
+
+The other half of that review's list is done: the wizard's frozen carried value is
+fixed in the changelog, and `_local_delete_path()` no longer keeps a second look at
+the filesystem root that only a monkeypatched case could reach. What is left is the
+first item, and it is narrower than it read.
+
+- Two tray cases pin source identifiers rather than behaviour. Measured on the fixed
+  tree by renaming the module's `STRINGS` table to `STRINGS_X` throughout
+  `bin/onedrive-tray`: three cases go red - `the tray could not be driven for
+  'excluded-name'`, `the refused names left the rest of LOCAL where it was`, and
+  `every literal string passed to t() has a Chinese entry`. The first two read
+  `MODULE.STRINGS["zh"]` for the sentence they expect instead of asking the tray for
+  it, and the third looks the table up by name. A rename is a refactor, and a suite
+  that fails on one costs more to change than the cases are worth; the fix is a case
+  that asks the tray for the translation and a lookup that finds the table the way the
+  tray does. The earlier count of five is three.
+
+### The hook's cases pin its text, not its behaviour
+
+`tests/install-flow.sh` installs `extras/networkmanager-dispatcher.sh` and then reads
+the installed file: the `is-enabled --quiet` gate, the unit it asks about, and that
+the gate comes before the start. Measured: of the twenty-four places the suite names
+the hook, none runs it - they print it, grep it, or stat it. Neutering the gate while
+keeping that text and its position (`: runuser ... || continue`) leaves the whole
+suite green, so a hook that asks nothing and starts the service anyway passes every
+case. The fixture that would measure it has to run the file, and the file dispatches
+through `for runtime in /run/user/*`, which an unprivileged test cannot populate: it
+needs a mount namespace over `/run` with stubbed `id`, `getent`, `runuser` and
+`systemctl`. Measured on the development machine: `unshare -rm` with a `tmpfs` on
+`/run` works even with `kernel.apparmor_restrict_unprivileged_userns=1`, so the
+fixture is writable. Whether both CI runners permit the same is untested, which is
+why it is written down rather than assumed.
 
 ## Accepted, with the reason
 

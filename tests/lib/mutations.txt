@@ -48,7 +48,7 @@ check-rename-subtree	bin/onedrive-check	s|                  \[ -d "$LOCAL/$2" \]
 # every suite green before the group cases existed.
 check-rename-tilde	bin/onedrive-check	s|bad_part="leading tilde in '\$part'" ;;|: ;;|	filters
 check-rename-utf8	bin/onedrive-check	s|! is_valid_utf8 "\$part"|false|	filters
-tray-setunits-invalidate	bin/onedrive-tray	/def _set_units/,/^$/ s/^        self\._units_changed()$/        pass/	tray
+tray-setunits-invalidate	bin/onedrive-tray	/def _set_units/,/^    def pause_for/ s/^        self\._units_changed()$/        pass/	tray
 tray-bw-limit-fallback	bin/onedrive-tray	s|                             else self.original\["BW_LIMIT"\]),|                             else ""),|	tray
 doctor-pattern-drift	bin/onedrive-doctor	s|^RE_LOCK='prior lock file found'|RE_LOCK='prior lock file present'|	docs
 # the short spellings of rclone's verbose flag, which trip the same refusal as
@@ -100,7 +100,11 @@ setup-notty-first-sync	setup.sh	s|    elif \[ ! -t 0 \]; then|    elif false; th
 tray-comment-hash-rule	bin/onedrive-tray	s|char == "#" and index > 0 and value\[index - 1\].isspace()|char == "#"|	tray
 # the same rule applied after the value was stripped, which loses the difference
 # between KEY=#x and KEY=   #x
-tray-comment-hash-after-equals	bin/onedrive-tray	s|    text = strip_inline_comment(raw).strip()|    text = strip_inline_comment(text.strip())|	tray
+tray-stamp-strip-everything	bin/onedrive-tray	s|raw.decode("utf-8", "replace").rstrip("\\n")|raw.decode("utf-8", "replace").strip()|	tray
+# the file read as bytes and decoded, which is the half of the stamp grammar the
+# shells had and the tray did not: text mode turns a CR into a newline, and an
+# undecodable byte raises out of the poll instead of failing the digit rule.
+tray-comment-hash-after-equals	bin/onedrive-tray	s|    text = strip_inline_comment(raw).strip()|    text = strip_inline_comment(raw.strip())|	tray
 # an export prefix filed as part of the key, so REMOTE stays unset
 tray-config-export-prefix	bin/onedrive-tray	s|^                if (key.startswith("export")$|                if (False and key.startswith("export")|	tray
 # a config that cannot be read treated as a change, which moves the delete guard's
@@ -195,7 +199,9 @@ tray-relative-local-guard	bin/onedrive-tray	s|^        if local_path_problem(sel
 tray-delete-dialog-path	bin/onedrive-tray	s|"again downloads it back.", path=target)|"again downloads it back.")|	tray
 # round eight (agenttray9)
 tray-local-root-refused	bin/onedrive-tray	s#^    if os.path.dirname(root) == root:$#    if False:#	tray
-tray-local-root-guard	bin/onedrive-tray	s#^        if os.path.dirname(root) == root:$#        if False:#	tray
+# The row that sat here, for the same check inside _local_delete_path(), is gone
+# with the check: every value whose realpath has no parent is refused by
+# local_path_problem() first, which is what tray-local-root-refused above pins.
 tray-pause-unarmed-leaves-off	bin/onedrive-tray	s#^                self._set_units("enable", "--now")$#                pass#	tray
 # tray-pause-unarmed-silent was dropped: it named the line that called _pause_lost(), and the
 # old pause design that function belonged to is gone.
@@ -237,7 +243,7 @@ tray-other-tag-raw	bin/onedrive-tray	s|^        if tag == "other":$|        if F
 setup-access-check-offer	setup.sh	s|^if \[ "\$CONFIG_EXISTED" -eq 0 \]; then$|if false; then|	install-flow
 setup-access-check-on-rerun	setup.sh	s|^if \[ "\$CONFIG_EXISTED" -eq 0 \]; then$|if true; then|	install-flow
 setup-access-check-key	setup.sh	s|^        elif set_config_key CHECK_ACCESS 1; then$|        elif false; then|	install-flow
-setup-access-check-carry	setup.sh	s|^CHECK_ACCESS="\$(config_quote "\$(carry CHECK_ACCESS 0)")"$|CHECK_ACCESS="0"|	install-flow
+setup-access-check-carry	setup.sh	s|^\$(carry_assign CHECK_ACCESS 0)$|CHECK_ACCESS="0"|	install-flow
 setup-local-create	setup.sh	s|^if \[ "\$CONFIG_EXISTED" -eq 0 \] \&\& \[ ! -d "\$LOCAL_IN" \]; then$|if false; then|	install-flow
 sync-missing-local-refused	bin/onedrive-sync	s|^if \[ ! -d "\$LOCAL" \]; then$|if false; then|	install-flow
 sync-missing-local-created	bin/onedrive-sync	s|^mkdir -p "\$log_dir" "\$CACHE_DIR" 2>/dev/null|mkdir -p "$log_dir" "$LOCAL" "$CACHE_DIR" 2>/dev/null|	install-flow
@@ -328,8 +334,10 @@ doctor-log-dir-not-a-file	bin/onedrive-doctor	s|    if \[ ! -f "$LOG" \] && \[ !
 sync-pause-ignored	bin/onedrive-sync	s|                    \[ "$pause_due" -gt "$(date +%s)" \]; then|                    false; then|	install-flow
 # The tray half of the pause does have a row, and the line it inserts is
 # expressible: GNU sed reads \n in a replacement as a newline, which is the two
-# characters below. Measured on the reverted code: 290 passed, 2 failed, both of
-# them the pause scenarios that assert no unit is touched.
+# characters below. Measured on the reverted code: 2 failed, both of them the
+# pause scenarios that assert no unit is touched. The pass count is not written
+# down here on purpose; it goes stale every time the suite gains a case, and two
+# rows in this table were wrong by exactly that.
 tray-pause-stops-units	bin/onedrive-tray	s|^            due = int(time.time()) + minutes \* 60$|            self._set_units("stop")\n            due = int(time.time()) + minutes * 60|	tray
 # round twenty-one: the all-zero spellings of INTERVAL_MIN, the blocking open on
 # the config path's write side, and a character device told apart from a fifo.
@@ -353,10 +361,13 @@ doctor-pause-row	bin/onedrive-doctor	s|^if \[ -f "$pause_stamp" \]; then$|if fal
 # the settings dialog's labelled controls.
 tray-state-not-published	bin/onedrive-tray	s|        self.menu.get_accessible().set_name(text)|        pass|	tray
 tray-dialog-control-unnamed	bin/onedrive-tray	s|                    widget.get_accessible().set_name(text)|                    pass|	tray
-# The docs gate's duplicate-heading row was dropped: the gate does fire (106
-# passed, 1 failed on a copy whose ledger holds a duplicate heading, by hand),
-# but the same expression through the harness reports SURVIVED, which means the
-# copy the suite reads is not the copy the row changed, and a row that cannot be
-# trusted is worse than a row that is missing.
+# The docs gate's duplicate-heading row: it was dropped for a year with the reason
+# "SURVIVED, so the copy the suite reads is not the copy the row changed", and that
+# reason was wrong twice over. The row reported SKIPPED, not SURVIVED, because the
+# heading it renamed had been deleted by an earlier commit - a row that mutates
+# nothing - and `--lint` now says so in a second instead of a sweep saying it in
+# hours. Pointed at a heading the ledger still has, the gate fires as it should.
+docs-duplicate-heading	docs/KNOWN-ISSUES.md	s|^### What the pause audit left$|### What the pause audit left\n### What the pause audit left|	docs
 # round twenty-six: resuming a pause enabled the watcher even with WATCH off.
 tray-resume-ignores-watch	bin/onedrive-tray	s|        watched = truthy(self.cfg.get("WATCH", "1"))|        watched = True|	tray
+setup-carry-assign-fallback	setup.sh	s|^    if \[ -n "$line" \]; then|    if [ -z "$line" ]; then|	install-flow
