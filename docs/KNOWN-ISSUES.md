@@ -54,27 +54,6 @@ It moves attributes the test suite reaches into directly (`tray.menu`,
 `tray.item_status`, `tray.pause`, `tray.ind`), so it needs a decision about what a
 test is allowed to touch before anyone starts.
 
-### Smaller, and real
-
-- The first-run wizard never offers the access check, so a fresh install ships
-  with only the delete cap guarding it. The reason the key defaults to off is
-  about upgrades, not new installs.
-- `tests/filters.sh` builds its 400-character name with
-  `printf 'r%.0s' $(seq 1 400)`, which relies on word splitting of the `seq`
-  output. It works, and it is the suite's own fixture.
-- `tests/floors.txt` budgets one environmental skip for `install-flow`, because its
-  last case needs the NetworkManager hook. The suite has four conditional skips
-  (systemd-analyze absent, a 0500 directory that is still writable, a pid that is
-  already gone, and that hook), and a skip lowers the passed count, so a machine
-  missing two of them reports below the floor and fails CI for a reason unrelated
-  to the change. Fixing it means either counting the four and budgeting honestly or
-  turning the environmental ones into passes with a note.
-- `bin/onedrive-sync` creates `LOCAL` when it is missing (`mkdir -p` before the
-  run), so a typo in the path or an unmounted tree starts syncing into a fresh
-  directory instead of stopping. It is defensible (the doctor recommends the same
-  `mkdir` for that state and nothing is deleted), and it is written down because it
-  is the reason the checker's "sync directory not found" cannot be reached from the
-  wrapper.
 
 ### The tray's state is read out of English prose in a shared log
 
