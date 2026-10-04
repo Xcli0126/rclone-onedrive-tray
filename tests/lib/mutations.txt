@@ -383,7 +383,7 @@ tray-dialog-control-unnamed	bin/onedrive-tray	s|                    widget.get_a
 # heading it renamed had been deleted by an earlier commit - a row that mutates
 # nothing - and `--lint` now says so in a second instead of a sweep saying it in
 # hours. Pointed at a heading the ledger still has, the gate fires as it should.
-docs-duplicate-heading	docs/KNOWN-ISSUES.md	s|^### What the pause audit left$|### What the pause audit left\n### What the pause audit left|	docs
+docs-duplicate-heading	docs/KNOWN-ISSUES.md	s|^## Accepted, with the reason$|## Accepted, with the reason\n## Accepted, with the reason|	docs
 # round twenty-six: resuming a pause enabled the watcher even with WATCH off.
 tray-resume-ignores-watch	bin/onedrive-tray	s|        watched = truthy(self.cfg.get("WATCH", "1"))|        watched = True|	tray
 setup-carry-assign-fallback	setup.sh	s|^    if \[ -n "$line" \]; then|    if [ -z "$line" ]; then|	install-flow
