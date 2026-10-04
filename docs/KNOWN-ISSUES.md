@@ -24,21 +24,6 @@ reasons; `tests/lib/mutate.sh --lint` now says so in a second, because two rows 
 since stopped matching their files and only a sweep would have noticed). What is
 still open from that review:
 
-- The mutation row `tray-setunits-invalidate` still survives, and it is now known to be
-  redundant rather than merely uncovered. `_units_changed()` has four call sites -
-  `apply_settings`, `_set_units`, `_after_pause`, `_after_resume` - and every action that
-  goes through `_set_units` also reaches one of the other three, so removing the one
-  inside it changes nothing the suite can see (measured on this tree: the row reports
-  `305 passed, 0 failed`). The case for the generation bump calls
-  `_units_changed()` itself, which is why the bump is covered and this call is not.
-
-  A case was written for the one path that looked like it had no other invalidation -
-  `recover_pause()`, which puts the units back with no `_after_*` callback - and it is
-  green either way, because while the pause stamp is in force `_auto_state()` answers
-  from the stamp rather than from the cached unit state. Measured with the row's change
-  applied: `306 passed, 0 failed`. What a case would have to do is end the pause after
-  the recovery - clear the stamp, let the next poll run - and assert that the tray asks
-  the units again rather than reusing the answer it cached before they were enabled.
 - The cache directory is one expression in two shells and one `expanduser` call in
   Python, with `XDG_CACHE_HOME` unset and `HOME` handled three different ways.
   Measured: with `HOME` unset both scripts stop at their first use of it

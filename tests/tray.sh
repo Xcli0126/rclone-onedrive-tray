@@ -1860,7 +1860,13 @@ def scenario_pause_recovery_cached():
 
     shown = []
     real_notify = MODULE.Notify
+    real_every = MODULE.ENABLED_EVERY
     MODULE.Notify = install_fake_notify(shown)
+    # The cache is also refreshed on a timer of its own, once every ENABLED_EVERY
+    # polls. That would answer the question this scenario is asking, so it is out of
+    # the way: what is under test is the invalidation the pause and the recovery do,
+    # not the poll's own re-ask.
+    MODULE.ENABLED_EVERY = 10 ** 6
     clear_calls()
     try:
         # No stamp yet, so this is a tray that polls and caches what the units say.
@@ -1884,8 +1890,21 @@ def scenario_pause_recovery_cached():
             "pause_label": tray.item_pause.get_label() or "",
             "notices": list(shown),
         })
+        # And the half the stamp hides while it is in force: end the pause and see
+        # whether the tray asks the units again or reuses the answer from before they
+        # were enabled. Clearing the cache is what makes the difference here, and this
+        # is the ordering the mutation row for that call was missing.
+        data["asks_before"] = len([x for x in call_lines() if "is-enabled" in x])
+        os.remove(stamp)
+        pump(1.4)
+        data.update({
+            "asks_after": len([x for x in call_lines() if "is-enabled" in x]),
+            "auto_seen_after": getattr(tray, "auto_seen", None),
+            "timer_state_after": getattr(tray, "timer_state", None),
+        })
     finally:
         MODULE.Notify = real_notify
+        MODULE.ENABLED_EVERY = real_every
     return data
 
 
@@ -5091,6 +5110,22 @@ if d["auto_seen"] != "paused":
     raise SystemExit(1)
 if not d["stamp_left"]:
     print("the pause stamp went with it")
+    raise SystemExit(1)
+'
+    # The pause is over; the units were enabled during it, so the tray has to ask
+    # again rather than answer from the reading it cached while they were off. The
+    # stamp answered for the tray until now, which is why this is a second case.
+    check "and when the pause ends it asks the units rather than reusing that answer" json_py '
+if d["auto_seen"] != "paused":
+    print("the first half of the ordering was not built: %r" % (d["auto_seen"],))
+    raise SystemExit(1)
+# The reading, not the ask count: with the invalidation in place the tray has already
+# asked again by the time the pause ends, and what a stale cache would leave is the
+# answer from before the units were enabled.
+if d["auto_seen_after"] != "on":
+    print("the pause is over and the units are enabled, but the tray reads %r (cached "
+          "timer state %r), so it reused the answer from before recovery"
+          % (d["auto_seen_after"], d["timer_state_after"]))
     raise SystemExit(1)
 '
 fi

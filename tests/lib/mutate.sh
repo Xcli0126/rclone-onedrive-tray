@@ -57,22 +57,20 @@ wanted=("$@")
 # by construction and is written down in docs/KNOWN-ISSUES.md as the one branch
 # without a case. Without this list the harness could never exit 0, and every full
 # sweep would be red for a reason that is already recorded.
-KNOWN_SURVIVORS=" check-name-limit tray-setunits-invalidate tray-local-root-guard "
-# The second is redundancy rather than an unreachable branch: _units_changed() has
-# four call sites (apply_settings, _set_units, _after_pause, _after_resume) and every
-# action that goes through _set_units() also reaches one of the other three, so the
-# call inside it cannot be distinguished by any case. Measured: 305 passed, 0 failed on
-# this tree. The case that exists for the generation bump calls _units_changed()
-# itself. Removing the row would drop the mutation; keeping it here says the coverage
-# is missing rather than unnoticed, and docs/KNOWN-ISSUES.md names what a case would
-# have to do to retire it: end the pause after recover_pause()'s write and assert that
-# the tray asks the units again, since a case written for the recovery path alone is
-# green either way (the stamp answers _auto_state() while the pause is in force).
-# The third is unreachable by construction: _local_delete_path() resolves LOCAL with
-# the same expanduser+realpath that local_path_problem() refuses the filesystem root
-# with, so no value can be accepted by the first and land on "/" in the second. The
-# case for it is the tilde shape in tests/tray.sh - which fails if the two
-# resolutions ever come apart again, and did, for one commit, before this note.
+KNOWN_SURVIVORS=" check-name-limit tray-local-root-guard "
+# `tray-setunits-invalidate` was on this list for several rounds, with a note saying the
+# suite lacked the ordering that would notice it. The ordering was written - pause
+# recovery, then the pause ending, with the poll's own periodic re-ask held out of the
+# way - and the row is caught now: 306 passed, 1 failed under it, 307 passed, 0 failed
+# here. The lesson belongs in the ledger rather than here: "the suite lacks this
+# ordering" was true of the cases, not of the code.
+# The first is unreachable by construction: a local filesystem refuses a name past 255
+# bytes before onedrive-check's own 99999-byte limit is consulted. The second is
+# unreachable while _local_delete_path() resolves LOCAL with the same expanduser+realpath
+# that local_path_problem() refuses the filesystem root with, so no value can be accepted
+# by the first and land on "/" in the second; the case for it is the tilde shape in
+# tests/tray.sh, which fails if the two resolutions come apart again - and did, for one
+# commit, before this note.
 survived=0
 known=0
 

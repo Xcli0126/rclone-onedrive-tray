@@ -53,6 +53,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The mutation row for the invalidation inside `_set_units()` is caught, and the coverage
+  gap it documented is closed. The ordering it needed: a tray that has cached the units as
+  off, a pause arriving while they are still disabled, recovery putting them back, and then
+  the pause ending - with the poll's own once-every-twelve re-ask held out of the way,
+  because that would answer the question the case is asking. `KNOWN_SURVIVORS` is down to
+  the two branches that are unreachable by construction, and the row reports 306 passed, 1
+  failed under it against 307 passed, 0 failed on this tree. It had been on that list for
+  several rounds with a note saying the suite lacked the ordering; that was true of the
+  cases rather than of the code.
+
 - The wizard no longer carries a line it cannot carry whole. Writing the old file's
   own line fixed the frozen `$` above, and the first version took any line that
   started with the key: a value written over two lines is valid shell, so
