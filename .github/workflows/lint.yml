@@ -93,8 +93,15 @@ jobs:
           # inside `unshare -rm` with a tmpfs over /run, because an unprivileged
           # test cannot create /run/user/<uid>. A runner that forbids user
           # namespaces would skip those cases, and a skip is not a pass, so the
-          # contract is checked here where the reason is visible rather than
+          # contract is asserted here where the reason is visible rather than
           # hidden in a lowered floor.
+          #
+          # ubuntu-latest is 24.04, which restricts unprivileged user namespaces; the
+          # switch below is the documented way to lift that, and this job already has
+          # sudo. Measured on the first run without it: "unshare: write failed
+          # /proc/self/uid_map: Operation not permitted" on ubuntu-latest, clean on
+          # ubuntu-22.04.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
           unshare -rm true
 
       # One run per suite, with the count checked against tests/floors.txt.
