@@ -150,6 +150,14 @@ LOCK_FILE = os.path.join(LOCK_DIR, "rclone-onedrive-tray.lock")
 PAUSE_UNIT = f"{APP_ID}-resume"
 PAUSE_STAMP = os.path.join(CACHE_DIR, "paused-until")
 
+# What the re-authorise terminal leaves behind: the reconnect's exit status, and
+# its output for the sentence when it failed. The tray hands `rclone config
+# reconnect` to a terminal and cannot read that process's status, so the script the
+# terminal runs writes it here, which is what makes "the sign-in finished" a fact
+# rather than a guess from a remote that still answers with the old credentials.
+REAUTH_STATUS = os.path.join(CACHE_DIR, "reauth-status")
+REAUTH_OUTPUT = os.path.join(CACHE_DIR, "reauth-status.log")
+
 STATES = ("synced", "syncing", "error", "paused", "unknown")
 CLOUD_COLOR = (0.20, 0.51, 0.89)
 # A darker blue so the silhouette keeps an edge on a light panel without turning
@@ -1862,29 +1870,82 @@ class Tray:
 
     def _reauth_worker(self, remote):
         quoted = shlex.quote(remote)
+        # The status file is what the terminal leaves when the reconnect is over.
+        # `$?` is read immediately after the reconnect, before the pause for the
+        # reader, so what it holds is rclone's status and not the shell's last
+        # command.
+        for stale in (REAUTH_STATUS, REAUTH_OUTPUT):
+            try:
+                os.remove(stale)
+            except OSError:
+                pass
         reconnect = (f"printf 'y\\n' | {shlex.quote(self.rclone)} "
-                     f"config reconnect {quoted}")
+                     f"config reconnect {quoted} >{shlex.quote(REAUTH_OUTPUT)} 2>&1; "
+                     f"printf '%s' \"$?\" >{shlex.quote(REAUTH_STATUS)}")
         script = (f"{reconnect}; printf '\\nDone. You can close this window.\\n'; "
                   "read -r _ || true")
         term = terminal_command(script)
         if term and spawn(term):
-            # The terminal owns the exit status, so success is decided by asking
-            # the remote again rather than by reading a return code.
+            # The terminal owns the exit status; the script writes it where this
+            # can read it, so success is decided by the sign-in having finished and
+            # the remote then answering, rather than by asking the remote while the
+            # sign-in window is still open.
             ok = self._wait_for_remote(remote)
             if not ok:
                 # A terminal that never led to a working remote still ends the
                 # flow here: otherwise the guard would stay up for the life of
                 # the process and the row could never be tried again.
-                self._reauth_finished(False, "")
+                self._reauth_finished(False, self._reauth_detail())
             else:
                 self._reauth_finished(True)
             return
         rc, out, err = sh(reconnect, timeout=900)
         self._reauth_finished(rc == 0, (err or out).strip())
 
-    def _wait_for_remote(self, remote, tries: int = 36) -> bool:
-        """Poll until the remote answers again, or give up quietly."""
-        for _ in range(tries):
+    def _reauth_detail(self) -> str:
+        """Why the sign-in did not finish, in rclone's own words when it spoke."""
+        try:
+            with open(REAUTH_OUTPUT, encoding="utf-8", errors="replace") as fh:
+                lines = [line.strip() for line in fh if line.strip()]
+        except OSError:
+            lines = []
+        if lines:
+            return lines[-1]
+        return "the sign-in window never reported finishing"
+
+    def _wait_for_remote(self, remote, seconds: int = 600) -> bool:
+        """Wait for the sign-in to finish, then for the remote to answer.
+
+        The wait used to be for the remote alone, and a remote whose credentials
+        were still valid answered at once: the flow reported "Signed in. Syncing
+        now." about a second after the terminal opened, dropped the guard that
+        keeps a second `rclone config reconnect` from starting over the same
+        credentials, and began a sync over a sign-in that was still on screen. The
+        script in the terminal writes the reconnect's status to REAUTH_STATUS, so
+        this waits for the file, checks the status in it, and only then asks the
+        remote. The file is asked for every quarter second rather than every five
+        seconds: it is a stat call, and the sign-in is over the moment the
+        terminal's script writes it, so there is nothing to be gained by noticing
+        late. `seconds` is ten minutes, because a person signing in through a
+        browser takes as long as they take and the row stays disabled until then.
+        """
+        deadline = time.time() + seconds
+        while time.time() < deadline:
+            if os.path.exists(REAUTH_STATUS):
+                break
+            time.sleep(0.25)
+        else:
+            return False
+        try:
+            with open(REAUTH_STATUS, encoding="utf-8", errors="replace") as fh:
+                status = fh.read().strip()
+        except OSError:
+            return False
+        if status != "0":
+            return False
+        # The reconnect is over; a token refresh can still take a moment, which is
+        # the only thing this loop is for now.
+        for _ in range(12):
             rc, _, _ = sh(f"{shlex.quote(self.rclone)} lsd {shlex.quote(remote)} "
                           f"--max-depth 1", timeout=30)
             if rc == 0:

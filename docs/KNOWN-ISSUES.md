@@ -40,24 +40,6 @@ It moves attributes the test suite reaches into directly (`tray.menu`,
 test is allowed to touch before anyone starts.
 
 
-### Re-authorise says it worked before the sign-in is done
-
-`_wait_for_remote()` is documented as waiting for the remote to answer again, and
-it probes once: with the credentials still valid at that moment the first probe
-succeeds, so "Signed in. Syncing now." appears about 0.05 seconds after the
-terminal opens, `reauth_busy` drops (which makes a second concurrent
-`rclone config reconnect` one click away, the race the guard exists for), and a
-sync is requested while the sign-in window is still open. Measured by the round
-eleven reviewer, with the scenario the suite has to plant a slow `rclone lsd` to
-reproduce at all.
-
-The tray hands the reconnect to a terminal and never sees its exit status, so
-there is nothing to wait for. Either the sentence stops claiming success and says
-what to do in the window (a one-line change, no signal needed), or the flow gains
-a signal the tray can read and the text stays. The first is what this entry is
-waiting for.
-
-
 ## Accepted, with the reason
 
 - The tools' own report text is English, and that is now the same answer in the

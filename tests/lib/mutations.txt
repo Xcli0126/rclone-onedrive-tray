@@ -298,3 +298,7 @@ hint-oldrclone-version	bin/onedrive-tray	s|需要 rclone 1.66 或更新版本|�
 autostart-no-zh-name	bin/onedrive-tray	s|            f"Name\[zh\]={APP_NAME} 状态图标\\n"||	tray
 config-dupkey-first-only	bin/onedrive-tray	s|shell_quote_value(wanted\[key\])|shell_quote_value(wanted.pop(key))|	tray
 config-badbyte-uncaught	bin/onedrive-tray	s|        raise ConfigFault(config_utf8_problem(exc, path)) from exc|        raise exc|	tray
+# round fifteen: the re-authorise flow waited for the remote instead of for the
+# sign-in, so still-valid credentials answered it at once.
+reauth-status-not-waited	bin/onedrive-tray	s|            if os.path.exists(REAUTH_STATUS):|            if True:|	tray
+reauth-terminal-no-status	bin/onedrive-tray	s|>{shlex.quote(REAUTH_STATUS)}"|"|	tray

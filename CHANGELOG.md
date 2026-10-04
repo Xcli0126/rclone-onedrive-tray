@@ -36,6 +36,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Re-authorise claimed the sign-in was done the moment the terminal opened. The
+  wait was for the remote to answer again, and the credentials rclone was still
+  using answered the first probe, so "Signed in. Syncing now." appeared about a
+  second after the window opened, the guard that keeps a second
+  `rclone config reconnect` from starting over the same credentials came down, and
+  a sync was started over a sign-in that was still on screen. The script the
+  terminal runs writes the reconnect's exit status where the tray can read it, so
+  the flow waits for that file, checks the status in it, and only then asks the
+  remote; when it fails, the sentence carries rclone's own last line instead of a
+  question mark.
 - `UI_LANG` written the way a locale is spelled was ignored. `zh_CN`, `zh-CN`,
   `zh-Hans`, `zh_CN.UTF-8` and `ZH` are the values a person reaching for a locale
   writes, and `resolve_lang()` knew only the literal `zh`, so the menu stayed

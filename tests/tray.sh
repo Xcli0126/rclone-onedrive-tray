@@ -212,6 +212,14 @@ for term in xdg-terminal-exec ptyxis gnome-terminal konsole xfce4-terminal xterm
 cat > "$WORK/stubs/$term" <<STUB
 #!/bin/sh
 printf 'terminal %s\n' "\$*" >> "$WORK/calls/calls"
+# A real terminal runs the script it is handed, and that script's last act is to
+# write the reconnect's status. This records the call instead, so a case that wants
+# a finished sign-in asks for one; the case that wants the window still open does
+# not, and writes the status itself when it decides the sign-in is over.
+if [ -n "\$TRAY_REAUTH_AUTO" ]; then
+    mkdir -p "\$(dirname "\$TRAY_REAUTH_STATUS")"
+    printf '0' > "\$TRAY_REAUTH_STATUS"
+fi
 exit 0
 STUB
 done
@@ -3986,6 +3994,66 @@ def scenario_reauth_twice():
     return data
 
 
+def scenario_reauth_not_done():
+    """A sign-in is not finished until the terminal says so.
+
+    The wait used to be for the remote alone, and the credentials rclone was still
+    using at that moment answered the first probe: "Signed in. Syncing now."
+    appeared about a second after the window opened, the guard that keeps a second
+    `rclone config reconnect` from starting over the same credentials came down,
+    and a sync was started over a sign-in that was still on screen. The script the
+    terminal runs writes the reconnect's status where the tray can read it, so the
+    flow waits for that file and for the status inside it.
+    """
+    tray = build()
+    clear_calls()
+    shown = []
+    real_notify = MODULE.Notify
+    MODULE.Notify = install_fake_notify(shown)
+    asked = {}
+    real_dialog = MODULE.Gtk.MessageDialog
+    MODULE.Gtk.MessageDialog = fake_message_dialog(
+        asked, MODULE.Gtk.ResponseType.OK)
+    item = find_at(tray.menu, "Re-authorise OneDrive…")
+    try:
+        item.activate()
+        parked = wait_for(
+            lambda: any(line.startswith("terminal ")
+                        and "config reconnect" in line for line in call_lines()),
+            8.0)
+        # Longer than the old flow took to finish: its first probe answered at
+        # once, because nothing had changed the credentials yet.
+        pump(2.5)
+        data = {"parked": parked,
+                "status_file": MODULE.REAUTH_STATUS,
+                "status_exists": os.path.exists(MODULE.REAUTH_STATUS),
+                "busy_before": bool(getattr(tray, "reauth_busy", False)),
+                "sensitive_before": item.get_sensitive(),
+                "started_before": any("start --no-block" in line
+                                      for line in call_lines()),
+                "signed_in_before": [b for b in shown if "Syncing now" in b],
+                "calls": call_lines()}
+        # What the terminal leaves when the sign-in is over, and the remote then
+        # answering. The flow ends here, and not before.
+        os.makedirs(os.path.dirname(MODULE.REAUTH_STATUS), exist_ok=True)
+        with open(MODULE.REAUTH_STATUS, "w", encoding="utf-8") as fh:
+            fh.write("0")
+        data["finished"] = wait_for(
+            lambda: not getattr(tray, "reauth_busy", True), 20.0)
+        data["signed_in_after"] = [b for b in shown if "Syncing now" in b]
+        data["started_after"] = any("start --no-block" in line
+                                    for line in call_lines())
+        data["sensitive_after"] = item.get_sensitive()
+    finally:
+        MODULE.Gtk.MessageDialog = real_dialog
+        MODULE.Notify = real_notify
+        try:
+            os.remove(MODULE.REAUTH_STATUS)
+        except OSError:
+            pass
+    return data
+
+
 def scenario_lock_inode():
     """release_lock() removes only the file it locked, and a second take works.
 
@@ -4270,6 +4338,7 @@ SCENARIOS = {
     "lock-race": scenario_lock_race,
     "reauth": scenario_reauth,
     "reauth-twice": scenario_reauth_twice,
+    "reauth-not-done": scenario_reauth_not_done,
     "stale-state": scenario_stale_state,
     "stale-state-cache": scenario_stale_state_cache,
     "relative-local": scenario_relative_local,
@@ -4343,6 +4412,7 @@ driver_env() {
         GDK_BACKEND=broadway BROADWAY_DISPLAY=:9 DISPLAY=:77 \
         LANG=C.UTF-8 LC_ALL=C.UTF-8 \
         TRAY_RECORDS="$WORK/records" TRAY_CALLS="$WORK/calls" \
+        TRAY_REAUTH_STATUS="$WORK/cache/rclone-onedrive-tray/reauth-status" \
         "$@" \
         python3 "$DRIVER" "$name" "$TRAY"
 }
@@ -4524,7 +4594,7 @@ title "The rclone binary the config names"
 # ran the literal "rclone" from PATH in all four of its own queries, so the quota
 # row, the folder menu and the sign-in could describe a different binary's remote
 # than the one that syncs - which is the case the key exists for.
-if run_driver rclone-binary; then
+if run_driver rclone-binary TRAY_REAUTH_AUTO=1; then
     check "the tray resolved the binary RCLONE names" json_py '
 if not d["binary"].endswith("rclone-other"):
     print("rclone=%r" % (d["binary"],))
@@ -5977,7 +6047,7 @@ if d["second_acquired"]:
 fi
 
 title "Signing in again"
-if run_driver reauth; then
+if run_driver reauth TRAY_REAUTH_AUTO=1; then
     check "the confirm dialog names the remote and offers both buttons" \
         json_expr "'traytest-remote:' in d['body'] and d['buttons'] == ['Cancel', 'Sign in again']"
     check "confirming runs rclone's sign-in for the same remote" \
@@ -5992,7 +6062,7 @@ fi
 # and the first one to finish said "Signed in. Syncing now." while the other was
 # still open. rclone's config file has no cross-process locking, so the two are
 # last-writer-wins over the same remote's credentials.
-if run_driver reauth-twice; then
+if run_driver reauth-twice TRAY_REAUTH_AUTO=1; then
     check "a second activation starts no second sign-in" json_py '
 if not d["parked"]:
     print("the first flow was never in flight, so nothing was measured")
@@ -6011,6 +6081,46 @@ if not d["busy_while_busy"] or not d["insensitive_while_busy"]:
 if not d["finished"] or d["busy_after"] or not d["sensitive_after"]:
     print("finished=%r busy_after=%r sensitive_after=%r"
           % (d["finished"], d["busy_after"], d["sensitive_after"]))
+    raise SystemExit(1)
+'
+fi
+
+title "A sign-in is not finished until the terminal says so"
+# The wait used to be for the remote alone, and the credentials rclone was still
+# using answered the first probe: "Signed in. Syncing now." appeared about a second
+# after the window opened, the guard came down and a sync started over a sign-in
+# that was still on screen. The terminal's script writes the reconnect's status
+# where the tray reads it, so the wait is for that file first.
+if run_driver reauth-not-done; then
+    check "the terminal command is what leaves the reconnect's status" json_py '
+lines = [x for x in d["calls"]
+         if x.startswith("terminal ") and "config reconnect" in x]
+# The path itself, not a prefix of it: the command carries the output path too,
+# and that one starts with the status path.
+if not lines or (">" + d["status_file"] + ";") not in lines[0]:
+    print("terminal call: %r" % (lines[:1],))
+    raise SystemExit(1)
+'
+    check "the flow waits while the window is open" json_py '
+if not d["parked"] or d["status_exists"]:
+    print("parked=%r, status file exists=%r"
+          % (d["parked"], d["status_exists"]))
+    raise SystemExit(1)
+if not d["busy_before"] or d["sensitive_before"]:
+    print("busy=%r sensitive=%r" % (d["busy_before"], d["sensitive_before"]))
+    raise SystemExit(1)
+if d["started_before"] or d["signed_in_before"]:
+    print("success was claimed while the window was open: started=%r notices=%r"
+          % (d["started_before"], d["signed_in_before"]))
+    raise SystemExit(1)
+'
+    check "and finishes when the terminal reports the reconnect" json_py '
+if not d["finished"] or not d["signed_in_after"] or not d["started_after"]:
+    print("finished=%r notices=%r started=%r"
+          % (d["finished"], d["signed_in_after"], d["started_after"]))
+    raise SystemExit(1)
+if not d["sensitive_after"]:
+    print("the row stayed insensitive after the flow ended")
     raise SystemExit(1)
 '
 fi
