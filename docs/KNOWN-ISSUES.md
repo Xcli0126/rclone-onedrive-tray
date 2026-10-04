@@ -15,6 +15,38 @@ were found in the first place.
 
 ## Open
 
+### What the pause commit's own audit found
+
+Round twenty-two's commits were audited by the same lens that audited the ones before
+them, and the pattern held: a rule was fixed in one reader and not its twin. All ten
+findings are reproduced in that review; none is fixed yet, and its patch covers most.
+
+- `_pause_due()` got a digits-and-length rule; `_paused_until()`, which the menu label
+  reads, kept `int()` and `time.localtime()`. An eleven to nineteen digit stamp
+  therefore raises `OverflowError` out of a GTK idle callback on every poll and the
+  pause row never paints.
+- The tray's rule stops at nineteen digits and the shells' at ten, so a twenty digit
+  stamp has the wrapper and the doctor reporting a pause and the tray reporting
+  automatic sync as on - and "Sync now" in that state is the silent no-op the same
+  commit had just removed, reached by one more digit.
+- The tray's reader strips whitespace and the shells' does not: `" 1791117608 "` is a
+  pause in the menu and a stamp to delete-and-sync for the wrapper. The changelog
+  sentence "both readers take digits only now" is false.
+- `resume_now()` and `_recover_pause_worker()` index `out.splitlines()[0]` on
+  `systemctl is-enabled`, which prints nothing at all with no user bus. The stamp is
+  removed, the thread dies with `IndexError` and nothing is said - where
+  `unit_states()` guards the same answer three hundred lines away.
+- Resume now enables the watcher even when `WATCH="0"`.
+- The doctor failed `LOG=/dev/null` and now exempts it in the `logfile` row, but the
+  `log` row above still warns that reading a character device would block.
+- The mutation table has nine rows that match nothing at the current revision, two of
+  them killed by these two commits editing the very lines those rows name. An earlier
+  claim that the harness's `sed` could not express a tray pause row is false: GNU
+  `sed` inserts a line with `\n` and that row is caught.
+- The `KNOWN_SURVIVORS` note for `tray-setunits-invalidate` gives a reason that is not
+  true; the missing invalidate is observable in a stale-state-shaped probe.
+- The entry below still listed three things the pause commit fixed.
+
 ### A carried value is written back with its variables frozen
 
 `setup.sh` reads an existing config through `lib/config.sh`, which answers a value
