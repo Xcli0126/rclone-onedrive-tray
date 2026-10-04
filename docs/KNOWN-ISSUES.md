@@ -99,11 +99,6 @@ test is allowed to touch before anyone starts.
   and the quota row are not cleared the way they are when `REMOTE` moves: they were
   fetched from the binary being left behind, so they can describe the wrong build
   until the next refresh. It needs the same clear-and-re-ask the remote gets.
-- `the delete guard uses the reloaded LOCAL` in `tests/tray.sh` fails about once in
-  twenty runs when the machine is loaded: `_delete_local`'s worker removes the tree
-  before the idle callback that notifies, so the scenario can read the
-  notifications too early. It is the suite's own timing, not a shipped defect, and
-  it is written down because a flake in CI costs a rerun every time.
 - A reload of a config whose `LOCAL` is relative is refused by the delete guard but
   the tray keeps running with it, since only `main()` validates the path when the
   tray starts. Validating it in the reload as well is a few lines; the guard is the

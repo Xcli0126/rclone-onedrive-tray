@@ -1913,7 +1913,12 @@ def scenario_config_reload_fresh():
         data["asked"] = list(asked)
         data["deleted_new"] = wait_for(
             lambda: not os.path.isdir(os.path.join(paths["local_new"], "ordinary")), 8.0)
-        data["told_deleted"] = any("deleted" in body.lower() for body in shown)
+        # The notification is posted from an idle callback after the tree is gone,
+        # so reading it once could land between the two: under load this case
+        # failed about once in twenty runs. Wait for it the way the other cases
+        # wait for a state change.
+        data["told_deleted"] = wait_for(
+            lambda: any("deleted" in body.lower() for body in shown), 8.0)
         data["old_kept"] = os.path.isdir(os.path.join(paths["local_old"], "ordinary"))
         data["sibling_kept"] = os.path.isdir(
             os.path.join(paths["local_new"], "sibling-old"))
