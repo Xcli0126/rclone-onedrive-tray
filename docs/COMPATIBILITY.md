@@ -32,7 +32,10 @@ caught. A full pass is hours - 113 of the 234 rows run `install-flow`, 1m53s eac
 this machine, and 89 run the tray suite, three to four minutes each - so a pass is done
 in pieces: `tests/lib/mutate.sh --suite install-flow` runs one suite's rows, and a
 `RESULTS=` file opens with the commit it was measured at, whether the tree was dirty,
-and which rows the run covered. The fast three suites were swept in full at `47cbedb`:
+and which rows the run covered. `tests/lib/sweep.sh --out DIR` is the pass itself: one
+file per suite, a suite whose file is already there is left alone (so a pass that takes
+hours can be stopped and resumed), `--list` says what is done, and the exit status is
+non-zero if any suite reported a survivor, a skip or a run with no result. The fast three suites were swept in full at `47cbedb`:
 32 rows, 31 caught, 1 survived-by-design, 0 skipped, 0 unresolved. The two slow suites
 have been swept row by row around each change rather than end to end, and that is the
 coverage that exists. `tests/lib/mutate.sh --lint` is the cheap half and CI runs it with
