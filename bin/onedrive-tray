@@ -1561,6 +1561,9 @@ class Tray:
         # The path most recently handed to the indicator. Indicator.new() has
         # already set the "unknown" icon, so that is what is on screen now.
         self.shown_icon = self.icons["unknown"]
+        # The last sentence handed to the channels that are not pixels; see
+        # _publish_state(). None until the menu has been built.
+        self.accessible_state = None
         self.sync_pct = None       # percentage last drawn into the syncing icon
         # The progress arc is redrawn on every poll, so a failure to draw it is
         # reported once rather than once every three seconds.
@@ -1912,6 +1915,14 @@ class Tray:
         dialog.format_secondary_text(body)
         dialog.add_button(cancel, Gtk.ResponseType.CANCEL)
         dialog.add_button(confirm, Gtk.ResponseType.OK)
+        # GTK names a message dialog after its message type - "Question" - and
+        # leaves the window title empty, so that is what a screen reader
+        # announced for every one of these. The question itself is the name the
+        # reader wants. The default answer is the safe one: Return in a
+        # confirmation must not be what rebuilds the baseline or re-signs in.
+        dialog.set_title(text)
+        dialog.get_accessible().set_name(text)
+        dialog.set_default_response(Gtk.ResponseType.CANCEL)
         response = dialog.run()
         dialog.destroy()
         return response == Gtk.ResponseType.OK
@@ -2280,6 +2291,14 @@ class Tray:
         self.item_quota.set_no_show_all(True)
         self.item_quota.set_visible(bool(self.quota))
         self._refresh_checks()
+        # A rebuilt menu is a new Atk.Object with no name of its own, so the
+        # state sentence has to be handed to it again. _reload_config() and a
+        # language change both come through here.
+        self.accessible_state = None
+        self._publish_state(self.item_status.get_label())
+        # Indicator.new() handed the icon over without a description, so the
+        # first state would have a title and no accessible description at all.
+        self.ind.set_icon_full(self.shown_icon, self.accessible_state)
 
     def _build_status_items(self):
         """Header, status, quota and folder rows, and the commands under them."""
@@ -2627,6 +2646,11 @@ class Tray:
             buttons=Gtk.ButtonsType.NONE, text=f"{APP_NAME} {VERSION}")
         dialog.format_secondary_text(self.about_text())
         dialog.add_button(self.t("Close"), Gtk.ResponseType.CLOSE)
+        # The accessible name of a message dialog is its message type, so this
+        # window announced itself as "Information" and had no default action.
+        dialog.set_title(f"{APP_NAME} {VERSION}")
+        dialog.get_accessible().set_name(f"{APP_NAME} {VERSION}")
+        dialog.set_default_response(Gtk.ResponseType.CLOSE)
         dialog.run()
         dialog.destroy()
 
@@ -2947,7 +2971,27 @@ class Tray:
         if path == self.shown_icon:
             return
         self.shown_icon = path
-        self.ind.set_icon_full(path, APP_NAME)
+        # The second argument is the icon's accessible description, which
+        # libayatana-appindicator exports as IconAccessibleDesc. A constant
+        # there says "OneDrive" whether the icon is green, spinning or red.
+        self.ind.set_icon_full(path, self.accessible_state or APP_NAME)
+
+    def _publish_state(self, text):
+        """Hand the state sentence to the channels that are not pixels.
+
+        The panel shows a 22-pixel icon and a badge, and the row that spells the
+        state out is insensitive - which is also what keeps GTK's arrow-key
+        navigation off it - so a screen reader and a keyboard user had no way to
+        reach it. The indicator's title, the icon's accessible description and
+        the menu's own accessible name are three channels that are readable
+        without the menu being opened and without the icon being seen; a panel
+        reads the first two, and a screen reader the third.
+        """
+        if text == self.accessible_state:
+            return
+        self.accessible_state = text
+        self.menu.get_accessible().set_name(text)
+        self.ind.set_title(text)
 
     def _set_sync_progress(self, pct):
         """Redraw the syncing icon with the percentage rclone last reported.
@@ -3305,6 +3349,16 @@ class Tray:
             state = "synced"
         else:
             state = "unknown"
+
+        # The sentence is built and published before the icon is set, so the
+        # accessible description the indicator is handed with a new icon is the
+        # one that belongs to it. The sentence changes more often than the state
+        # does - "Syncing… 41%" - which is why it is not set from the icon.
+        prog = read_progress(log_tail) if syncing else None
+        status_text = self._status_text(syncing, prog, auto, kind, when, hint)
+        self.item_status.set_label(status_text)
+        self._publish_state(status_text)
+
         if state != self.state:
             self.state = state
             self._set_icon(self.icons[state])
@@ -3312,9 +3366,6 @@ class Tray:
         self._announce_finish(syncing, kind, when, hint,
                               (when, tag, raw) if kind == "error" else None)
 
-        prog = read_progress(log_tail) if syncing else None
-        self.item_status.set_label(
-            self._status_text(syncing, prog, auto, kind, when, hint))
         self._set_sync_progress(prog["pct"] if prog else None)
 
         self._show_quota()
@@ -3371,6 +3422,13 @@ def _settings_dialog_class():
             self.markers_busy = False
             self.set_modal(True)
             self._build()
+            # Nothing was the default widget, so Return had nowhere to go and a
+            # keyboard user had to Tab to Save every time. A Gtk.Button built
+            # from a label does not ask for the default state (can-default is
+            # FALSE) and grab_default() does nothing to one that has not asked,
+            # so set_default_response() alone changes nothing.
+            self.save_button.set_can_default(True)
+            self.set_default_response(Gtk.ResponseType.OK)
 
         # -------------------------------------------------- widgets
         def _build(self):
@@ -3395,6 +3453,15 @@ def _settings_dialog_class():
                 grid.attach(label, 0, index, 1, 1)
                 if widget is not None:
                     grid.attach(widget, 1, index, 1, 1)
+                    # A Gtk.SpinButton has no accessible name at all, and a
+                    # Gtk.ComboBoxText is named after whatever is selected, so a
+                    # screen reader announced "5" and "English" with nothing
+                    # saying which row they were on. The name is the row's own
+                    # text, and set_mnemonic_widget() is what records the
+                    # label-for/labelled-by relation a reader follows from the
+                    # control back to the words beside it.
+                    label.set_mnemonic_widget(widget)
+                    widget.get_accessible().set_name(text)
 
             self.combo_lang = Gtk.ComboBoxText()
             for value, text in (("", self.t("Follow the system")),

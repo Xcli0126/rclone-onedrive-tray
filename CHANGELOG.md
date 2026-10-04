@@ -36,6 +36,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The tray's state lived only in pixels. The panel shows a 22-pixel icon with a
+  badge, the indicator is not a `Gtk.Widget` and so has no accessible object of its
+  own, its title was null in every state, and its icon description was the constant
+  "OneDrive" whether the icon was syncing, failed or paused; the one row that spells
+  the state out is insensitive, which is also what keeps GTK's arrow keys off it. The
+  same sentence goes to the indicator's title, the icon's accessible description and
+  the menu's own accessible name now. The settings dialog's labels name their
+  controls and record the label-for relation, both spin buttons and both combo boxes
+  had no accessible name at all (a combo was named after whatever was selected), the
+  dialog has a default action so Return saves, and the three message dialogs are
+  named after their question instead of after their message type, with the safe
+  answer as the default.
 - `onedrive-doctor` had no idea a pause existed, so a paused install read exactly
   like a healthy one: every run is turned away by the wrapper, the log is quiet, the
   timer is active, and the summary said nothing failed. It reports the pause and the

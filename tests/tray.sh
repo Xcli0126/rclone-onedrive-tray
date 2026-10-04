@@ -9,7 +9,7 @@
 # GDK_BACKEND at it. DISPLAY is set to a name that does not exist purely to
 # satisfy the tray's own guard, which only asks whether the variable is set.
 #
-# Everything the tray shells out to (systemctl, systemd-run, rclone, xdg-open,
+# Everything the tray shells out to (systemctl, rclone, xdg-open,
 # onedrive-check, onedrive-sync) is a stub that records its argv, so the live
 # user manager and the live rclone remote are never asked anything. Every
 # observation is made by a small Python driver, which prints one JSON object per
@@ -147,13 +147,6 @@ fi
 case " \$* " in
     *" enable --now "*) rm -f "$WORK/calls/timer-disabled" ;;
 esac
-# The transient resume timer a pause arms. Whether it survived is what decides
-# if the pause still has anything that will end it, so one file makes it answer
-# "active" and its absence makes it answer the way a missing unit does.
-if [ "\$1 \$2 \$3" = "--user is-active rclone-onedrive-tray-resume.timer" ]; then
-    [ -f "$WORK/calls/pause-timer-active" ] && { printf 'active\n'; exit 0; }
-    exit 3
-fi
 for arg in "\$@"; do
     case "\$arg" in
         is-enabled)
@@ -171,17 +164,6 @@ done
 exit 0
 STUB
 
-cat > "$WORK/stubs/systemd-run" <<STUB
-#!/bin/sh
-printf 'systemd-run %s\n' "\$*" >> "$WORK/calls/calls"
-# A resume that cannot be scheduled is a pause nothing will end; the tray has to
-# end it rather than leave the units disabled behind a promise.
-if [ -f "$WORK/calls/systemd-run-fail" ]; then
-    printf 'mock systemd-run failure\n' >&2
-    exit 1
-fi
-exit 0
-STUB
 
 # These three only have to record that they were asked and with what.
 for name in xdg-open onedrive-check onedrive-sync; do
@@ -682,7 +664,7 @@ def scenario_folder_delete():
 
     asked = []
 
-    class FakeDialog:
+    class FakeDialog(DialogDouble):
         def __init__(self, *a, **k):
             asked.append(k.get("text", ""))
 
@@ -837,6 +819,29 @@ def scenario_lock_second():
     return {"exit_code": 0}
 
 
+class DialogDouble:
+    """The rest of the Gtk.MessageDialog surface these fakes stand in for.
+
+    The tray names its message dialogs (a message dialog's own accessible name
+    is its message type, "Question" or "Information", which is not the question
+    being asked) and gives them a default answer. A double that knows only
+    format_secondary_text(), add_button(), run() and destroy() therefore stops
+    the handler under test with an AttributeError the real class never raises.
+    """
+
+    def set_title(self, title):
+        self.title = title
+
+    def set_default_response(self, response):
+        self.default_response = response
+
+    def get_accessible(self):
+        return self
+
+    def set_name(self, name):
+        self.accessible_name = name
+
+
 def fake_message_dialog(store, response):
     """A drop-in for Gtk.MessageDialog that records what a handler put in it.
 
@@ -848,7 +853,7 @@ def fake_message_dialog(store, response):
     answers with.
     """
 
-    class FakeDialog:
+    class FakeDialog(DialogDouble):
         def __init__(self, *a, **k):
             store["text"] = k.get("text", "")
             store["buttons"] = []
@@ -1692,7 +1697,7 @@ def scenario_excluded_name():
     shown = []
     asked = []
 
-    class CountingDialog:
+    class CountingDialog(DialogDouble):
         """Accepts every confirmation and remembers how many there were."""
 
         def __init__(self, *a, **k):
@@ -2165,7 +2170,7 @@ def scenario_config_reload_fresh():
 
     asked = []
 
-    class FakeDialog:
+    class FakeDialog(DialogDouble):
         def __init__(self, *a, **k):
             asked.append(k.get("text", ""))
 
@@ -2927,19 +2932,15 @@ def scenario_log_cache_moved():
 
 
 def scenario_pause_survives_poll():
-    """A pause the tray arranged survives the poll that follows it.
+    """A pause the tray wrote survives the polls that follow it.
 
-    The enabled answer is cached to save a fork per tick, and the tray itself
-    disables the units when it pauses. Reusing the answer from before the pause
-    reported automatic sync as on three seconds later, which deleted the pause
-    stamp and left the menu saying sync was off.
+    The pause is the stamp, and the timer stays enabled, so what the poll has to
+    do is read the stamp before the timer's cached answer and keep saying paused.
+    A cached "enabled" read as automatic sync on, and the menu then wiped the
+    stamp that was the whole pause.
     """
     tray = build()
     wait_for(lambda: getattr(tray, "auto_seen", None) == "on", 8.0)
-    # What pause_for() leaves behind: the units disabled, which the stub answers
-    # from this marker, and an is-active that stays unhappy either way.
-    with open(os.path.join(os.environ["TRAY_CALLS"], "timer-disabled"), "w"):
-        pass
     clear_calls()
     tray.pause_for(30)
     stamped = wait_for(lambda: os.path.exists(MODULE.PAUSE_STAMP), 8.0)
@@ -4115,6 +4116,44 @@ def scenario_pause_sync_now():
     return data
 
 
+def scenario_a11y_state():
+    """The state reaches the channels that are not pixels.
+
+    The panel shows a 22-pixel icon with a badge, and the row that spells the state
+    out is insensitive - which is also what keeps GTK's arrow keys off it - so a
+    screen reader and a keyboard user had nothing: the menu's accessible name was
+    null and the indicator had no title at all. The same sentence goes to the menu's
+    accessible name, the indicator's title and the icon's accessible description,
+    and the settings dialog's labelled controls are named after their rows.
+    """
+    tray = build()
+    pump(0.8)
+    controls = {}
+
+    def visit(node):
+        if isinstance(node, (Gtk.SpinButton, Gtk.ComboBoxText)):
+            controls[type(node).__name__ + ":" + (node.get_accessible().get_name() or "")] = True
+        if isinstance(node, Gtk.Container):
+            for child in node.get_children():
+                visit(child)
+
+    data = {
+        "menu_name": tray.menu.get_accessible().get_name() or "",
+        "state_text": tray.item_status.get_label() or "",
+        "ind_title": tray.ind.get_title() or "",
+        "icon_desc": tray.ind.get_icon_desc() or "",
+        "status_sensitive": tray.item_status.get_sensitive(),
+    }
+    dialog = MODULE.SettingsDialog(tray)
+    dialog.show_all()
+    pump(0.3)
+    visit(dialog.get_content_area())
+    data["controls"] = sorted(controls)
+    data["default_is_save"] = dialog.get_default_widget() is dialog.save_button
+    dialog.destroy()
+    return data
+
+
 def scenario_lock_inode():
     """release_lock() removes only the file it locked, and a second take works.
 
@@ -4402,6 +4441,7 @@ SCENARIOS = {
     "reauth-not-done": scenario_reauth_not_done,
     "log-forged-marker": scenario_log_forged_marker,
     "pause-sync-now": scenario_pause_sync_now,
+    "a11y-state": scenario_a11y_state,
     "stale-state": scenario_stale_state,
     "stale-state-cache": scenario_stale_state_cache,
     "relative-local": scenario_relative_local,
@@ -4873,8 +4913,7 @@ if "paused" in d["pause_label"].lower():
     raise SystemExit(1)
 '
 fi
-rm -f "$WORK/calls/systemd-run-fail" "$WORK/calls/timer-disabled" \
-      "$WORK/calls/pause-timer-active" \
+rm -f "$WORK/calls/timer-disabled" "$WORK/calls/notimer" \
       "$WORK/cache/rclone-onedrive-tray/paused-until"
 
 title "A disabled timer is not a pause"
@@ -6121,6 +6160,46 @@ if not d["busy_while_busy"] or not d["insensitive_while_busy"]:
 if not d["finished"] or d["busy_after"] or not d["sensitive_after"]:
     print("finished=%r busy_after=%r sensitive_after=%r"
           % (d["finished"], d["busy_after"], d["sensitive_after"]))
+    raise SystemExit(1)
+'
+fi
+
+title "The state without the pixels"
+# The status row is the only sentence that spells the state out, and it is
+# insensitive so GTK's arrow keys skip it. Everything else a reader can reach is
+# named from that sentence now.
+if run_driver a11y-state; then
+    check "the menu and the indicator carry the same sentence as the status row" json_py '
+if not d["state_text"]:
+    print("the status row is empty, so there is nothing to publish")
+    raise SystemExit(1)
+if d["menu_name"] != d["state_text"] or d["ind_title"] != d["state_text"]:
+    print("menu=%r title=%r status=%r"
+          % (d["menu_name"], d["ind_title"], d["state_text"]))
+    raise SystemExit(1)
+'
+    check "and the icon describes itself with a sentence, not a constant" json_py '
+# The description is handed over with the icon, and the sentence changes more often
+# than the icon does, so it is the sentence at the last icon change and not
+# necessarily the one on screen now. What it must not be is the constant it was.
+if not d["icon_desc"] or d["icon_desc"] == "OneDrive":
+    print("icon description=%r" % (d["icon_desc"],))
+    raise SystemExit(1)
+if not d["status_sensitive"] is False:
+    print("the status row is sensitive now, so the state should be reachable by "
+          "arrow keys and this case is out of date")
+    raise SystemExit(1)
+'
+    check "every labelled control in the settings dialog has a name" json_py '
+unnamed = [c for c in d["controls"] if c.endswith(":")]
+if unnamed:
+    print("controls with no accessible name: %r" % (unnamed,))
+    raise SystemExit(1)
+if not d["controls"]:
+    print("no spin button or combo box was found in the dialog")
+    raise SystemExit(1)
+if not d["default_is_save"]:
+    print("Return has no default action in the settings dialog")
     raise SystemExit(1)
 '
 fi

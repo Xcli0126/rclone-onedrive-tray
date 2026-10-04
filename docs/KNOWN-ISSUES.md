@@ -115,36 +115,27 @@ had added that could not fail. Two things are still open, and one correction:
   old reader as well, and the fix is a decision: write carried values raw, or expand
   them as the shell would.
 
-### The panel's state is only in pixels
+### What is left of the accessibility review
 
-Round sixteen's accessibility reviewer walked the real menu and the real settings
-dialog with ATK, on a private Broadway display, and measured what a screen reader
-gets. The fix for the first finding is in that reviewer's patch, with a test that
-drives it; these are the rest, and the whole set is one pass of work rather than
-eight.
+The state sentence reaches the indicator's title, the icon's accessible description
+and the menu's own accessible name, the settings dialog's labelled controls carry
+names and label-for relations, and the dialogs have titles and default actions. Four
+things from that review are decisions rather than work, and they are recorded here
+so the next reader knows they were considered:
 
-- The tray's state has no text channel. The AppIndicator is not a `Gtk.Widget`, so
-  it has no ATK object at all: `get_title()` is null in every state and
-  `get_icon_desc()` is the constant "OneDrive" whether the icon is syncing, failed
-  or paused. Six states (syncing with a percentage, error with a reason, paused
-  until a time, automatic sync off, timer unknown, icon hidden) are conveyed by
-  colour and a badge and by nothing else. `set_label`, `set_title` and
-  `set_attention_icon` exist for exactly this and were never called. The patched
-  version publishes the same sentence the status row carries.
-- The one sentence that spells the state out is an insensitive menu item, and GTK's
-  arrow keys skip insensitive items: 20 presses of Down select 13 items and never
-  reach `menu/0` or `menu/1`. The menu's own accessible name is null too.
-- In the settings dialog both spin buttons have accessible name `None` (a reader
-  announces a bare "5.0"), and both combo boxes are named after their current
-  selection, so the Language row is called "English" and the bandwidth row
-  "Unlimited". None of the 15 controls has an ATK relation to its label, and no
-  label carries a mnemonic: the dialog cannot be driven from the keyboard.
-- The dialog has no default action, and all three modal dialogs announce as their
-  message type ("Sign in again?" reads as "Question") with no default button.
-- A successful Save is indistinguishable from Cancel in the accessible tree: the
-  same names, an empty status line, and the window disappears either way.
-- The access-check warning appears as a plain label with no alert node, so nothing
-  announces it.
+- No mnemonics. Alt+letter shortcuts would mean underscores inside the translation
+  keys, which is a change to every string in the table and to how translators see
+  them, and the settings window is reachable and usable with Tab and Return now.
+- A save and a cancel are still indistinguishable to a screen reader: the window
+  disappears either way and GTK 3 has no live region to announce the outcome in. The
+  tray's notifications cover the changes that matter (the sync, a failure, a pause),
+  and a settings save is reported by the settings that change.
+- The status rows stay insensitive, so arrow keys still skip them. Making them
+  sensitive would put "No sync recorded yet" and the quota line in the tab order of
+  a menu, where activating them does nothing.
+- `set_label` is not used. It draws text beside the icon in every panel, which is a
+  visible product change rather than an accessible one; the tooltip-sized channels
+  above carry the sentence without changing what the panel looks like.
 
 ### `Tray` is one 900-line class
 

@@ -346,3 +346,7 @@ tray-migration-leaves-units-off	bin/onedrive-tray	s|^        if disabled:$|     
 # says a pause is in force.
 sync-pause-long-value	bin/onedrive-sync	s|\[ "${#pause_due}" -gt 10 \]|[ "${#pause_due}" -gt 999 ]|	install-flow
 doctor-pause-row	bin/onedrive-doctor	s|^if \[ -f "$pause_stamp" \]; then$|if false; then|	install-flow
+# round twenty-three: the state sentence the panel cannot show, and the names of
+# the settings dialog's labelled controls.
+tray-state-not-published	bin/onedrive-tray	s|        self.menu.get_accessible().set_name(text)|        pass|	tray
+tray-dialog-control-unnamed	bin/onedrive-tray	s|                    widget.get_accessible().set_name(text)|                    pass|	tray

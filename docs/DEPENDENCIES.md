@@ -18,7 +18,7 @@ some distributions is too old to sync safely.
 | rclone 1.66 or newer | `rclone`, or a current build in `/usr/local/bin` | every sync | Nothing syncs. Below 1.66 `--recover`, `--max-lock`, `--conflict-resolve` and `--conflict-loser` do not exist, so every run is refused with an unknown flag |
 | `flock` | `util-linux` (essential) | `onedrive-sync` | The wrapper refuses to start, because running without the lock lets a manual sync and the timer corrupt each other's listings |
 | `bash` 4.4+ | `bash` (essential) | all shell scripts | Arrays used under `set -u` misbehave |
-| systemd, user session | `systemd` | timer, watcher, timed pause | No scheduled sync at all |
+| systemd, user session | `systemd` | timer and watcher; a timed pause is a file `onedrive-sync` reads, so it needs systemd only for the schedule | No scheduled sync at all |
 | `python3` | `python3` | `onedrive-tray` | No tray icon |
 | PyGObject | `python3-gi` | `onedrive-tray` | The tray exits with a message naming the packages to install. The installer warns and carries on without the icon, so the sync half still works |
 | GTK 3 typelib | `gir1.2-gtk-3.0` | `onedrive-tray` | Same |
