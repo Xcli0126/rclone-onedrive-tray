@@ -75,10 +75,15 @@ still open from that review:
   which is a limit rather than an answer: without it a file holding thousands of
   `${A:-` recursed until Python raised. Answering those forms would mean a shell, and a shell for a
   config value the tray only ever reads as a path or a command line is a bigger thing
-  than the three forms are worth. Two smaller differences sit beside it: a line that
+  than the three forms are worth. Three smaller differences sit beside it. A line that
   assigns and then runs a command leaves the key unset in the shell while the tray
-  reads the assignment, and a variable's own value is inserted as it stands, as bash
-  inserts it.
+  reads the assignment. An ANSI-C word (`KEY=$'a\tb'`) is read as the dollar sign
+  followed by a single-quoted string, so the tray answers `$a\tb` where the shell
+  answers a tab: the form is C escapes, which this reader does not implement, and it is
+  measured rather than assumed. A value quoted across two lines (`KEY="one<newline>two"`)
+  is read as its first line, because the parser is line-based; bash reads both, and a
+  wizard re-run repairs the line to what this reader sees, which the changelog's carry
+  entry describes. A variable's own value is inserted as it stands, as bash inserts it.
 
 - `Tray` stays one class. The audit that suggested splitting it into a menu class
   and a status class was right that it is 900 lines, and wrong that the size is the
