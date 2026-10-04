@@ -538,6 +538,108 @@ check "and every key after that line is still set when it is sourced" \
              && [ "${RCLONE+set}" = set ] && [ "${SHOW_ICON+set}" = set ]' _ "$CARRY_CFG"
 rm -f "$CARRY_CFG.sourced-marker"
 
+# ------------------------------------------------- every hand-written shape
+# The general form of both carry defects the reviews found, rather than one case per
+# defect: whatever the old file held, what the wizard writes has to source with every
+# key the template writes still set, and where the old file already did that, with the
+# values bash read from it. A line that was valid on its own and swallowed the keys
+# after it (a here-doc opener) fails the first half; a frozen `$VAR`, a truncated
+# single-quoted value and a value a scanner rejected fail the second.
+title "a hand-written value, through the wizard and into bash"
+SHAPE_KEYS="REMOTE LOCAL UNIT_NAME INTERVAL_MIN WATCH MAX_DELETE BW_LIMIT CHECK_ACCESS CHECK_FILENAME BISYNC_ARGS FILTERS_FILE EXCLUDE_FOLDERS_FILE LOG OPEN_APP_CMD OPEN_APP_NAME UI_LANG WATCH_DEBOUNCE WATCH_SETTLE WATCH_EXCLUDE RETRIES RETRY_DELAY MAX_LOG_BYTES SHOW_ICON NOTIFY_ON_SUCCESS RCLONE"
+CARRY_KEYS="MAX_DELETE BW_LIMIT CHECK_ACCESS CHECK_FILENAME BISYNC_ARGS LOG OPEN_APP_CMD OPEN_APP_NAME UI_LANG WATCH_DEBOUNCE WATCH_SETTLE WATCH_EXCLUDE RETRIES RETRY_DELAY MAX_LOG_BYTES SHOW_ICON NOTIFY_ON_SUCCESS RCLONE"
+
+bash_dump() {  # bash_dump <config> -> KEY=<value> per line, nothing when it is not shell
+    # shellcheck disable=SC2016  # the loop and ${!key-} belong to the inner bash
+    env HOME="$CARRY_HOME" XDG_CACHE_HOME="$CARRY_HOME/.cache" bash -c '
+        . "$1" >/dev/null 2>&1 || exit 1
+        for key in $2; do printf "%s=<%s>\n" "$key" "${!key-}"; done' \
+        _ "$1" "$SHAPE_KEYS"
+}
+
+shape_ok() {  # shape_ok <line> [preserve] -- the whole invariant, printing what broke
+    # `preserve` is 0 for the shapes that are not a plain assignment to bash at all: a
+    # here-doc opener with no body assigns "" and reads stdin, and a trailing backslash
+    # joins the line after it. The wizard refuses both and writes the value its own
+    # reader sees, which is a repair rather than a reproduction, so comparing the two
+    # readings would be comparing two different repairs and calling one of them wrong.
+    local line="$1" preserve="${2:-1}" key before after
+    { grep -v "^${line%%=*}=" "$CARRY_CFG"
+      printf '%s\n' "$line"
+    } > "$CARRY_CFG.new" && mv -f "$CARRY_CFG.new" "$CARRY_CFG"
+    before="$(bash_dump "$CARRY_CFG" || true)"
+    if ! wizard_run --interval 9 >/dev/null 2>&1; then
+        echo "the wizard refused a config holding: $line"
+        return 1
+    fi
+    after="$(bash_dump "$CARRY_CFG" || true)"
+    if [ -z "$after" ]; then
+        echo "the config it wrote does not source: $line"
+        bash -n "$CARRY_CFG" 2>&1 | head -2
+        return 1
+    fi
+    for key in $SHAPE_KEYS; do
+        if ! grep -q "^$key=" <<<"$after"; then
+            echo "$key is unset after a re-run over: $line"
+            return 1
+        fi
+    done
+    # Only where the file the wizard started from was fully readable: a file that was
+    # already broken is repaired rather than reproduced, which is the other half.
+    if [ "$preserve" = 1 ] &&
+            [ "$(grep -c '=' <<<"$before")" -eq "$(printf '%s\n' "$SHAPE_KEYS" | wc -l)" ]; then
+        for key in $CARRY_KEYS; do
+            if [ "$(grep "^$key=" <<<"$before")" != "$(grep "^$key=" <<<"$after")" ]; then
+                echo "bash read $(grep "^$key=" <<<"$before") from: $line"
+                echo "and        $(grep "^$key=" <<<"$after") from the wizard's config"
+                return 1
+            fi
+        done
+    fi
+}
+
+while IFS= read -r shape; do
+    [ -n "$shape" ] || continue
+    preserve=1
+    case "$shape" in
+        *'<<'*|*\\) preserve=0 ;;
+    esac
+    check "a config holding $(printf '%s' "$shape" | cut -c1-40) survives a re-run" \
+        shape_ok "$shape" "$preserve"
+done <<'SHAPES'
+LOG=${XDG_CACHE_HOME:-$HOME/.cache}/sync.log
+LOG="${XDG_CACHE_HOME:-$HOME/.cache}/sync.log"
+LOG=~/sync.log
+LOG="~/sync.log"
+LOG=/tmp/plain.log
+LOG="a b.log"
+LOG=/tmp/a\ b.log
+LOG=${HOME}/logs/sync.log
+OPEN_APP_CMD="obsidian \"$HOME/Notes\""
+OPEN_APP_NAME='single quoted'
+OPEN_APP_NAME="the app"
+OPEN_APP_CMD=$HOME/bin/open.sh
+OPEN_APP_CMD=$(command -v rclone)
+OPEN_APP_CMD=`echo hi`
+LOG=$(id)
+MAX_DELETE=$((1+1))
+BISYNC_ARGS=--resilient --recover --max-lock 2m
+OPEN_APP_CMD=~/bin/open.sh
+OPEN_APP_CMD=<<X
+OPEN_APP_CMD="one
+OPEN_APP_CMD=abc\
+LOG="/tmp/unterminated
+BW_LIMIT=1M
+BW_LIMIT="1M"
+BW_LIMIT=
+BISYNC_ARGS="--resilient --recover"
+BISYNC_ARGS=--resilient
+MAX_DELETE=100
+MAX_DELETE="1(x"
+CHECK_FILENAME='RCLONE_TEST'
+SHOW_ICON=1
+SHAPES
+
 # ------------------------------------------------- the shipped config and XDG
 # install.sh copies config/config.example verbatim when no config exists, and the
 # example hardcoded $HOME/.config and $HOME/.cache while every script resolves

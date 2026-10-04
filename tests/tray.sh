@@ -1975,10 +1975,9 @@ def scenario_config_comments():
     whitespace before the rule was applied, and `KEY=#x` and `KEY=   #x` then look
     the same to it. bash keeps the first and empties the second.
 
-    One deliberate divergence, and the shell side says so where it is asserted:
-    bash removes the backslash from an unquoted `\\#`, and this reader keeps it.
-    That is the tray's writer escaping `\\`, `"` and `$` with no reader to undo it,
-    the same family as "Four parsers for one file format" in KNOWN-ISSUES.
+    An unquoted backslash escapes the character after it, as bash has it, and an
+    unquoted value ends at its first space: both used to be read differently here,
+    and the shell side names each shape it checks.
     """
     # A table, so the shell side names what it is checking rather than indexing
     # into a list whose order nothing else depends on.
@@ -1994,12 +1993,14 @@ def scenario_config_comments():
         # a quoted value, and a # that directly follows the =.
         "MIXED": 'value#1  # comment',
         "QUOTED": '"a # b"',
+        # The space in front of `--tag#1` ends the value for bash, which then runs
+        # `--tag#1` as a command; the reader used to keep the whole text.
         "TAGGED": 'foo --tag#1',
         "UNQUOTED": "a#b",
         "SINGLE": "'b # c'",
         "BARE": "#x",
-        # Kept with its backslash, which bash would have eaten: see the docstring
-        # and the check that names it.
+        # The backslash escapes the `#`, so it is not a comment, and the shell then
+        # removes the backslash: the value is `x#y`.
         "ESCAPED": "x\\#y",
     }
     config = os.path.join(WORK, "comments-config")
@@ -5192,7 +5193,7 @@ if d["open_app_cmd"] != "foo --tag#1":
     raise SystemExit(1)
 '
     check "a # inside a word is not a comment" json_py '
-cases = {"TAGGED": "foo --tag#1", "UNQUOTED": "a#b", "MIXED": "value#1"}
+cases = {"TAGGED": "foo", "UNQUOTED": "a#b", "MIXED": "value#1"}
 for key, want in cases.items():
     got = d["values"].get(key)
     if got != want:
@@ -5221,16 +5222,12 @@ if d["values"].get("SPACED_EMPTY") != "":
           % (d["values"].get("SPACED_EMPTY"),))
     raise SystemExit(1)
 '
-    # bash removes the backslash from an unquoted \# and this reader keeps it.
-    # The divergence is deliberate: the tray's own writer escapes \, " and $
-    # with no reader to undo it (KNOWN-ISSUES, "Four parsers for one file
-    # format"), so unescaping one character here would be a third answer rather
-    # than a fix. The value below is what this reader documents, not what bash
-    # would produce for the same line.
-    check "an escaped # keeps its backslash, which is this reader's answer" json_py '
-if d["values"].get("ESCAPED") != "x\\#y":
-    print("ESCAPED=%r, this reader keeps the backslash (bash reads x#y)"
-          % (d["values"].get("ESCAPED"),))
+    # An unquoted \# is not a comment to either reader, and bash removes the
+    # backslash: this used to be the one deliberate divergence here, and the
+    # reader follows the shell now.
+    check "an escaped # is not a comment, and the backslash goes" json_py '
+if d["values"].get("ESCAPED") != "x#y":
+    print("ESCAPED=%r, bash reads x#y" % (d["values"].get("ESCAPED"),))
     raise SystemExit(1)
 '
     check "a quoted value before the comment is unchanged" json_py '

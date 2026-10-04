@@ -44,22 +44,30 @@ still open from that review:
 
 ## Accepted, with the reason
 
+- A line that assigns and then runs a command is read as the assignment. `KEY=a true`
+  leaves `KEY` unset in the shell that sources the file - the assignment is a prefix of
+  the command, not a setting - while the tray reads `a`, which is what it does with any
+  other line. Modelling it would mean the reader deciding for every line whether it is a
+  command, and the shape is not a config value in any useful sense; it is written down
+  rather than guessed at. The value half of the same line is fixed: an unquoted value
+  ends at its first space, quotes and backslashes are removed the way bash removes them,
+  and a tilde is expanded before them.
 - A parameter form this reader does not implement is left exactly as the file wrote
   it. `shell_value()` answers `$VAR`, `${VAR}`, `${VAR:-word}`, `${VAR-word}`,
   `${VAR:+word}`, `${VAR:=word}`, a nested expansion inside the word, and the quoting
   of that word; `${VAR:?message}`, `${VAR:offset}` and `${VAR:offset:length}` are
   printed back as written, and so are the forms this reader has no answer for at all:
-  `${A#prefix}`, `${A%suffix}`, `${#A}`, a backtick substitution and an unterminated
-  `${`. Tests pin the first three, and pin the reason it is safe: the tray parses a
-  config rather than running one, so a `$(command)` in a value stays text and is never
+  `${A#prefix}`, `${A%suffix}`, `${#A}`, a backtick and an unterminated `${`. Tests
+  pin all five, and pin the reason it is safe: the tray parses a config rather than
+  running one, so a `$(command)` or a backtick in a value stays text and is never
   executed. A value nested more than twenty expansions deep is also left as written,
   which is a limit rather than an answer: without it a file holding thousands of
   `${A:-` recursed until Python raised. Answering those forms would mean a shell, and a shell for a
   config value the tray only ever reads as a path or a command line is a bigger thing
-  than the three forms are worth. Two smaller divergences sit beside it: a backslash
-  escape in an unquoted value is kept rather than removed (`x\#y`), which
-  `strip_inline_comment()` explains, and a variable's own value is inserted as it
-  stands, as bash inserts it.
+  than the three forms are worth. Two smaller differences sit beside it: a line that
+  assigns and then runs a command leaves the key unset in the shell while the tray
+  reads the assignment, and a variable's own value is inserted as it stands, as bash
+  inserts it.
 
 - `Tray` stays one class. The audit that suggested splitting it into a menu class
   and a status class was right that it is 900 lines, and wrong that the size is the

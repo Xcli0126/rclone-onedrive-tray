@@ -278,7 +278,7 @@ def config_utf8_problem(exc: UnicodeDecodeError, path: str = CONFIG_FILE) -> str
 
 
 def shell_value(raw: str) -> str:
-    """One config value, as bash reads it out of the file it sources.
+    r"""One config value, as bash reads it out of the file it sources.
 
     The file is written by `shell_quote_value()` and read by three programs: this
     one, `onedrive-sync` with `.`, and the installers with the shared sed reader in
@@ -297,9 +297,11 @@ def shell_value(raw: str) -> str:
     the tray describing a different file than the one the wrapper syncs, LOCAL
     among them, and LOCAL is the root the folder menu's delete guard checks.
 
-    The one deliberate divergence left is an unquoted backslash-hash (`x\\#y`):
-    bash removes the backslash, this keeps it, and strip_inline_comment() says
-    why.
+    A backslash outside quotes escapes the character after it, as bash has it, so
+    `KEY=~/My\ Docs` is one word and `KEY=x\#y` keeps its `#`; the comment stripping
+    above already ran, which is why the escaped `#` is still a `#` and not a comment.
+    An unquoted value also ends at the first whitespace: `KEY=a b` is `a`, and the
+    shell runs `b`.
     """
     text = strip_inline_comment(raw).strip()
     if len(text) >= 2 and text[0] == "'" and text[-1] == "'":
@@ -307,7 +309,12 @@ def shell_value(raw: str) -> str:
     quoted = len(text) >= 2 and text[0] == '"' and text[-1] == '"'
     if quoted:
         text = text[1:-1]
-    return expand_shell_text(text, quoted)
+    # A tilde is expanded by the shell before anything else and only outside quotes,
+    # and the word after it still has its own quoting: `~/"My One Drive"` is one
+    # directory. Doing it here rather than on the finished value is what makes those
+    # two halves meet, and an earlier attempt at this expanded the tilde of a value
+    # that still held the quotes, so the tray read a path the shell never produced.
+    return expand_shell_text(text, quoted, tilde=not quoted)
 
 
 def _matching_brace(text: str, start: int):
@@ -349,7 +356,7 @@ def _parameter_word(inner: str):
     return None, None
 
 
-def _expand_word(word: str, quoted: bool, depth: int) -> str:
+def _expand_word(word: str, quoted: bool, depth: int, tilde: bool = False) -> str:
     """The word of a parameter expansion, expanded the way the shell expands it.
 
     Quoting inside the braces is quoting syntax, and which quotes those are depends
@@ -366,23 +373,14 @@ def _expand_word(word: str, quoted: bool, depth: int) -> str:
         # Only outside double quotes: inside them a single quote is an ordinary
         # character, which is what bash answers with.
         return word[1:-1]
-    return expand_shell_text(word, quoted, depth)
+    # A tilde in the word is expanded in the context the value as a whole is in, and
+    # the word of a parameter expansion is one of the places bash expands one:
+    # `A=${U:-~/x}` is a home directory, `A="${U:-~/x}"` is not.
+    return expand_shell_text(word, quoted, depth, tilde=tilde and not quoted)
 
 
-def expand_tilde_words(value: str) -> str:
-    """A leading `~` in an unquoted assignment, expanded the way bash expands it.
-
-    Bash expands a tilde at the start of an assignment and after every `:` in one,
-    and only where the word is unquoted: `A=~/x:~/.y` is two home directories and
-    `A="~/x"` is the text. The quoting is already gone here, so it is applied to
-    each `:`-separated part that starts with a tilde, which is what the shell does
-    with the parts it can see.
-    """
-    return ":".join(os.path.expanduser(part) if part.startswith("~") else part
-                    for part in value.split(":"))
-
-
-def expand_shell_text(text: str, quoted: bool, depth: int = 0) -> str:
+def expand_shell_text(text: str, quoted: bool, depth: int = 0,
+                      tilde: bool = False) -> str:
     """One shell word: `$VAR`, `${VAR}`, `${VAR:-fallback}` and the forms beside it.
 
     The fallback is a shell word of its own and is expanded as one, which is the
@@ -410,12 +408,57 @@ def expand_shell_text(text: str, quoted: bool, depth: int = 0) -> str:
         return text
     out = []
     index = 0
+    # The quoting of the value as a whole, and the quote regions a shell also removes
+    # inside one: `KEY=/tmp/"a b".log` is one path, and the quotes are not part of it.
+    # A single-quoted region is literal, a double-quoted one expands `$` and lets a
+    # backslash escape.
+    mode = '"' if quoted else None
     while index < len(text):
         char = text[index]
-        if quoted and char == "\\" and index + 1 < len(text) and text[index + 1] in '"\\$`':
-            out.append(text[index + 1])
-            index += 2
+        if mode == "'":
+            if char == "'":
+                mode = None
+            else:
+                out.append(char)
+            index += 1
             continue
+        if char == "\\" and index + 1 < len(text):
+            if mode == '"':
+                # Inside double quotes a backslash escapes only these four; before
+                # anything else it stays.
+                if text[index + 1] in '"\\$`':
+                    out.append(text[index + 1])
+                    index += 2
+                    continue
+                out.append(char)
+                index += 1
+                continue
+            if mode is None:
+                # Unquoted, it escapes whatever follows, which is how `~/My\ Docs`
+                # is one word and how a `#` stops being a comment.
+                out.append(text[index + 1])
+                index += 2
+                continue
+        if mode is None and char in " \t":
+            # An unquoted value ends at the first whitespace: `KEY=a b` is `a` to the
+            # shell, which then runs `b`, and this reader used to keep the whole text.
+            break
+        if char == "'" and mode is None:
+            mode = "'"
+            index += 1
+            continue
+        if char == '"':
+            mode = None if mode == '"' else '"'
+            index += 1
+            continue
+        if (tilde and char == "~" and mode is None
+                and (index == 0 or text[index - 1] == ":")):
+            word = re.match(r"~[A-Za-z0-9_.-]*", text[index:]).group(0)
+            home = os.path.expanduser(word)
+            if home != word:
+                out.append(home)
+                index += len(word)
+                continue
         if char == "$" and text.startswith("${", index):
             named = re.match(r"\$\{(\w+)", text[index:])
             if named:
@@ -439,12 +482,13 @@ def expand_shell_text(text: str, quoted: bool, depth: int = 0) -> str:
                     continue
                 value = os.environ.get(name, "")
                 if op == ":+":
-                    out.append(_expand_word(word, quoted, depth + 1) if value else "")
+                    out.append(_expand_word(word, quoted, depth + 1, tilde)
+                               if value else "")
                 else:
                     # `:-` and `:=` take the word for an empty value too, `-` only
                     # for an unset one, which is the difference between the forms.
                     if value == "" and (op != "-" or name not in os.environ):
-                        value = _expand_word(word, quoted, depth + 1)
+                        value = _expand_word(word, quoted, depth + 1, tilde)
                     out.append(value)
                 index = close + 1
                 continue
@@ -496,10 +540,7 @@ def load_config() -> dict:
                 if (key.startswith("export")
                         and key[len("export"):len("export") + 1].isspace()):
                     key = key[len("export"):].strip()
-                value = shell_value(val)
-                if not val.lstrip().startswith(("\"", "'")):
-                    value = expand_tilde_words(value)
-                cfg[key] = value
+                cfg[key] = shell_value(val)
     except UnicodeDecodeError as exc:
         # One bad byte used to travel out of main() as a traceback, in a process
         # whose autostart entry has Terminal=false, while the shell half sourced

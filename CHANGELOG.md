@@ -58,19 +58,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   started with the key: a value written over two lines is valid shell, so
   `OPEN_APP_CMD="one` went into the new config on its own, the file stopped being
   shell, and the wizard still printed "Wrote" and exited 0. A line is carried when it
-  is one `KEY=value` whose value ends at the newline and bash accepts it on its own -
-  two questions, because a here-doc opener is valid on its own and in the file it
+  is a statement that ends where it looks like it ends and that bash accepts on its own
+  - two questions, because a here-doc opener is valid on its own and in the file it
   swallowed every key after it - and otherwise the writer falls back to the value the
-  reader can see, which closes the quote or drops the continuation. Everything a whole
-  line says
-  is carried as it stands, including forms this writer would have quoted differently:
-  the second version accepted only `KEY=word` and `KEY="one string"` and sent the rest
-  through the quoting path, which froze an unquoted `${XDG_CACHE_HOME:-...}` path, lost
-  the expansion in a value holding both a quote and a `$VAR`, and truncated a
-  single-quoted value at its first space.
+  reader can see, which closes the quote or drops the continuation. Everything that
+  passes is carried as it stands, including the forms a writer would have quoted
+  differently: a quoted or unquoted `${VAR}`, a value holding `$(...)` or a backtick,
+  an escaped space or hash, a single-quoted value with a space in it. Two earlier
+  versions failed this in opposite directions: one sent every line it did not recognise
+  through the quoting path, which froze an unquoted `${XDG_CACHE_HOME:-...}` path and
+  truncated a single-quoted value at its first space, and the next ran a scanner over
+  the value that rejected an escaped space and a `$(...)`, both of which a working
+  config can hold. Both are replaced by asking bash, twice.
 - The config the wizard writes is checked with `bash -n` in a side file before it
   replaces the one on disk, and the two values it writes unquoted are validated rather
-  than carried blind: `WATCH` has to be a 0 or a 1 and `INTERVAL_MIN` a whole number
+  than carried blind: `WATCH` is written out as a 0 or a 1 - the spellings the two
+  readers accept, and the empty value the tray reads as off rather than the on
+  `onedrive-doctor`'s `${WATCH:-1}` would - and `INTERVAL_MIN` has to be a whole number
   of minutes, or the wizard writes the default and says so. A hand-written `WATCH='a"b'`
   used to be assembled into a file that no longer sourced, and an `INTERVAL_MIN`
   holding shell syntax was assembled into a file `bash -n` calls valid: that is a
@@ -96,8 +100,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   was correct. Every reader of the value now sees the path the wrapper uses - the guard,
   the settings dialog, `open_path()` - and the root check inside the guard is back as a
   net for the next time two resolutions drift apart.
-- The tray expands a variable inside the fallback of `${VAR:-fallback}`, and follows
-  the braces of one expansion inside another. The shipped
+- The tray reads a config value the way the shell reads it, including the quoting
+  inside the value. A tilde is expanded before the quoting of the word after it is
+  removed, so `LOCAL=~/"My One Drive"` is the directory `onedrive-sync` syncs and not a
+  path with quotes in its name; quotes inside a path are not part of it
+  (`LOG=/tmp/"a b".log`); an escaped space or hash is one character, so
+  `KEY=~/My\ Docs` is one word; and an unquoted value ends at its first space. A
+  variable inside the fallback of `${VAR:-fallback}` is expanded, and the braces of one
+  expansion inside another are followed; the shipped
   `LOG="${XDG_CACHE_HOME:-$HOME/.cache}/..."` read as a path with a literal `$HOME` in
   it whenever `XDG_CACHE_HOME` was unset, which is the default on a stock desktop, so
   the tray named a log file the wrapper never wrote. `${VAR-word}` and `${VAR:+word}`

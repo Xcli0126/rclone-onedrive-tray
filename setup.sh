@@ -350,39 +350,17 @@ fi
 # config already had.
 DEFAULT_BISYNC_ARGS="--resilient --recover --max-lock 2m --conflict-resolve none --conflict-loser num --stats 2s"
 OLD_CONFIG="$(cat "$CONFIG_FILE" 2>/dev/null || true)"
-plain_assignment() {  # plain_assignment <line> -- one assignment and nothing else
-    # True when the line is a single KEY=value whose value ends at the newline, so
-    # the line cannot change how the lines around it are read. `bash -n` on the line
-    # alone is not enough, which is how OPEN_APP_CMD=<<X got through: a here-doc
-    # opener is valid on its own and in the file it swallows every key after it.
-    # The value may be quoted or bare; what it may not hold outside quotes is a
-    # space or a character that starts another command, a redirection or a
-    # substitution.
-    local text="$1" i char quote=""
-    text="${text#*=}"
-    for (( i = 0; i < ${#text}; i++ )); do
-        char="${text:i:1}"
-        if [ "$quote" = "'" ]; then
-            [ "$char" = "'" ] && quote=""
-            continue
-        fi
-        if [ "$quote" = '"' ]; then
-            # Inside double quotes a backslash escapes the next character, so the
-            # one after it cannot be a closing quote.
-            if [ "$char" = "\\" ]; then
-                i=$((i + 1))
-                continue
-            fi
-            [ "$char" = '"' ] && quote=""
-            continue
-        fi
-        case "$char" in
-            "'"|'"') quote="$char" ;;
-            [[:space:]]) return 1 ;;
-            '|'|'&'|';'|'<'|'>'|'('|')'|'`') return 1 ;;
-        esac
-    done
-    [ -z "$quote" ]
+self_contained() {  # self_contained <line> -- the line does not consume the next one
+    # True when the line ends where it looks like it ends. `bash -n` on the line
+    # alone is not enough: OPEN_APP_CMD=<<X is a here-doc opener, valid on its own,
+    # and in the file it swallows every key after it. Appending a statement that is
+    # always a syntax error answers the question directly - if the line is
+    # self-contained the sentinel still breaks the parse, and if it opened a
+    # here-doc or a continuation the sentinel is part of it and the parse is fine.
+    # Measured on the shapes: `<<X` and a trailing backslash swallow it, while
+    # `$(command -v rclone)`, a backtick, a quoted value and `${VAR}` do not.
+    printf '%s\n%s\n' "$1" 'if then' | bash -n 2>/dev/null && return 1
+    return 0
 }
 
 carry_assign() {  # carry_assign <KEY> <default> -> the whole assignment, as written
@@ -405,15 +383,17 @@ carry_assign() {  # carry_assign <KEY> <default> -> the whole assignment, as wri
     # back with the first line alone, bash -n refused the result, and the wizard
     # still printed "Wrote".
     #
-    # Both checks are needed and they answer different questions: `plain_assignment`
-    # says the value ends at this line, `bash -n` says the line is shell at all
-    # (KEY="one is neither). Everything that passes both is copied exactly as the
-    # file has it, including the parts this writer would have quoted differently. An earlier version accepted
-    # only KEY="one string" and a bare word and sent the rest through the value path,
-    # which escapes `$`: an unquoted LOG=${XDG_CACHE_HOME:-$HOME/.cache}/x was frozen
-    # into a literal path, a value holding \" and $VAR lost the expansion, and a
-    # single-quoted value with a space in it was truncated at the space. Asking bash
-    # has none of those cases and no second grammar to keep in step.
+    # Both checks answer different questions: `self_contained` says the line ends
+    # where it looks like it ends, `bash -n` says it is shell at all (KEY="one is
+    # neither). Everything that passes both is copied exactly as the file has it:
+    # a quoted or unquoted `${VAR}`, a value holding `$(...)` or a backtick, a
+    # single-quoted value with a space in it, an escaped space or hash. Two earlier
+    # versions got this wrong in opposite directions - one sent any line it did not
+    # recognise through the value path, which escapes `$` and froze an unquoted
+    # `${XDG_CACHE_HOME:-...}` path, and one ran a scanner over the value that
+    # rejected an escaped space, a `$(...)` and a backtick, all of which a working
+    # config can hold. Asking bash, and asking it twice, has none of those cases and
+    # no second grammar to keep in step.
     case "$line" in
         # A continuation is not a statement of its own even though bash accepts it
         # on its own: in the file it would swallow the line after it, which is how
@@ -421,13 +401,14 @@ carry_assign() {  # carry_assign <KEY> <default> -> the whole assignment, as wri
         *\\) line="" ;;
     esac
     if [ -n "$line" ] &&
-            { ! plain_assignment "$line" ||
+            { ! self_contained "$line" ||
               ! printf '%s\n' "$line" | bash -n 2>/dev/null; }; then
         line=""
     fi
-    # What is carried is carried as it stands, including a line bash reads as a
-    # command (`KEY=a b` sets KEY and runs `b`): the old file did that too, and
-    # rewriting it here would change a value rather than record one.
+    # What is carried is carried as it stands: the old file is the user's, and
+    # rewriting a line here would change a value rather than record one. A line whose
+    # value is followed by more words (`KEY=a b`) is one of those - the old file ran
+    # `b` on every source, and so does the new one.
     if [ -n "$line" ]; then
         printf '%s' "$line"
     else
@@ -477,10 +458,11 @@ if [ "$WATCH_GIVEN" -eq 1 ]; then
     WATCH="$([ "$WATCH" = "yes" ] && echo 1 || echo 0)"
 else
     WATCH="$(carry WATCH 1)"
-    # The same on/off spellings the tray's truthy() and onedrive-doctor accept, so a
-    # hand-written WATCH="yes" is not rewritten to 1 with a warning about a value that
-    # was already right. Anything else is on, which is the wizard's own default, and
-    # the sentence says so.
+    # The on/off spellings the tray's truthy() and onedrive-doctor accept are written
+    # out as a 0 or a 1, so a hand-written WATCH="yes" is not rewritten to 1 with a
+    # warning about a value that was already right, and an empty value becomes the 0
+    # the tray reads rather than the 1 onedrive-doctor's `${WATCH:-1}` would. Anything
+    # else is on, which is the wizard's own default, and the sentence says so.
     case "$(printf '%s' "$WATCH" | tr '[:upper:]' '[:lower:]')" in
         1|true|yes|on|enabled) WATCH=1 ;;
         0|false|no|off|disabled|'') WATCH=0 ;;
@@ -494,6 +476,10 @@ fi
 # never seen is a way to write a config nothing can source; refusing leaves the
 # previous file untouched instead.
 CONFIG_NEW="$CONFIG_FILE.new$$"
+CONFIG_SYNTAX="$CONFIG_FILE.syntax.$$"
+# An interrupt between the heredoc and the move used to leave the side file behind,
+# which the next run would not look at and nothing would clean up.
+trap 'rm -f "$CONFIG_NEW" "$CONFIG_SYNTAX"' EXIT INT TERM
 cat > "$CONFIG_NEW" <<EOF
 # Written by setup.sh on $(date '+%Y-%m-%d %H:%M')
 REMOTE="$(config_quote "$REMOTE")"
@@ -530,14 +516,15 @@ $(carry_assign NOTIFY_ON_SUCCESS 1)
 # The rclone binary to run, by name or by path.
 $(carry_assign RCLONE "")
 EOF
-if ! bash -n "$CONFIG_NEW" 2>"$CONFIG_FILE.syntax"; then
-    printf '%s\n' "$(sed -n '1,3p' "$CONFIG_FILE.syntax")" >&2
-    rm -f "$CONFIG_NEW" "$CONFIG_FILE.syntax"
+if ! bash -n "$CONFIG_NEW" 2>"$CONFIG_SYNTAX"; then
+    printf '%s\n' "$(sed -n '1,3p' "$CONFIG_SYNTAX")" >&2
+    rm -f "$CONFIG_NEW" "$CONFIG_SYNTAX"
     die "refusing to replace $CONFIG_FILE: the config this run would write is not shell (the line above is bash's complaint). The config on disk is unchanged; the folder list and the exclude list this run wrote are already in place."
 fi
-rm -f "$CONFIG_FILE.syntax"
+rm -f "$CONFIG_SYNTAX"
 chmod 0644 "$CONFIG_NEW" "$FILTERS_FILE"
 mv -f "$CONFIG_NEW" "$CONFIG_FILE"
+trap - EXIT INT TERM
 
 echo
 say "Wrote $CONFIG_FILE"

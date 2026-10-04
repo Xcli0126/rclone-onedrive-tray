@@ -452,6 +452,10 @@ DASH_FORM="${READERS_UNSET-dashed}"
 PLUS_FORM="${HOME:+alternate}"
 PLUS_FORM_UNSET="${READERS_UNSET:+alternate}"
 QUOTED_WORD="${READERS_UNSET:-"two words"}"
+TILDE_QUOTED=~/"My One Drive"
+TILDE_ESCAPED=~/My\ One\ Drive
+INNER_QUOTES=/tmp/"a b".log
+ESCAPED_HASH=x\#y
 EMPTY=""
 UNQUOTED=simple
 HASH=abc#def
@@ -461,7 +465,7 @@ INTERVAL_MIN=7
 SHOW_ICON="1"
 SHOW_ICON="0"
 CFGEOF
-READER_KEYS="REMOTE LOCAL CHECK_FILENAME SINGLE ESCAPED FALLBACK NESTED NESTED_BRACES DASH_FORM PLUS_FORM PLUS_FORM_UNSET QUOTED_WORD EMPTY UNQUOTED HASH SPACED UNIT_NAME INTERVAL_MIN SHOW_ICON"
+READER_KEYS="REMOTE LOCAL CHECK_FILENAME SINGLE ESCAPED FALLBACK NESTED NESTED_BRACES DASH_FORM PLUS_FORM PLUS_FORM_UNSET QUOTED_WORD TILDE_QUOTED TILDE_ESCAPED INNER_QUOTES ESCAPED_HASH EMPTY UNQUOTED HASH SPACED UNIT_NAME INTERVAL_MIN SHOW_ICON"
 
 # The shared sed reader, which answers values as written: it does not expand
 # `${VAR}` because the keys it is asked for are a binary name, a unit name, a
@@ -504,8 +508,8 @@ else
 fi
 # The installers' reader is deliberately narrower: no expansion, and a value it is
 # not asked for cannot drift. Compared on the shapes it is asked for.
-sed_narrow="$(printf '%s\n' "$sed_dump" | grep -vE '^(LOCAL|SINGLE|ESCAPED|FALLBACK|NESTED|NESTED_BRACES|DASH_FORM|PLUS_FORM|PLUS_FORM_UNSET|QUOTED_WORD)=')"
-src_narrow="$(printf '%s\n' "$src_dump" | grep -vE '^(LOCAL|SINGLE|ESCAPED|FALLBACK|NESTED|NESTED_BRACES|DASH_FORM|PLUS_FORM|PLUS_FORM_UNSET|QUOTED_WORD)=')"
+sed_narrow="$(printf '%s\n' "$sed_dump" | grep -vE '^(LOCAL|SINGLE|ESCAPED|FALLBACK|NESTED|NESTED_BRACES|DASH_FORM|PLUS_FORM|PLUS_FORM_UNSET|QUOTED_WORD|TILDE_QUOTED|TILDE_ESCAPED|INNER_QUOTES|ESCAPED_HASH)=')"
+src_narrow="$(printf '%s\n' "$src_dump" | grep -vE '^(LOCAL|SINGLE|ESCAPED|FALLBACK|NESTED|NESTED_BRACES|DASH_FORM|PLUS_FORM|PLUS_FORM_UNSET|QUOTED_WORD|TILDE_QUOTED|TILDE_ESCAPED|INNER_QUOTES|ESCAPED_HASH)=')"
 if [ "$sed_narrow" = "$src_narrow" ]; then
     ok "and the installers' shared reader agrees on the values it is asked for"
 else
@@ -529,6 +533,21 @@ check "and the same form on an unset variable is empty" \
     grep -qxF "PLUS_FORM_UNSET=<>" <<<"$py_dump"
 check "and a quoted word inside the expansion loses its quotes" \
     grep -qxF "QUOTED_WORD=<two words>" <<<"$py_dump"
+# The shapes a review found the tray reading differently from the shell: a tilde with
+# its own quoting after it, quotes inside a path, an escaped space, an escaped `#`,
+# and an unquoted value that ends at its first space.
+check "a tilde keeps the quoting of the word after it" \
+    grep -qxF "TILDE_QUOTED=<$READERS/home/My One Drive>" <<<"$py_dump"
+check "and an escaped space in the same word survives" \
+    grep -qxF "TILDE_ESCAPED=<$READERS/home/My One Drive>" <<<"$py_dump"
+check "and quotes inside a path are not part of it" \
+    grep -qxF "INNER_QUOTES=</tmp/a b.log>" <<<"$py_dump"
+check "and an escaped hash is a hash" \
+    grep -qxF "ESCAPED_HASH=<x#y>" <<<"$py_dump"
+# A line that assigns and then runs a command (`KEY=a true`) is not in this fixture:
+# it leaves the key unset in the shell that sources the file, and the tray reads the
+# assignment. That difference is written down in docs/KNOWN-ISSUES.md rather than
+# modelled, because the line is not a config value in any useful sense.
 
 # The forms this reader does not implement, and the one thing it must never do.
 # They are left exactly as the file wrote them, which is visible in a path rather
@@ -545,6 +564,11 @@ cat > "$DIVERGE/config" <<CFGEOF
 SUBSTRING="\${READERS_UNSET:2}"
 MESSAGE="\${READERS_SET:?whoops}"
 COMMAND="\$(touch $DIVERGE/RAN)"
+PREFIX_FORM="\${HOME#x}"
+SUFFIX_FORM="\${HOME%x}"
+LENGTH_FORM="\${#HOME}"
+BACKTICK_FORM="\`echo hi\`"
+UNTERMINATED="\${HOME"
 CFGEOF
 diverging_py="$(env PYTHONPATH="$SRC_DIR/tests/lib" python3 - "$SRC_DIR/bin/onedrive-tray" \
     "$DIVERGE/config" <<'PY'
@@ -555,7 +579,8 @@ from load_module import load
 module = load(sys.argv[1])
 module.CONFIG_FILE = sys.argv[2]
 cfg = module.load_config()
-for key in ("SUBSTRING", "MESSAGE", "COMMAND"):
+for key in ("SUBSTRING", "MESSAGE", "COMMAND", "PREFIX_FORM", "SUFFIX_FORM",
+            "LENGTH_FORM", "BACKTICK_FORM", "UNTERMINATED"):
     print("%s=<%s>" % (key, cfg.get(key, "")))
 PY
 )"
@@ -567,6 +592,15 @@ check "and so is a :? message" \
     grep -qxF 'MESSAGE=<${READERS_SET:?whoops}>' <<<"$diverging_py"
 check "and a command substitution stays text" \
     grep -qxF "COMMAND=<\$(touch $DIVERGE/RAN)>" <<<"$diverging_py"
+# shellcheck disable=SC2016  # every ${...} below is the text under test
+check "and the four forms this reader has no answer for are kept as written" \
+    grep -qxF 'PREFIX_FORM=<${HOME#x}>' <<<"$diverging_py" \
+    && grep -qxF 'SUFFIX_FORM=<${HOME%x}>' <<<"$diverging_py" \
+    && grep -qxF 'LENGTH_FORM=<${#HOME}>' <<<"$diverging_py" \
+    && grep -qxF 'UNTERMINATED=<${HOME>' <<<"$diverging_py"
+# shellcheck disable=SC2016  # the backtick is the text under test
+check "and so is a backtick, which is never run" \
+    grep -qxF 'BACKTICK_FORM=<`echo hi`>' <<<"$diverging_py"
 check_absent "and reading the config did not run it" "$DIVERGE/RAN"
 # bash itself answers two of these differently, and that is the divergence written
 # down here rather than left to be rediscovered: an unset variable's substring is
