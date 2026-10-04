@@ -624,6 +624,13 @@ if [ "$resync_wanted" -eq 1 ]; then
             printf '%s\n' "$check_report" >>"$LOG"
             printf '%s\n' "$check_report" >&2
         fi
+    else
+        # Neither the sibling beside this script nor PATH had it, and a missing
+        # helper used to mean the check silently did not happen: the README and
+        # docs/FEATURE-PARITY.md both promise it runs before a resync, and the
+        # run carries on either way, so nothing else could say it had not.
+        log_line "WARNING: onedrive-check was not found beside this script or on PATH, so the names OneDrive will refuse were NOT checked before this resync"
+        printf '%s: WARNING: onedrive-check was not found, so the names OneDrive will refuse were not checked before this resync\n' "$APP" >&2
     fi
     # The flag is already in ARGS: the option loop added it. This used to add it
     # again, which put "--resync --resync" on rclone's command line.

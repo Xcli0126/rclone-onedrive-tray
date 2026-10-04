@@ -81,8 +81,15 @@ pkill -x -f "bash $BIN_DIR/onedrive-watch" 2>/dev/null || true
 
 if systemctl --user show-environment >/dev/null 2>&1; then
     say "Disabling $UNIT_NAME units"
-    systemctl --user disable --now "$UNIT_NAME.timer" 2>/dev/null || true
-    systemctl --user disable --now "$UNIT_NAME-watch.service" 2>/dev/null || true
+    # A refused disable used to be swallowed, and the run still ended on "Done"
+    # with the units enabled and their scripts already deleted. The same rule as
+    # the stale pair below: systemd's own sentence is the whole signal.
+    for target in "$UNIT_NAME.timer" "$UNIT_NAME-watch.service"; do
+        if ! disable_err="$(systemctl --user disable --now "$target" 2>&1)"; then
+            warn "could not disable $target: ${disable_err:-systemctl printed nothing}"
+            warn "    systemctl --user disable --now $target"
+        fi
+    done
 else
     warn "no user systemd session; skipping unit teardown"
 fi
@@ -119,9 +126,15 @@ for orphan in "$UNIT_DIR"/*.timer; do
     if systemctl --user show-environment >/dev/null 2>&1; then
         # Both halves: the watcher is a long-lived process, so removing its unit
         # file while it stays enabled leaves it restarting against a script this
-        # run has just deleted.
-        systemctl --user disable --now "$orphan_unit.timer" 2>/dev/null || true
-        systemctl --user disable --now "$orphan_unit-watch.service" 2>/dev/null || true
+        # run has just deleted. A refusal is reported for the same reason the
+        # units above are: "removed a unit pair" must not be said over a unit
+        # systemd would not let go of.
+        for target in "$orphan_unit.timer" "$orphan_unit-watch.service"; do
+            if ! disable_err="$(systemctl --user disable --now "$target" 2>&1)"; then
+                warn "could not disable $target: ${disable_err:-systemctl printed nothing}"
+                warn "    systemctl --user disable --now $target"
+            fi
+        done
     fi
     rm -f "$orphan" "$orphan_service" "$UNIT_DIR/$orphan_unit-watch.service"
     rm -rf "$UNIT_DIR/$orphan_unit.timer.d"

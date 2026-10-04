@@ -579,8 +579,22 @@ if [ "$tray_running" -eq 1 ]; then
     case "$tray_pid" in ''|*[!0-9]*) tray_pid="unknown" ;; esac
 fi
 icons_dir="$DATA_DIR/icons"
-if [ "$tray_running" -eq 1 ] && [ -d "$icons_dir" ]; then
+# The tray draws its status icons into this directory at start. A directory that
+# exists is not the same thing as icons in it: an unwritable or full directory
+# left the tray with a blank panel icon and no message anywhere, and this line
+# called it ok because it tested -d alone. Counted in bash rather than with find,
+# because this script runs on the suite's narrow PATH, where only the tools the
+# cases symlink exist.
+icon_files=0
+for icon_file in "$icons_dir"/*.png; do
+    if [ -e "$icon_file" ]; then
+        icon_files=$((icon_files + 1))
+    fi
+done
+if [ "$tray_running" -eq 1 ] && [ "$icon_files" -gt 0 ]; then
     report ok tray "running (pid $tray_pid), icons in $icons_dir"
+elif [ "$tray_running" -eq 1 ] && [ -d "$icons_dir" ]; then
+    report warn tray "running (pid $tray_pid) but no icon was written to $icons_dir, so the panel icon is blank; check that the directory is writable and not full"
 elif [ "$tray_running" -eq 1 ]; then
     report warn tray "running (pid $tray_pid) but $icons_dir is missing; the tray draws the icons there at start, so check for a cairo or permission problem"
 elif [ "$tray_unknown" -eq 1 ]; then

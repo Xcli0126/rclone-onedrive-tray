@@ -14,6 +14,26 @@ round uses a different model with a different lens, which is how the entries her
 were found in the first place.
 
 ## Open
+### A failing run costs more than it should, three ways
+
+Round eleven's third reviewer ran the tray and the timer as a long-lived pair and
+measured what accumulates. Three things did, all reproduced, none fixed yet.
+
+- The tray announces the same failure again on every run. The guard compares
+  `(when, tag, raw)` against the last one it announced, and `when` is the failing
+  run's own clock, so two runs of the same failure five minutes apart never match
+  and the branch whose own comment says the same failure is not announced twice
+  never fires. Measured against a real notification service on a private session:
+  30 failing runs, 30 toasts; the same 30 with a constant `when`, one toast. A
+  five minute timer makes that 288 a day of the identical message.
+- The watcher unit is the project's only `Restart=always`, and the watcher exits 1
+  on purpose after three permanent `inotifywait` failures. With the documented
+  `WATCH_EXCLUDE="["` the cycle is 3 restarts in 4.0 seconds plus `RestartSec=5`,
+  so roughly 9,600 restarts and 24 MB of journal a day, and systemd's own start
+  limiter (burst 5 in a 10 second window by default) never trips.
+- A failing sync writes about 413 bytes of journal per run and a healthy one
+  writes none, and no file in the project names any journal bound.
+
 
 ### Four parsers for one file format
 
@@ -55,42 +75,15 @@ It moves attributes the test suite reaches into directly (`tray.menu`,
 test is allowed to touch before anyone starts.
 
 
-### Seven failures the scripts throw away
-
-Round eleven put a reviewer on dropped failures: every `|| true`, `2>/dev/null`,
-bare `except` and discarded return value in `bin/*`, `install.sh`, `uninstall.sh`
-and `setup.sh`, read in context and split into the ones that lose the only signal
-and the roughly sixty that are cleanup or a probe. The seven below lose it, each
-has a reproduction in that reviewer's report, and none is fixed yet. They are not
-one defect, and the reason they are still open is that the channel differs by
-file: the shell scripts can print to stderr and to the log, while the tray has no
-log of its own and notifications are declared optional, so each site needs an
-answer rather than one patch.
-
-- `install.sh` prints `watcher disabled: WATCH is off in ...` after
-  `systemctl --user disable --now ... || true`, so a refused disable reads as a
-  watcher that is off while it is still enabled.
-- `install.sh` refreshes the watcher with `try-restart ... 2>/dev/null || true`,
-  so a refused restart says nothing anywhere and the loop keeps the old code
-  until reboot.
-- `uninstall.sh` swallows the same two `disable --now` calls and ends with
-  "Done", leaving units enabled whose scripts this run has just deleted.
-- `ensure_icons` in the tray catches `OSError` and hands back the five icon paths
-  anyway, so an unwritable icon directory gives a tray with no icon, no
-  notification and no message, and `onedrive-doctor` reports the icons as
-  present because it only tests that the directory exists.
-- The name check `--resync` is documented to run is skipped when `onedrive-check`
-  is absent or not executable, with nothing said, and the run still ends
-  `state=synced`.
-- `setup.sh` reads `rclone listremotes` with stderr dropped, so an rclone that
-  cannot read its own config is reported as "No rclone remotes are configured
-  yet" and the repair it offers cannot fix that.
-- `load_config` in the tray swallows the `OSError` from an unreadable config, and
-  the tray then reports `REMOTE is not set`, which sends the reader to the remote
-  rather than to the file's permissions.
-
 ## Accepted, with the reason
 
+- The tray writes a failure to read its config, and a failure to write its icons,
+  to stderr, and says the icon problem once rather than once per poll. A launch
+  from a desktop entry gives stderr no window, which is why the two facts are also
+  visible where the user would go looking: the tray refuses to start on a config
+  it cannot read instead of running on the defaults, and `onedrive-doctor` tells a
+  directory holding icons from one holding none. A notification was the
+  alternative and it is the wrong channel for "the icon is blank".
 - `install.sh` warns about a unit pair left by an earlier `UNIT_NAME` or
   `--prefix`, rather than disabling it. What was wrong there was the warning, and
   that is fixed: it names every file this installer writes under the old name and

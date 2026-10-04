@@ -555,15 +555,28 @@ if systemctl --user daemon-reload 2>/dev/null; then
             # enable --now is a no-op on a unit that is already active, and the
             # watcher is a long-running loop, so an update would leave the old
             # code running until reboot. try-restart touches only a running unit
-            # and does nothing when it is not there.
-            systemctl --user try-restart "$UNIT_NAME-watch.service" 2>/dev/null || true
+            # and does nothing when it is not there. A refused restart used to
+            # go to /dev/null, so this run reported a healthy watcher while the
+            # process kept the code the update replaced.
+            restart_err="$(systemctl --user try-restart "$UNIT_NAME-watch.service" 2>&1)" || {
+                warn "could not restart $UNIT_NAME-watch.service: ${restart_err:-systemctl printed nothing}"
+                warn "an already-running watcher keeps the code it started with:"
+                warn "    systemctl --user restart $UNIT_NAME-watch.service"
+            }
         elif watch_on "$WATCH"; then
             : # inotifywait is missing; the unit exists but cannot run (warned above)
         else
             # WATCH was turned off, by hand or through the wizard, and nothing
-            # used to stop a watcher that was already running.
-            systemctl --user disable --now "$UNIT_NAME-watch.service" 2>/dev/null || true
-            say "watcher disabled: WATCH is off in $CONFIG_DIR/config"
+            # used to stop a watcher that was already running. The sentence
+            # below is only true when systemctl agreed: it used to be printed
+            # after a `|| true`, so a refused disable read as a done one.
+            if disable_err="$(systemctl --user disable --now "$UNIT_NAME-watch.service" 2>&1)"; then
+                say "watcher disabled: WATCH is off in $CONFIG_DIR/config"
+            else
+                warn "could not disable $UNIT_NAME-watch.service: ${disable_err:-systemctl printed nothing}"
+                warn "WATCH is off in $CONFIG_DIR/config, so it must not run; stop it yourself with:"
+                warn "    systemctl --user disable --now $UNIT_NAME-watch.service"
+            fi
         fi
     fi
 else

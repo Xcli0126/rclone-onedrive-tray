@@ -271,3 +271,13 @@ uninstall-stale-prefix-anchored	uninstall.sh	s#grep -qE 'onedrive-(sync|watch)' 
 # other run, or both readers report that nothing ever ran.
 sync-refusal-marker-dropped	bin/onedrive-sync	s|result_line stopped other|:|	install-flow
 sync-local-refusal-unlogged	bin/onedrive-sync	s|    refuse "$LOCAL does not exist|    die "$LOCAL does not exist|	install-flow
+# round twelve: seven failures that used to leave no trace, one row each.
+# The eighth row is the doctor's icon row, which counted a directory as icons.
+install-refused-watcher-disable-silent	install.sh	s|    warn "could not disable $UNIT_NAME-watch.service: ${disable_err:-systemctl printed nothing}"|    :|	install-flow
+install-refused-watcher-restart-silent	install.sh	s|            warn "could not restart $UNIT_NAME-watch.service: ${restart_err:-systemctl printed nothing}"|            :|	install-flow
+uninstall-refused-disable-silent	uninstall.sh	s|            warn "could not disable $target: ${disable_err:-systemctl printed nothing}"|            :|	install-flow
+sync-missing-checker-silent	bin/onedrive-sync	s|        log_line "WARNING: onedrive-check was not found beside this script or on PATH, so the names OneDrive will refuse were NOT checked before this resync"|        log_line "NOTICE: continuing without the name check"|	install-flow
+setup-listremotes-failure-dropped	setup.sh	s|    die "$RCLONE_BIN listremotes failed|    warn "$RCLONE_BIN listremotes failed|	install-flow
+doctor-icon-empty-ok	bin/onedrive-doctor	s|\[ "$icon_files" -gt 0 \]|true|	install-flow
+tray-config-unreadable-named	bin/onedrive-tray	s|raise ConfigFault(f"cannot read {CONFIG_FILE}: "|raise ConfigFault(f"cannot read "|	tray
+tray-icon-warning-dropped	bin/onedrive-tray	s|^    if failed:$|    if False:|	tray

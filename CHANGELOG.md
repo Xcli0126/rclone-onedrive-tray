@@ -36,6 +36,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Seven failures that left no trace are reported now, each in the place its file
+  can write to. `install.sh` printed `watcher disabled: WATCH is off in ...` over
+  a `disable --now` that systemd had refused, and sent a refused `try-restart` to
+  `/dev/null`, so an update could leave a watcher loop running the code it
+  replaced while the run said nothing; `uninstall.sh` swallowed both of its
+  disables the same way and still ended on "Done" with the units enabled and their
+  scripts already deleted; and `setup.sh` read `rclone listremotes` with stderr
+  dropped, so an rclone that could not read its own config was reported as a
+  machine with no remotes, with a repair that could not fix it.
+- `load_config()` in the tray answered the defaults for a config it could not
+  open, so a config that was there and mode 000 arrived in `main()` as a config
+  with no `REMOTE`: the tray told the reader to add the key that was in the file.
+  It raises the same kind of fault as a bad byte does now, with the file and the
+  reason, the settings process checks it before opening a window on empty fields,
+  and a running tray says the file was not applied instead of blaming a key.
+- `ensure_icons()` swallowed the `OSError` from a directory it could not write
+  into and handed the indicator five paths to files nobody had written. The tray
+  says the icon will be blank, the progress arc says so once rather than once per
+  poll, and `onedrive-doctor`'s tray row tells a directory holding icons from one
+  holding none. The `--resync` name check is no longer skipped in silence when
+  `onedrive-check` is neither beside the wrapper nor on `PATH`: it says the names
+  were not checked, instead of ending `state=synced` as if they had been.
 - A run that refused before invoking rclone wrote nothing to the sync log. The
   refusal went to stderr, which systemd keeps in the journal, so the log stayed
   empty: `onedrive-doctor` reported that nothing had ever run through the wrapper

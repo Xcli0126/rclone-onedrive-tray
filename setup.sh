@@ -164,7 +164,17 @@ if [ -f "$CONFIG_FILE" ]; then
 fi
 
 # --------------------------------------------------------------- 1. the remote
-REMOTES="$("$RCLONE_BIN" listremotes 2>/dev/null)"
+# A listing that failed is not a machine with no remotes. The stderr used to go
+# to /dev/null, so an rclone that could not read its own config (a permission
+# problem on rclone.conf, say) was reported as "No rclone remotes are configured
+# yet" and the reader was sent to create a remote they already had.
+remotes_err_file="$(mktemp)"
+if ! REMOTES="$("$RCLONE_BIN" listremotes 2>"$remotes_err_file")"; then
+    remotes_err="$(tail -1 "$remotes_err_file")"
+    rm -f "$remotes_err_file"
+    die "$RCLONE_BIN listremotes failed, so no remote could be listed: ${remotes_err:-it printed nothing to stderr}"
+fi
+rm -f "$remotes_err_file"
 if [ -z "$REMOTES" ]; then
     echo
     warn "No rclone remotes are configured yet."

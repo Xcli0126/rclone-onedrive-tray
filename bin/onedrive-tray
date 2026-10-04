@@ -318,8 +318,15 @@ def load_config() -> dict:
         # sentence, not an unreadable file: the offending byte is named, and no
         # value is guessed at, because LOCAL is a path.
         raise ConfigFault(config_utf8_problem(exc)) from exc
-    except OSError:
-        pass
+    except OSError as exc:
+        # A file that cannot be opened is not a file with no keys in it, and the
+        # defaults are what this used to answer for both. A config that is there
+        # but mode 000 therefore reached main() as a config with no REMOTE, which
+        # sent the reader to add the key that was already in it, and reached the
+        # settings dialog as empty fields. The shell half sources the same file
+        # and stops with "Permission denied", so the sentence matches that one.
+        raise ConfigFault(f"cannot read {CONFIG_FILE}: "
+                          f"{exc.strerror or exc}") from exc
 
     cfg.setdefault("LOCAL", os.path.expanduser("~/OneDrive"))
     cfg.setdefault("UNIT_NAME", "onedrive-sync")
@@ -1045,13 +1052,25 @@ def ensure_icons() -> dict:
     """
     icon_dir_ok()
     icons = {}
+    failed = []
     for state in STATES:
         path = os.path.join(ICON_DIR, f"{state}.png")
         try:
             draw_icon(path, state)
         except OSError:
-            pass
+            # Swallowing this handed the indicator a path to a file nobody had
+            # written, and main()'s own guard cannot see it: icon_dir_ok() only
+            # proves the directory exists and is not what cairo writes into. A
+            # read-only or full icon directory therefore produced a blank tray
+            # icon, no warning on any stream, and a settings dialog and a
+            # onedrive-doctor run that both reported the icons as fine.
+            failed.append(state)
         icons[state] = path
+    if failed:
+        print(f"{APP_ID}: Warning: could not write the status icons "
+              f"({', '.join(failed)}) in {ICON_DIR}; the tray icon will be "
+              f"blank. Check that the directory is writable and not full.",
+              file=sys.stderr)
     return icons
 
 
@@ -1390,6 +1409,9 @@ class Tray:
         # already set the "unknown" icon, so that is what is on screen now.
         self.shown_icon = self.icons["unknown"]
         self.sync_pct = None       # percentage last drawn into the syncing icon
+        # The progress arc is redrawn on every poll, so a failure to draw it is
+        # reported once rather than once every three seconds.
+        self.sync_icon_warned = False
         self.was_syncing = False
         # The failure the log is showing, as the parse saw it, and whether the
         # log has been read at all. The falling edge of was_syncing is not the
@@ -2324,10 +2346,15 @@ class Tray:
         # for a unit nothing polls.
         try:
             fresh = load_config()
-        except ConfigFault:
-            # A file that cannot be decoded is not a file with news in it. The
-            # same rule as the REMOTE check below: keep what is already in use
-            # rather than move onto anything read out of a file that is broken.
+        except ConfigFault as exc:
+            # A file that cannot be read is not a file with no news in it, and it
+            # is not a file that says "use the defaults" either: both arrived here
+            # as the defaults from load_config(), which is the state that moved
+            # LOCAL onto the delete guard's root. It arrives as a fault now, with
+            # the file and the reason, so the sentence names those instead of
+            # blaming a key that is in the file.
+            self.notify(APP_NAME, self.t("The config file was not applied: {why}",
+                                         why=str(exc)))
             return
         if not fresh.get("REMOTE"):
             # The rule main() applies to a config before it builds a tray:
@@ -2708,7 +2735,15 @@ class Tray:
         self.sync_pct = pct
         try:
             draw_icon(self.icons["syncing"], "syncing", pct)
-        except OSError:
+        except OSError as exc:
+            # Same swallow as ensure_icons(), and the same silence, but this one
+            # runs from the poll: a line per tick would be a line every three
+            # seconds for the length of a sync. The first failure is the news,
+            # and the flag keeps it to one.
+            if not self.sync_icon_warned:
+                self.sync_icon_warned = True
+                print(f"{APP_ID}: Warning: could not redraw the syncing icon: "
+                      f"{exc}", file=sys.stderr)
             return
         if self.state == "syncing":
             # The path is unchanged, so _set_icon would skip the hand-off even
@@ -3380,7 +3415,15 @@ def show_settings_standalone():
     indicator here, so the language and icon switches have nothing to apply to;
     the config file is what carries every change to the running tray.
     """
-    dialog = SettingsDialog(None)
+    try:
+        cfg = load_config()
+    except ConfigFault as exc:
+        # The dialog would otherwise open on the defaults for a file it could not
+        # read, which is how a save could have written over a config that was
+        # simply mode 000. One sentence and exit 1, the rule main() applies.
+        print(f"{APP_ID}: {exc}", file=sys.stderr)
+        return 1
+    dialog = SettingsDialog(None, cfg=cfg)
     dialog.show_all()
     response = dialog.run()
     dialog.destroy()
@@ -3557,8 +3600,11 @@ def main(argv=None):
             return 0
         # A tray is already running, which is exactly who --settings is for: it
         # may be running with its icon hidden. There is no second icon here, and
-        # the config file carries the changes to the process that has one.
-        show_settings_standalone()
+        # the config file carries the changes to the process that has one. It
+        # answers 1 when the config could not be read, the exit status main()
+        # uses for the same fault, and a GTK response otherwise.
+        if show_settings_standalone() == 1:
+            return 1
         return 0
 
     # Everything past this point owns the lock file, so every return path

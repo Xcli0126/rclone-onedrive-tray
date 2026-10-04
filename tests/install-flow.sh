@@ -37,7 +37,7 @@ export XDG_CONFIG_HOME="$WORK/config"
 export XDG_CACHE_HOME="$WORK/cache"
 export XDG_DATA_HOME="$WORK/data"
 export XDG_STATE_HOME="$WORK/state"
-mkdir -p "$HOME" "$WORK/stubs" "$LOCAL_DIR"
+mkdir -p "$HOME" "$WORK/stubs" "$WORK/calls" "$LOCAL_DIR"
 
 CFG_DIR="$XDG_CONFIG_HOME/rclone-onedrive-tray"
 CFG="$CFG_DIR/config"
@@ -63,7 +63,15 @@ if [ "\$1" = bisync ] && [ "\$2" = --help ]; then
 fi
 case "\$1" in
     version)     echo "rclone v1.75.1" ;;
-    listremotes) echo "probefake:" ;;
+    listremotes)
+        # A listing that fails is not a machine with no remotes. The marker is
+        # what the wizard case below sets to get rclone's own refusal, which
+        # setup.sh used to send to /dev/null.
+        if [ -f "$WORK/calls/rclone-listremotes-fail" ]; then
+            printf '%s\\n' 'CRITICAL: Failed to load config file: permission denied' >&2
+            exit 1
+        fi
+        echo "probefake:" ;;
     lsf)         printf 'Notes/\\nArchive/\\n' ;;
     lsd)         printf '          -1 2026-01-01 00:00:00        -1 Notes\\n' ;;
     bisync)      printf '%s\\n' "\$*" >> "$CALLS"; sleep 2 ;;
@@ -88,7 +96,17 @@ for a in "\$@"; do
     case "\$a" in
         is-active) exit 3 ;;
         start)     printf '%s\\n' "\$*" >> "$SYSTEMCTL_CALLS"; exit 0 ;;
-        disable)   printf '%s\\n' "\$*" >> "$SYSTEMCTL_CALLS"; exit 0 ;;
+        disable)   printf '%s\\n' "\$*" >> "$SYSTEMCTL_CALLS"
+                   # A user manager that refuses, which is what the marker is
+                   # for: both install.sh and uninstall.sh used to send that
+                   # refusal to /dev/null and print a success sentence over it.
+                   [ -f "$WORK/calls/systemctl-disable-fail" ] &&
+                       { printf '%s\\n' 'mock systemctl disable failure' >&2; exit 1; }
+                   exit 0 ;;
+        try-restart) printf '%s\\n' "\$*" >> "$SYSTEMCTL_CALLS"
+                   [ -f "$WORK/calls/systemctl-restart-fail" ] &&
+                       { printf '%s\\n' 'mock systemctl try-restart failure' >&2; exit 1; }
+                   exit 0 ;;
     esac
 done
 exit 0
@@ -132,6 +150,31 @@ if [ -s "$CALLS" ]; then
     sed 's/^/        /' "$CALLS"
 else
     ok "--yes really did stop short of the baseline sync"
+fi
+
+# setup.sh read the remote list with `rclone listremotes 2>/dev/null`, so an
+# rclone that could not read its own config was reported as a machine with no
+# remotes at all, and the reader was told to create one. rclone's own sentence
+# names the file and the reason, and it is the only signal there is.
+title "a remote listing that fails"
+LISTFAIL_HOME="$WORK/listfail-home"
+rm -rf "$LISTFAIL_HOME"; mkdir -p "$LISTFAIL_HOME"
+: > "$WORK/calls/rclone-listremotes-fail"
+LISTFAIL_OUT="$(env HOME="$LISTFAIL_HOME" XDG_CONFIG_HOME="$LISTFAIL_HOME/.config" \
+    XDG_CACHE_HOME="$LISTFAIL_HOME/.cache" \
+    bash "$SRC_DIR/setup.sh" --yes --no-install \
+        --remote "$REMOTE" --local "$LISTFAIL_HOME/OneDrive" 2>&1)"
+rm -f "$WORK/calls/rclone-listremotes-fail"
+if grep -qF 'permission denied' <<<"$LISTFAIL_OUT"; then
+    ok "a failed remote listing is reported with rclone's own reason"
+else
+    bad "a failed remote listing was swallowed"
+    printf '%s\n' "$LISTFAIL_OUT" | head -4 | sed 's/^/        /'
+fi
+if grep -qF 'No rclone remotes are configured yet' <<<"$LISTFAIL_OUT"; then
+    bad "a failed listing was read as a machine with no remotes"
+else
+    ok "and it is not read as a machine with no remotes"
 fi
 
 # ------------------------------------------------------- a value that needs escaping
@@ -667,11 +710,21 @@ WATCH="0"
 EOF
 # The stub answers the FragmentPath probe with the unit this run writes, so the
 # enable branch is the one exercised, and it records every call it was handed.
+# The two markers are what the "a systemctl that refuses the watcher calls" case
+# below sets: a user manager that refuses the disable or the try-restart.
 cat > "$WATCH_STUB_DIR/systemctl" <<EOF
 #!/bin/bash
 printf '%s\n' "\$*" >> "$WATCH_CALLS"
 case "\$*" in
     *"show -p FragmentPath"*) printf '%s\n' "$WATCH_UNIT_DIR/$WATCH_PROBE.timer" ;;
+esac
+case "\$*" in
+    *"disable --now $WATCH_PROBE-watch.service"*)
+        [ -f "$WORK/calls/systemctl-disable-fail" ] &&
+            { printf '%s\n' 'mock systemctl disable failure' >&2; exit 1; } ;;
+    *"try-restart $WATCH_PROBE-watch.service"*)
+        [ -f "$WORK/calls/systemctl-restart-fail" ] &&
+            { printf '%s\n' 'mock systemctl try-restart failure' >&2; exit 1; } ;;
 esac
 exit 0
 EOF
@@ -702,6 +755,44 @@ env HOME="$WATCH_HOME" XDG_CONFIG_HOME="$WATCH_HOME/.config" \
     >"$WORK/watch-install-out.txt" 2>&1
 check "an install that rewrites the watcher unit restarts a running one" \
     grep -qF -- "try-restart $WATCH_PROBE-watch.service" "$WATCH_CALLS"
+
+# A systemctl that refuses the watcher calls. Both branches used to be
+# `... 2>/dev/null || true`: the WATCH=0 run then printed "watcher disabled" over
+# a watcher systemd had just refused to disable, and the WATCH=1 run said nothing
+# at all while the running watcher kept the code the update replaced.
+title "a systemctl that refuses the watcher calls"
+watch_fail_run() {  # watch_fail_run <WATCH value>
+    sed -i "s/^WATCH=.*/WATCH=\"$1\"/" "$WATCH_CFG_DIR/config"
+    env HOME="$WATCH_HOME" XDG_CONFIG_HOME="$WATCH_HOME/.config" \
+        XDG_CACHE_HOME="$WATCH_HOME/.cache" XDG_DATA_HOME="$WATCH_HOME/.data" \
+        PATH="$WATCH_STUB_DIR:$PATH" \
+        bash "$SRC_DIR/install.sh" --prefix "$WATCH_HOME/.local" --no-start 2>&1
+}
+: > "$WORK/calls/systemctl-disable-fail"
+WATCH_FAIL_OUT="$(watch_fail_run 0)"
+rm -f "$WORK/calls/systemctl-disable-fail"
+if grep -qF 'mock systemctl disable failure' <<<"$WATCH_FAIL_OUT"; then
+    ok "a refused watcher disable is reported in systemctl's own words"
+else
+    bad "a refused watcher disable was not reported"
+    grep -i watch <<<"$WATCH_FAIL_OUT" | head -3 | sed 's/^/        /'
+fi
+if grep -qF 'watcher disabled' <<<"$WATCH_FAIL_OUT"; then
+    bad "a refused disable was still announced as 'watcher disabled'"
+else
+    ok "and it is not announced as a successful disable"
+fi
+
+: > "$WORK/calls/systemctl-restart-fail"
+WATCH_FAIL_OUT="$(watch_fail_run 1)"
+rm -f "$WORK/calls/systemctl-restart-fail"
+if grep -qF 'could not restart' <<<"$WATCH_FAIL_OUT" &&
+        grep -qF 'mock systemctl try-restart failure' <<<"$WATCH_FAIL_OUT"; then
+    ok "a refused watcher restart is reported, so an old watcher is not left silent"
+else
+    bad "a refused try-restart went unreported"
+    grep -i watch <<<"$WATCH_FAIL_OUT" | head -3 | sed 's/^/        /'
+fi
 
 # The on-spellings are written down in four places and three of them agree on
 # 1|true|yes|on|enabled; install.sh tested for the literal "1". A config saying
@@ -1135,6 +1226,23 @@ if [ "$CHECK_WRAPPER_RC" -eq 0 ] &&
     ok "exit 2 is a configuration fault: the checker's sentence, without the claim about names"
 else
     bad "checker exit 2: wrapper exit $CHECK_WRAPPER_RC, $(grep -m1 WARNING "$CHK/cache/sync.log"); $(tail -1 <<<"$CHECK_OUT")"
+fi
+
+# The check is documented to run before a resync, and a helper that is missing or
+# not executable used to mean it silently did not run: the resync carried on and
+# ended with a synced marker, so nothing anywhere said the names had not been
+# looked at. PATH is narrowed to the stub directory and the system, so a real
+# install of the helper on this machine cannot answer for the one missing here.
+rm -f "$CHK/bin/onedrive-check"
+: > "$CHK/cache/sync.log"
+CHECK_OUT="$(env PATH="$CHK:/usr/bin:/bin" XDG_CONFIG_HOME="$CHK/cfg" \
+    XDG_CACHE_HOME="$CHK/cache" "$CHK/bin/onedrive-sync" --resync 2>&1)"
+if grep -qF 'onedrive-check was not found' "$CHK/cache/sync.log" &&
+        grep -qF 'NOT checked before this resync' "$CHK/cache/sync.log" &&
+        grep -qF 'onedrive-check was not found' <<<"$CHECK_OUT"; then
+    ok "a missing checker is reported instead of skipping the check in silence"
+else
+    bad "the resync ran with no checker and said nothing: $(tail -1 "$CHK/cache/sync.log")"
 fi
 
 # Three names from the same documented list were invisible to the checker:
@@ -2514,6 +2622,9 @@ doc_fixture() {
              "$d/cache/rclone-onedrive-tray" "$d/data/rclone-onedrive-tray/icons" \
              "$d/local" "$d/bin" "$d/tmp" "$d/run"
     printf '*.tmp\n' > "$d/cfg/rclone-onedrive-tray/filters.txt"
+    # A running tray has written its status icons, and the tray row of the report
+    # tells a directory holding them from one holding none.
+    : > "$d/data/rclone-onedrive-tray/icons/synced.png"
     cp "$DOC_STUBS/rclone" "$DOC_STUBS/systemctl" "$d/bin/"
     chmod +x "$d/bin/rclone" "$d/bin/systemctl"
     cat > "$d/cfg/rclone-onedrive-tray/config" <<EOF
@@ -2608,6 +2719,14 @@ run "a running tray: the ok line names the pid and the icon directory" 0 \
 rm -rf "$DOC_FX/data/rclone-onedrive-tray/icons"
 run "a running tray with no icon directory is a warning that names it" 0 \
     "running (pid $TRAY_HOLDER) but $DOC_FX/data/rclone-onedrive-tray/icons is missing" \
+    doc_run "$DOC_FX" --offline
+# A directory that exists and holds no icon is the third state, and the one the
+# -d test could not tell from a healthy tray: the tray writes the five status
+# icons at start, so an unwritable or full directory gave a blank panel icon and
+# this row said ok.
+mkdir -p "$DOC_FX/data/rclone-onedrive-tray/icons"
+run "a running tray whose icons were never written is a warning, not an ok" 0 \
+    "but no icon was written to $DOC_FX/data/rclone-onedrive-tray/icons" \
     doc_run "$DOC_FX" --offline
 tray_lock_release "$TRAY_HOLDER"
 
@@ -3121,6 +3240,23 @@ if [ -f "$HOOK" ]; then
     fi
 else
     skip "no NetworkManager hook on this machine to leave alone"
+fi
+
+# uninstall.sh sent both disables to /dev/null and still ended on "Done", with
+# the units left enabled and the scripts they run already deleted. systemd's
+# refusal is the only thing that says the uninstall did not finish.
+title "a systemctl that refuses to disable on the way out"
+mkdir -p "$UNIT_DIR"
+printf '[Unit]\nDescription=probe\n[Service]\nExecStart=%s/onedrive-sync\n' \
+    "$HOME/.local/bin" > "$UNIT_DIR/$UNIT-watch.service"
+: > "$WORK/calls/systemctl-disable-fail"
+UNINSTALL_FAIL_OUT="$(bash "$SRC_DIR/uninstall.sh" --prefix "$HOME/.local" 2>&1)"
+rm -f "$WORK/calls/systemctl-disable-fail"
+if grep -qF 'mock systemctl disable failure' <<<"$UNINSTALL_FAIL_OUT"; then
+    ok "a refused disable is reported by the uninstaller"
+else
+    bad "uninstall swallowed a refused disable"
+    printf '%s\n' "$UNINSTALL_FAIL_OUT" | head -4 | sed 's/^/        /'
 fi
 
 # --purge is the documented way to take the configuration with it, so the config

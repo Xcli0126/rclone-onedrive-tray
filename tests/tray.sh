@@ -1268,6 +1268,47 @@ def scenario_notify_missed():
     return data
 
 
+def scenario_icons_unwritable():
+    """An icon directory the tray cannot write into says so.
+
+    ensure_icons() caught the OSError and handed the five paths to the indicator
+    anyway, so a blank panel icon came with nothing on any stream, and
+    onedrive-doctor's own icon row reported the directory as fine because it tested
+    -d alone. The path used here is a file: makedirs cannot turn it into a
+    directory and no user, root included, can write a PNG into it.
+
+    The progress arc is redrawn from every poll, so its failure is reported once
+    rather than once per tick.
+    """
+    import contextlib
+    import io
+
+    blocked = os.path.join(WORK, "icons-not-a-directory")
+    with open(blocked, "w", encoding="utf-8") as fh:
+        fh.write("not a directory\n")
+    real_icon_dir = MODULE.ICON_DIR
+    MODULE.ICON_DIR = blocked
+
+    class _Progress:
+        sync_pct = None
+        sync_icon_warned = False
+        icons = {"syncing": os.path.join(blocked, "syncing.png")}
+
+    err = io.StringIO()
+    progress_err = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(err):
+            icons = MODULE.ensure_icons()
+        stub = _Progress()
+        with contextlib.redirect_stderr(progress_err):
+            for pct in (10, 20, 30):
+                MODULE.Tray._set_sync_progress(stub, pct)
+    finally:
+        MODULE.ICON_DIR = real_icon_dir
+    return {"icons": sorted(icons), "stderr": err.getvalue(),
+            "progress_stderr": progress_err.getvalue(), "blocked": blocked}
+
+
 def scenario_icons():
     """Draw the five icons twice and report what is actually in the files.
 
@@ -2329,11 +2370,24 @@ def scenario_config_unreadable():
         MODULE.Notify = install_fake_notify(shown)
         try:
             tray._reload_config()
+            first_notified = list(shown)
+            # The other way a config arrives with no REMOTE in it: a readable file
+            # with the key commented out. This case used to reach that guard
+            # through the defaults an unreadable file came back as, so the guard
+            # needs its own half now that an unreadable file is a fault.
+            with open(config, "w", encoding="utf-8") as fh:
+                fh.write('#REMOTE="unreadable-remote:"\n')
+                fh.write('LOCAL="%s"\n' % local)
+            del shown[:]
+            tray._reload_config()
         finally:
             MODULE.Notify = real_notify
         data = {
-            "notified": list(shown),
+            "notified": first_notified,
+            "no_remote_notified": list(shown),
+            "no_remote_local": tray.local,
             "before": before,
+            "config_file": config,
             "local": tray.local,
             "remote": tray.remote,
             "log": tray.log,
@@ -2349,6 +2403,35 @@ def scenario_config_unreadable():
     finally:
         MODULE.CONFIG_FILE = real_config
     return data
+
+
+def scenario_config_permission_start():
+    """A config that cannot be opened is reported as that, not as a missing key.
+
+    load_config() answered the defaults for a file it could not open, so a config
+    with mode 000 arrived in main() as a config with no REMOTE: the tray told the
+    reader to add the key that was already in the file, and never named the file
+    as the problem. This runs the real main() against a mode 000 config and
+    reports what it said and how it exited.
+    """
+    import subprocess
+
+    home = os.environ["TRAY_CONFIG_PERM_HOME"]
+    os.makedirs(os.path.join(home, "rclone-onedrive-tray"), exist_ok=True)
+    path = os.path.join(home, "rclone-onedrive-tray", "config")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write('REMOTE="perm-remote:"\n')
+        fh.write('LOCAL="%s"\n' % os.path.join(WORK, "local"))
+    os.chmod(path, 0)
+    try:
+        env = dict(os.environ)
+        env["XDG_CONFIG_HOME"] = home
+        proc = subprocess.run([sys.executable, sys.argv[2]], capture_output=True,
+                              text=True, timeout=120, env=env)
+        return {"exit_code": proc.returncode, "stdout": proc.stdout,
+                "stderr": proc.stderr, "config_file": path}
+    finally:
+        os.chmod(path, 0o600)
 
 
 def scenario_config_unreadable_poll():
@@ -4043,6 +4126,7 @@ SCENARIOS = {
     "config-reload-fresh": scenario_config_reload_fresh,
     "config-unreadable": scenario_config_unreadable,
     "config-unreadable-poll": scenario_config_unreadable_poll,
+    "config-permission-start": scenario_config_permission_start,
     "log-result": scenario_log_result,
     "log-marker": scenario_log_marker,
     "hint-langs": scenario_hint_langs,
@@ -4055,6 +4139,7 @@ SCENARIOS = {
     "utf8-folders": scenario_utf8_folders,
     "no-remote": scenario_no_remote,
     "icons": scenario_icons,
+    "icons-unwritable": scenario_icons_unwritable,
     "cli-settings": scenario_cli_settings,
 }
 
@@ -4918,8 +5003,17 @@ if d["delete"] != d["before"]["delete"]:
 if not any("not applied" in body for body in d["notified"]):
     print("nothing said the config was not applied: %r" % (d["notified"],))
     raise SystemExit(1)
-if not any("REMOTE" in body for body in d["notified"]):
-    print("and the sentence does not name REMOTE: %r" % (d["notified"],))
+if not any(d["config_file"] in body for body in d["notified"]):
+    print("and the sentence does not name the file: %r" % (d["notified"],))
+    raise SystemExit(1)
+'
+    check "a readable config with REMOTE commented out is refused the same way" json_py '
+if d["no_remote_local"] != d["local_want"]:
+    print("LOCAL moved to %r once REMOTE went away, wanted %r"
+          % (d["no_remote_local"], d["local_want"]))
+    raise SystemExit(1)
+if not any("REMOTE" in body for body in d["no_remote_notified"]):
+    print("nothing named REMOTE: %r" % (d["no_remote_notified"],))
     raise SystemExit(1)
 '
 fi
@@ -4954,6 +5048,29 @@ if d["delete"] is None or d["delete"] != d["before"]["delete"]:
 if not d["resumed"] or d["reloads_after"] < 1:
     print("resumed=%r reloads=%r local=%r remote=%r"
           % (d["resumed"], d["reloads_after"], d["local"], d["remote"]))
+    raise SystemExit(1)
+'
+fi
+
+title "A config that is there and cannot be opened"
+# The other shape an unreadable config takes, and the one the tray cannot tell
+# from a config with no REMOTE while load_config() answers the defaults for both.
+# The file exists, so the "Config not found" branch does not catch it, and the
+# sentence the user got pointed at a key that was already in the file.
+if run_driver config-permission-start TRAY_CONFIG_PERM_HOME="$WORK/configperm"; then
+    check "the tray exits 1 instead of starting" json_expr "d['exit_code'] == 1"
+    check "and names the file it could not read" json_py '
+if d["config_file"] not in d["stderr"]:
+    print("the file is not named: %r" % (d["stderr"],))
+    raise SystemExit(1)
+if "cannot read" not in d["stderr"]:
+    print("and it is not described as a read that failed: %r" % (d["stderr"],))
+    raise SystemExit(1)
+'
+    check "and does not blame a key that is in the file" json_py '
+if "REMOTE is not set" in d["stderr"] or "setup.sh" in d["stderr"]:
+    print("an unreadable config was reported as a missing REMOTE: %r"
+          % (d["stderr"],))
     raise SystemExit(1)
 '
 fi
@@ -6571,6 +6688,33 @@ if weak:
 if not d["progress_differs"] or d["tray_pct"] != 15 or not d["tray_redrew_syncing"]:
     print("differs=%r pct=%r redrew=%r"
           % (d["progress_differs"], d["tray_pct"], d["tray_redrew_syncing"]))
+    raise SystemExit(1)
+'
+fi
+
+title "An icon directory that cannot be written into"
+# ensure_icons() caught the OSError and returned the five paths regardless, so
+# the indicator was handed files nobody had written: a blank panel icon, nothing
+# on any stream, and an onedrive-doctor row that called the directory fine.
+if run_driver icons-unwritable; then
+    check "the tray still hands the indicator a path per state" json_py '
+if len(d["icons"]) != 5:
+    print("paths returned: %r" % (d["icons"],))
+    raise SystemExit(1)
+'
+    check "and says the icon will be blank, naming the directory" json_py '
+if d["blocked"] not in d["stderr"]:
+    print("the directory is not named: %r" % (d["stderr"],))
+    raise SystemExit(1)
+if "blank" not in d["stderr"]:
+    print("and the consequence is not spelled out: %r" % (d["stderr"],))
+    raise SystemExit(1)
+'
+    check "the progress arc says so once, not once per tick" json_py '
+warned = d["progress_stderr"].count("could not redraw the syncing icon")
+if warned != 1:
+    print("the redraw failure was reported %d time(s) over three ticks: %r"
+          % (warned, d["progress_stderr"]))
     raise SystemExit(1)
 '
 fi
