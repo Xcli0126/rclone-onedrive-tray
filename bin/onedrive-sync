@@ -878,21 +878,23 @@ for i in $(seq 1 "$RETRIES"); do
 
     if [ "$rc" -eq 0 ]; then
         [ "$i" -gt 1 ] && echo "$APP: succeeded on attempt $i"
+        if [ "$dry_run" -eq 1 ]; then
+            # A dry run transferred nothing, so it is not a verdict about the pair: the
+            # tray reads the marker as "the last sync succeeded" and showed a green icon
+            # with a fresh time for a preview, and the doctor read the log as healthy.
+            # The run says what it was and leaves the last real verdict alone. It also
+            # exits 0 whether or not that notice could be written, because there is no
+            # verdict to lose: the log check below is about a run that really synced.
+            log_line "NOTICE: --dry-run finished without transferring anything, so no result line was written"
+            exit 0
+        fi
         if [ "$LOG_WRITE_FAILED" = 1 ]; then
             # The sync worked and the log does not say so. Exiting 0 would leave the
             # only record of the run missing and the unit green, so the status carries
             # it and systemd shows the service as failed until the log can be written.
             die "sync completed but the log could not be written; free space on the filesystem holding $LOG"
         fi
-        if [ "$dry_run" -eq 1 ]; then
-            # A dry run transferred nothing, so it is not a verdict about the pair: the
-            # tray reads the marker as "the last sync succeeded" and showed a green icon
-            # with a fresh time for a preview, and the doctor read the log as healthy.
-            # The run says what it was and leaves the last real verdict alone.
-            log_line "NOTICE: --dry-run finished without transferring anything, so no result line was written"
-        else
-            result_line synced none "sync completed"
-        fi
+        result_line synced none "sync completed"
         exit 0
     fi
 
