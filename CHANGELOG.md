@@ -80,30 +80,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   three characters at once, then runs an uninstall and an install aimed at another
   prefix and requires the unit, the watch unit and the entry to survive unchanged - 7
   of those 9 assertions fail against the raw comparison, measured at 527 passed and 7
-  failed there against 534 and 0 here. A `%` with no pair is still a systemd specifier
-  or a desktop field code, and a file naming one counts as naming nothing.
+  failed there against 544 and 0 here.
+- That reader answers three ways rather than two, and two shapes it used to call "names
+  nothing" now count as another install's. A unit whose first `ExecStart=` is empty above
+  a real command, and one naming a `%` specifier: measured with the real scripts, an
+  `uninstall.sh --prefix <scratch>` removed the first and an `install.sh --prefix
+  <other>` repointed it, because "names nothing" is the answer that lets a run delete or
+  rewrite the file. systemd runs every `ExecStart=` in order and a bare one resets the
+  list, so the lines are read with that rule, and a specifier is reported as a value this
+  cannot read: a working install's file left alone is recoverable, deleted is not. The
+  suite builds both shapes from the unit the installer wrote and requires both runs to
+  leave them where they are; the reset row is one line of the reader and is caught by a
+  mutation row (541 passed and 3 failed).
 - `--dry-run` writes no success line, wherever it was asked for. It reaches the same
   exit-0 path as a real run, so the marker said `state=synced` and the tray showed a
   green icon and a fresh time for a preview that transferred nothing; it is now noticed
-  on the command line and in `BISYNC_ARGS`, in the bare spelling and as the short `-n`.
-  `--dry-run=false`, which is how rclone is told the opposite, is deliberately not
-  counted: rclone 1.75.1 accepts it and really transfers (measured: `rclone bisync <a>
-  <b> --resync --dry-run=false` created the file), and matching `--dry-run=` instead
-  dropped the verdict of exactly that run - measured at 0 markers with a NOTICE claiming
-  nothing had been transferred. `tests/install-flow.sh` runs both spellings, and the
-  mutation table has a row that drops the detection from `BISYNC_ARGS` (caught: 533
-  passed and 1 failed against it).
+  on the command line and in `BISYNC_ARGS`, in every boolean spelling rclone accepts:
+  measured with rclone 1.75.1, `--dry-run=true`, `--dry-run=1`, `-n=true` and
+  `--dry-run=TRUE` all leave the destination empty while `--dry-run=false` and
+  `-n=false` really transfer. Only the false family means a real run, and the suite runs
+  a preview through the bare, `=true`, `=1` and `-n` spellings plus a value rclone
+  refuses (rc=2, which still ends in a verdict). Matching only the bare form wrote
+  `state=synced` for the others - measured at 1 marker each against 0 now. The mutation
+  table has a row that drops the detection from `BISYNC_ARGS` (caught).
 - The pages that count the runs carrying no result line are checked against the reasons
   themselves. The prose said three of them for a release after `--dry-run` had become the
   fourth, and nothing compared the sentence with the wrapper. `tests/docs.sh` reads the
   paragraph that makes the claim on each of the four pages and requires both the numeral
   and each reason to be named in it; dropping the dry-run clause from README.md fails the
-  run, measured at 114 passed and 1 failed against the page, 115 and 0 with it.
-- The size of the mutation table, which `docs/COMPATIBILITY.md` quotes in two
-  sentences, is read out of the table itself now. Those numbers are hand-written and
-  stood at "113 of the 234 rows" and "89 run the tray suite" while the table grew past
-  both; `tests/docs.sh` compares the sentence with the row counts and fails on the old
-  pair, which is how this entry's own two rows were noticed.
+  run, measured at 117 passed and 1 failed against the page, 118 and 0 with it.
+- The size of the mutation table is read out of the table itself now, in the
+  compatibility notes and in the headers of `tests/lib/mutate.sh` and
+  `tests/lib/sweep.sh`. Those counts are hand-written and all three stood at "113 rows"
+  while the table grew to 120 install-flow rows, which the page alone did not show: the
+  check failed on the two headers the moment they were compared. The paragraph scanner
+  for the result-line count was anchored on one phrase, so a page that reworded the
+  sentence dropped out of it silently; it accepts the other English and Chinese
+  phrasings now.
 - The log check sits after the marker on the success path, so the failure of the write
   that matters is the one reported. With the check above it, a run whose only failed
   write was the marker itself still exited 0, measured on a filesystem whose log tail

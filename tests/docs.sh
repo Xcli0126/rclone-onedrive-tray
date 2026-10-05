@@ -207,7 +207,7 @@ check_no_line_paragraph() {  # check_no_line_paragraph <file> <numeral> <reasons
     local f="$1" numeral="$2" reason pattern claim missing
     shift 2
     claim="$(awk '
-        !printing && /carry no |carry none|没有这行/ { printing = 1 }
+        !printing && /carry (no|none)|carries no|没有这行|no result line/ { printing = 1 }
         printing { print }
         printing && /^[[:space:]]*$/ { exit }
     ' "$f")"
@@ -282,6 +282,18 @@ if [ -f tests/lib/mutations.txt ] && [ -f docs/COMPATIBILITY.md ]; then
     else
         bad "it says ${claim%% *} tray rows, the table has ${table_tray:-0}"
     fi
+    # The same sentence sits in the two scripts' own headers, and those copies were
+    # the ones that stayed behind: the page was updated and both said 113 for a while.
+    for header in tests/lib/mutate.sh tests/lib/sweep.sh; do
+        claim="$(grep -oE '[0-9]+ (of the )?rows run install-flow' "$header" | head -1)"
+        if [ -z "$claim" ]; then
+            skip "$header no longer says how many rows run install-flow"
+        elif [ "${claim%% *}" = "${table_flow:-0}" ]; then
+            ok "$header says ${claim%% *} install-flow rows, the table's count too"
+        else
+            bad "$header says ${claim%% *} install-flow rows, the table has ${table_flow:-0}"
+        fi
+    done
 fi
 
 # ------------------------------------------------- the failure tags cross a line

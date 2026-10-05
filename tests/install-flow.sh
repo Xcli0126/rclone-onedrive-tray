@@ -2878,6 +2878,24 @@ if [ "$(result_count "$CAP/sync.log")" = 1 ] &&
 else
     bad "a --dry-run=false run: $(grep -c 'ONEDRIVE_RESULT' "$CAP/sync.log") marker(s), $(tail -1 "$CAP/sync.log")"
 fi
+# rclone takes a boolean in every spelling pflag knows, and each of these really does
+# preview (measured with rclone 1.75.1: `--dry-run=true`, `--dry-run=1`, `-n=true` and
+# `--dry-run=TRUE` left the destination empty). Matching only the bare form wrote
+# state=synced for all of them.
+for spelling in '--dry-run=true' '--dry-run=1' '-n=true' '--dry-run=TRUE' '-n'; do
+    cap_config "BISYNC_ARGS=\"$spelling --stats 2s\""
+    : > "$CAP/sync.log"; : > "$WORK/cap-args"
+    cap_env CAP_STDERR= CAP_RC=0 "$HOME/.local/bin/onedrive-sync" >/dev/null 2>&1 || true
+    check "$spelling is a preview too, so it writes no verdict" \
+        test "$(result_count "$CAP/sync.log")" -eq 0
+done
+# And the run whose value rclone refuses: it fails, and a failed run writes its
+# verdict whatever the preview logic decided.
+cap_config 'BISYNC_ARGS="--dry-run=maybe --stats 2s"'
+: > "$CAP/sync.log"; : > "$WORK/cap-args"
+cap_env CAP_STDERR="$CAP_EOF" CAP_RC=2 "$HOME/.local/bin/onedrive-sync" >/dev/null 2>&1 || true
+check "a value rclone refuses still ends in a verdict" \
+    test "$(result_count "$CAP/sync.log")" -eq 1
 
 # A refusal ends the run before rclone is invoked, and it used to leave no trace
 # beyond a line on stderr, which systemd puts in the journal. The log stayed
@@ -4420,5 +4438,35 @@ check "and does not rewrite that entry" \
     test "$ODD_ENTRY_BEFORE" = "$(cat "$ODD_ENTRY")"
 check "and says the units belong to another prefix" \
     grep -qF "belongs to another prefix" "$WORK/odd-reinstall.txt"
+
+# Two shapes the reader used to call "names nothing", which is the answer that lets a
+# run delete or repoint the file. systemd runs every ExecStart= in order and a bare
+# ExecStart= resets the list ("If the empty string is assigned to this option, the list
+# of commands to start is reset", systemd.service(5)), so the command after the reset is
+# the one that runs; and a value holding a `%` specifier is a path only systemd can
+# produce. Neither can be shown to be this prefix's, and both are another install's as
+# far as this run can tell, so both are left alone.
+#
+# The reset shape is built from the unit install.sh wrote rather than typed out: the
+# prefix holds a space, a `%` and a `$`, and a hand-written path would have to repeat
+# the writer's escaping to be the same file.
+{ printf '[Unit]\nDescription=probe\n[Service]\nType=oneshot\nExecStart=\n'
+  grep -m1 '^ExecStart=' "$ODD_UNIT_DIR/$UNIT.service"
+} > "$WORK/odd-reset-unit"
+mv "$WORK/odd-reset-unit" "$ODD_UNIT_DIR/$UNIT.service"
+odd uninstall.sh "$ODD_OTHER" "$WORK/odd-reset.txt"
+check "an empty ExecStart= above a real one is read, not treated as empty" \
+    test -f "$ODD_UNIT_DIR/$UNIT.service"
+check "and the run says it left that unit alone" \
+    grep -qF "leaving $ODD_UNIT_DIR/$UNIT.service alone" "$WORK/odd-reset.txt"
+ODD_RESET_BEFORE="$(cat "$ODD_UNIT_DIR/$UNIT.service")"
+odd install.sh "$ODD_OTHER" "$WORK/odd-reset-install.txt" --no-start
+check "and an install for another prefix does not repoint it either" \
+    test "$ODD_RESET_BEFORE" = "$(cat "$ODD_UNIT_DIR/$UNIT.service")"
+printf '[Unit]\nDescription=probe\n[Service]\nExecStart=%%h/.local/bin/onedrive-sync\n' \
+    > "$ODD_UNIT_DIR/$UNIT.service"
+odd uninstall.sh "$ODD_OTHER" "$WORK/odd-spec.txt"
+check "and a specifier, which this cannot resolve, is left alone too" \
+    test -f "$ODD_UNIT_DIR/$UNIT.service"
 
 summary

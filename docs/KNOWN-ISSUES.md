@@ -52,6 +52,17 @@ not have to be rediscovered.
   file is worse than the race the lock prevents. The lock is not reentrant, and the body
   it guards calls nothing that would take it again.
 
+- A unit or desktop file the installer cannot read is treated as another install's and
+  left alone. That covers a `%` that is a systemd specifier (`%h`, `%i`) or a desktop
+  field code (`%U`), which only systemd or the desktop can turn into a path, and any
+  file that names no executable this can find at all. The alternative, treating an
+  unreadable file as stale and removing it, is the failure the ownership guard exists to
+  prevent: `uninstall.sh --prefix <scratch>` deleting a working install's unit. The cost
+  is that a genuinely stale unit written by hand with a specifier in it survives an
+  uninstall; that is visible in the run's "leaving ... alone" line, and the file can be
+  removed by hand. A file that names nothing at all, or only paths that are gone, still
+  counts as this prefix's, so the ordinary stale file is cleaned up as before.
+
 - A line that assigns and then runs a command is read as the assignment. `KEY=a true`
   leaves `KEY` unset in the shell that sources the file - the assignment is a prefix of
   the command, not a setting - while the tray reads `a`, which is what it does with any

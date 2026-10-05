@@ -403,10 +403,19 @@ setup-interval-not-validated	setup.sh	s#^        ''|\*\[!0-9\]\*) warn "INTERVAL
 # The preview can be asked for through BISYNC_ARGS as well, and the wrapper passes
 # that through as written. Dropping the detection leaves state=synced in the log of
 # a run that transferred nothing, the false green the flag exists to prevent.
-sync-dryrun-bisync-args-dropped	bin/onedrive-sync	s#^    \*" --dry-run "\*|\*" -n "\*) dry_run=1 ;;#    *) : ;;#	install-flow
+sync-dryrun-bisync-args-dropped	bin/onedrive-sync	s#^        --dry-run|-n) dry_run=1 ;;$#        --dry-run|-n) : ;;#	install-flow
 # Two rows because the two scripts carry the same reader: reading an Exec= line with
 # the systemd rules undoes one layer instead of two, so an autostart entry whose
 # prefix holds a space, a % or a $ is called ours and removed (uninstall) or
 # repointed (install).
-install-exec-path-desktop-as-systemd	install.sh	s|^        Exec=\*)      key=desktop;|        Exec=*)      key=systemd;|	install-flow
-uninstall-exec-path-desktop-as-systemd	uninstall.sh	s|^        Exec=\*)      key=desktop;|        Exec=*)      key=systemd;|	install-flow
+install-exec-path-desktop-as-systemd	install.sh	s|^            Exec=\*)      kind=desktop;|            Exec=*)      kind=systemd;|	install-flow
+uninstall-exec-path-desktop-as-systemd	uninstall.sh	s|^            Exec=\*)      kind=desktop;|            Exec=*)      kind=systemd;|	install-flow
+# The desktop reader undoes two layers; dropping the dollar from the character class
+# leaves a path with one level of escaping, which is the mismatch these two rows fix.
+# Each row changes both passes, so a caught verdict is not one site's.
+install-exec-path-one-unescape	install.sh	s#\["\\\\`\$\]#["\\\\`]#g	install-flow
+uninstall-exec-path-one-unescape	uninstall.sh	s#\["\\\\`\$\]#["\\\\`]#g	install-flow
+# A bare ExecStart= resets systemd's command list; stopping there instead reads the
+# unit as naming nothing, the answer that lets a run delete or repoint it.
+uninstall-exec-path-reset-treated-as-nothing	uninstall.sh	s|^            found=()$|            found=(); break|	install-flow
+install-exec-path-reset-treated-as-nothing	install.sh	s|^            found=()$|            found=(); break|	install-flow

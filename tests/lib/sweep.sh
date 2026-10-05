@@ -6,7 +6,7 @@
 #   tests/lib/sweep.sh --out DIR --force        re-run suites that are already done
 #   tests/lib/sweep.sh --out DIR --list         say what is done, torn and left to run
 #
-# A full pass is hours - 113 rows run install-flow (1m53s each here) and 89 run the tray
+# A full pass is hours - 120 rows run install-flow (1m53s each here) and 89 run the tray
 # suite (2m33s each) - so it is run in pieces and written down per suite. Each
 # DIR/<suite>.txt opens with the header tests/lib/mutate.sh writes: the commit, whether
 # the tree was dirty, and the rows the run covered.

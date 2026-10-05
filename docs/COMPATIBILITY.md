@@ -28,9 +28,9 @@ How much those cases would notice is a separate question from how many there are
 so the tree is also put through a mutation pass: deliberate changes to the shipped
 scripts, one at a time, each run against the suite that covers it. `tests/lib/mutate.sh`
 runs it, `tests/lib/mutations.txt` lists the rows, and the run prints how many were
-caught. A full pass is hours, so it is done in pieces: 116 of the 237 rows run
+caught. A full pass is hours, so it is done in pieces: 120 of the 241 rows run
 `install-flow`, 1m53s each on this machine, and 89 run the tray suite, 2m33s each, which
-together is about 7.3 hours. `tests/lib/mutate.sh --suite install-flow` runs one suite's
+together is about 7.5 hours. `tests/lib/mutate.sh --suite install-flow` runs one suite's
 rows, and a `RESULTS=` file opens with the commit it was measured at, whether the tree
 was dirty, and which rows the run covered. `tests/lib/sweep.sh --out DIR` is the pass
 itself: one file per suite, a suite counts as done only when its file holds a verdict for

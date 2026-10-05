@@ -288,9 +288,15 @@ if [ -x "$BIN_DIR/onedrive-tray" ] || [ -f "$UNIT_DIR/$UNIT_NAME.service" ]; the
     TRAY_WAS_INSTALLED=1
 fi
 
-# Does a unit or desktop file name an executable, and is it one of ours? A file that
-# names no path at all, or one that is not there, is stale rather than another install's:
-# leaving it behind would keep a login or a timer pointing at something that is gone.
+# Which executables a unit or desktop file names, and which of them is one of ours?
+# Three answers matter, not two: a file that runs another install's script, one that
+# runs this prefix's, and one that names nothing this can follow. The last is not
+# "another install's": a stale unit left by a prefix whose scripts are gone has to be
+# cleaned up. A value this cannot read at all (a systemd specifier or a desktop field
+# code, which only systemd or the desktop can turn into a path) does count as another
+# install's, because leaving a working install's file alone is recoverable and
+# deleting it is not.
+#
 # The two writers escape the same prefix differently, so undoing it has to know which
 # file it is reading. systemd doubles a `\`, a `%` and a `$` and quotes the word; the
 # desktop entry escapes with backslashes and then doubles those, because the value
@@ -298,49 +304,64 @@ fi
 # path this run would write called another prefix's file ours whenever its path held one
 # of those characters, and the fix for a scratch prefix then removed or repointed the
 # wrong install's files.
-exec_path() {  # exec_path <file> -> the executable it runs, unescaped
-    local line key value other
-    line="$(grep -m1 -e '^ExecStart=' -e '^Exec=' "$1" 2>/dev/null)" || true
-    case "$line" in
-        ExecStart=*) key=systemd; value="${line#ExecStart=}" ;;
-        Exec=*)      key=desktop; value="${line#Exec=}" ;;
-        *)           return 0 ;;
-    esac
-    value="${value#-}"
-    case "$value" in
-        \"*) other="$(printf '%s' "$value" | sed -e 's/^"//' -e 's/\([^\\]\)".*/\1/')" ;;
-        *)   other="${value%% *}" ;;
-    esac
-    case "$key" in
-        systemd)
-            # `\\` is a backslash and `$$` a literal dollar, both doubled by
-            # systemd_exec_arg, and `%%` is a literal `%`.
-            other="$(printf '%s' "$other" | sed -e 's/\\\(.\)/\1/g')"
-            other="${other//\$\$/\$}" ;;
-        desktop)
-            # Two layers to undo: the word splitter's escapes, and then the key-file
-            # reader's doubling of them. One pass left `\\$` as `\$`, a path the file
-            # does not name.
-            other="$(printf '%s' "$other" | sed -e 's/\\\(["\\`$]\)/\1/g')"
-            other="$(printf '%s' "$other" | sed -e 's/\\\(["\\`$]\)/\1/g')" ;;
-    esac
-    # `%%` is a literal `%` in both formats; a `%` left on its own is a systemd
-    # specifier or a desktop field code, which names something this cannot resolve.
-    case "${other//%%/}" in
-        *%*) printf '%s' ""; return 0 ;;
-    esac
-    other="${other//%%/%}"
-    printf '%s' "$other"
+#
+# systemd runs every `ExecStart=` in order for a oneshot service, and a bare
+# `ExecStart=` resets the list ("If the empty string is assigned to this option, the
+# list of commands to start is reset", systemd.service(5)), so the lines are read with
+# that rule instead of taking the first one. That mattered: a unit with an empty
+# ExecStart= above a real one was read as naming nothing, which is the answer that lets
+# this run delete or repoint it.
+exec_paths() {  # exec_paths <file> -> one executable per line, `?` for one it cannot read
+    local kind line value other
+    local found=()
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+            ExecStart=*) kind=systemd; value="${line#ExecStart=}" ;;
+            Exec=*)      kind=desktop; value="${line#Exec=}" ;;
+            *)           continue ;;
+        esac
+        if [ -z "$value" ]; then
+            found=()
+            continue
+        fi
+        value="${value#-}"
+        case "$value" in
+            \"*) other="$(printf '%s' "$value" | sed -e 's/^"//' -e 's/\([^\\]\)".*/\1/')" ;;
+            *)   other="${value%% *}" ;;
+        esac
+        case "$kind" in
+            systemd)
+                # `\\` is a backslash and `$$` a literal dollar, both doubled by
+                # systemd_exec_arg, and `%%` is a literal `%`.
+                other="$(printf '%s' "$other" | sed -e 's/\\\(.\)/\1/g')"
+                other="${other//\$\$/\$}" ;;
+            desktop)
+                # Two layers to undo: the word splitter's escapes, and then the
+                # key-file reader's doubling of them. One pass leaves `\\$` as `\$`,
+                # a path the file does not name.
+                other="$(printf '%s' "$other" | sed -e 's/\\\(["\\`$]\)/\1/g')"
+                other="$(printf '%s' "$other" | sed -e 's/\\\(["\\`$]\)/\1/g')" ;;
+        esac
+        # `%%` is a literal `%` in both formats; a `%` left on its own is a specifier
+        # or a field code, which is reported as unreadable rather than as a path.
+        case "${other//%%/}" in
+            *%*) found+=("?") ;;
+            *)   found+=("${other//%%/%}") ;;
+        esac
+    done < "$1"
+    [ "${#found[@]}" -gt 0 ] && printf '%s\n' "${found[@]}"
 }
 
 foreign_exec() {  # foreign_exec <file>: 0 when it runs something that exists elsewhere
-    local other
-    other="$(exec_path "$1")"
-    [ -n "$other" ] || return 1
-    case "$other" in
-        "$BIN_DIR"/*) return 1 ;;
-    esac
-    [ -x "$other" ]
+    local path foreign=0
+    while IFS= read -r path; do
+        case "$path" in
+            '?')          foreign=1 ;;
+            "$BIN_DIR"/*) : ;;
+            *)            [ -x "$path" ] && foreign=1 ;;
+        esac
+    done < <(exec_paths "$1" 2>/dev/null)
+    [ "$foreign" = 1 ]
 }
 say "Installing scripts into $BIN_DIR"
 mkdir -p "$BIN_DIR"

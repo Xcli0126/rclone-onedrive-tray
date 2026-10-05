@@ -440,13 +440,23 @@ esac
 read -r -a BISYNC_OPTS <<<"$BISYNC_ARGS"
 # A preview can also be asked for through BISYNC_ARGS, which is passed to rclone as
 # written: a config holding `--dry-run` made the run write state=synced for a run that
-# transferred nothing, the same false green the wrapper's own flag was fixed for. The
-# flag is what decides, wherever it was written. Only the bare spellings count:
-# `--dry-run=false` is how rclone is told not to preview, so treating it as one would
-# drop the result line of a real run.
-case " ${BISYNC_OPTS[*]-} " in
-    *" --dry-run "*|*" -n "*) dry_run=1 ;;
-esac
+# transferred nothing, the same false green the wrapper's own flag was fixed for. So
+# the flag decides wherever it was written, in every spelling rclone accepts for a
+# boolean: `--dry-run=false` and its relatives are how rclone is told the opposite,
+# and only that family means a real run. Measured on rclone 1.75.1:
+# `--dry-run=false` transferred the file, `--dry-run=true`, `--dry-run=1` and
+# `-n=true` transferred nothing. A value rclone refuses makes the run fail, and a
+# failed run writes its own verdict whatever this says.
+for opt in ${BISYNC_OPTS[@]+"${BISYNC_OPTS[@]}"}; do
+    case "$opt" in
+        --dry-run|-n) dry_run=1 ;;
+        --dry-run=*|-n=*)
+            case "${opt#*=}" in
+                0|f|F|false|FALSE|False) ;;
+                *) dry_run=1 ;;
+            esac ;;
+    esac
+done
 
 # ------------------------------------------------------ what this rclone has
 # The built-in default set passes four flags that arrived in rclone 1.66:

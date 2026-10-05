@@ -10,8 +10,8 @@
 #   RESULTS=mutations.txt tests/lib/mutate.sh     also write the table to a file
 #   RESUME=1 RESULTS=mutations.txt ...            skip the rows that file already has
 #
-# A full pass is hours: 113 of the rows run install-flow (measured here: 1m53s each)
-# and 89 run the tray suite (2m33s each), which together is about 7.3 hours.
+# A full pass is hours: 120 of the rows run install-flow (measured here: 1m53s each)
+# and 89 run the tray suite (2m33s each), which together is about 7.5 hours.
 # `--suite` is how a pass is done in pieces, one suite at a time, and the RESULTS file
 # records the commit, whether the tree was dirty, and which rows the run covered.
 #
