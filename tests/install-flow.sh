@@ -2828,19 +2828,22 @@ else
 fi
 check "and only the one attempt was made" test "$(wc -l < "$WORK/cap-args")" -eq 1
 
-# A dry run changes nothing, so its marker is the only record of the run and it
-# has to describe what really happened: a clean dry run is a clean run, and one
-# whose rclone failed is a failure.
+# A dry run changes nothing, and the marker is a verdict about the pair: a clean dry
+# run used to write state=synced, so the tray showed a green icon and a fresh time
+# for a preview that transferred nothing, which is the moment a false green matters
+# most because checking an install with --dry-run is what the README suggests. It
+# writes no marker now and says in the log what it was; a dry run whose rclone
+# failed still writes the failure, because that is a real verdict about the pair.
 cap_config
 : > "$CAP/sync.log"; : > "$WORK/cap-args"
 cap_env CAP_STDERR= CAP_RC=0 "$HOME/.local/bin/onedrive-sync" --dry-run >/dev/null 2>&1 || true
 check "a dry run passes --dry-run through to rclone" \
     grep -q -- '--dry-run' "$WORK/cap-args"
-if [ "$(result_count "$CAP/sync.log")" = 1 ] &&
-        grep -q 'state=synced tag=none' "$CAP/sync.log"; then
-    ok "and a dry run nothing failed in writes one synced marker"
+if [ "$(result_count "$CAP/sync.log")" = 0 ] &&
+        grep -q -- '--dry-run finished without transferring anything' "$CAP/sync.log"; then
+    ok "and a clean dry run writes no verdict, and says in the log what it was"
 else
-    bad "a clean dry run: $(grep 'ONEDRIVE_RESULT' "$CAP/sync.log" | tail -1)"
+    bad "a clean dry run: $(grep -c 'ONEDRIVE_RESULT' "$CAP/sync.log") marker(s), $(tail -1 "$CAP/sync.log")"
 fi
 : > "$CAP/sync.log"; : > "$WORK/cap-args"
 cap_env CAP_STDERR="$CAP_EOF" CAP_RC=1 "$HOME/.local/bin/onedrive-sync" --dry-run >/dev/null 2>&1 || true
