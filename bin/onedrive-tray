@@ -766,6 +766,36 @@ def update_config_file(path: str, changes: dict) -> list:
     the one load_config() answers the same file with - when it is there but is not
     the UTF-8 this format has to be.
     """
+    # Read, change and write is not one step, and two of them running at once lose
+    # one change: the tray's settings Save alongside `onedrive-tray --hide-icon`, or
+    # its own window beside one started with `--settings`, each read the whole file,
+    # change their key and write the whole file back, and the second rename wins
+    # outright - including every key the second writer had read before the first
+    # wrote. Measured on a 196-byte config: the window is 1.7 ms wide and 12 of 12
+    # simultaneous pairs lost one update, with the loser printing its success line.
+    # A lock beside the config makes the three steps one.
+    lock_path = path + ".lock"
+    lock_fd = None
+    try:
+        lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+    except OSError:
+        # No lock, no serialisation: the write still goes ahead, because failing to
+        # save a setting over a lock file that cannot be created is worse than the
+        # race it prevents.
+        if lock_fd is not None:
+            os.close(lock_fd)
+            lock_fd = None
+    try:
+        return _update_config_file_locked(path, changes)
+    finally:
+        if lock_fd is not None:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
+
+
+def _update_config_file_locked(path: str, changes: dict) -> list:
+    """The read, change and write, with the caller holding the lock."""
     try:
         with open(path, encoding="utf-8") as fh:
             text = fh.read()
@@ -1683,6 +1713,13 @@ def read_progress(text: str, max_age: int = 30):
     Returns None when there is no block, or when the newest one is older than
     max_age seconds. Without that age check an idle tray reports the final
     numbers of the previous run as if a transfer were in flight.
+
+    A block stamped in the future is refused too. A backwards clock step - an NTP
+    correction, a restored VM snapshot, a wrong RTC after a long power-off - makes
+    lines already in the file look like the future, and `age > max_age` lets a
+    negative age through, so the panel showed "Syncing... 26%" for a run that had
+    finished. The slack is small because the writer's clock and this one are the
+    same clock: anything more than a couple of seconds ahead is not this run.
     """
     last = None
     for match in PROG_RE.finditer(text):
@@ -1695,7 +1732,7 @@ def read_progress(text: str, max_age: int = 30):
         try:
             age = time.time() - time.mktime(
                 time.strptime(stamps[-1], "%Y/%m/%d %H:%M:%S"))
-            if age > max_age:
+            if age > max_age or age < -2:
                 return None
         except (ValueError, OverflowError):
             pass

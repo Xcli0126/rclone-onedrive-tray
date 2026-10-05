@@ -9,9 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Every run now ends with one machine-readable line of its own:
-  `ONEDRIVE_RESULT v=1 state=<synced|error|stopped> tag=<tag|none> when=HH:MM
-  msg=<sentence>`. The tray reads it for the icon, the time and the reason it
+- Every run that reaches rclone now ends with one machine-readable line of its own
+  (`ONEDRIVE_RESULT v=1 state=<synced|error|stopped> tag=<tag|none> when=HH:MM
+  msg=<sentence>`); three runs carry none because there is no verdict to carry - a run
+  that found the lock held, one that stopped before the log could be opened, and one
+  that ran during a pause. The tray reads it for the icon, the time and the reason it
   gives, and `onedrive-doctor` reads it to classify the log, instead of both of
   them matching English fragments in a file rclone also writes. `state=stopped` is
   a failure class a rerun cannot clear, `state=error` is a run that used up its
@@ -52,6 +54,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   than leaving the check looking stronger than it is.
 
 ### Fixed
+
+- A full filesystem no longer makes the wrapper report success. Opening the log for
+  append allocates nothing, so the pre-flight guard passed on a full disk and every line
+  after it was lost: measured on a full tmpfs, the run exited 0 with the log byte for byte
+  unchanged, so the tray and the doctor went on showing the previous verdict while each
+  timer tick had really synced. Every write is checked now, the first failure says so on
+  stderr (which systemd keeps), and the run exits non-zero so the unit is marked failed.
+- An installer or uninstaller aimed at another prefix no longer touches this one's units
+  or its autostart entry. The unit files, the interval drop-in and the desktop entry live
+  at paths that do not depend on `--prefix` and hold absolute paths, so `uninstall.sh
+  --prefix <scratch>` deleted a working install's units and login entry (measured: the
+  unit directory empty and the autostart entry gone, while the scripts stayed), and
+  `install.sh --prefix <other>` repointed them into the other prefix and brought back an
+  autostart entry the user had turned off. Each file is now removed or rewritten only
+  when it names this prefix's scripts, and a run that leaves another install's units
+  alone does not enable them either.
+- `--dry-run` writes no success line. It reaches the same exit-0 path as a real run, so
+  the marker said `state=synced` and the tray showed a green icon and a fresh time for a
+  preview that transferred nothing; the run now says what it was in the log and leaves
+  the last real verdict alone.
+- Two processes writing the config at the same time no longer lose one change. The
+  read-change-write was three steps with nothing holding the file, so the tray's settings
+  Save beside `--hide-icon` (or two settings windows) lost one update inside a measured
+  1.7 ms window, 12 times out of 12, and the loser still printed its success line. A lock
+  beside the config makes it one step: 0 of 12 under the same probe.
+- A `LOCAL` that disappears during a run is refused before the retries use it, with the
+  sentence that names the fix, instead of three rclone attempts and a `[other] see log`
+  verdict.
+- A stats block stamped in the future is not live progress. A backwards clock step made
+  already-written lines look like the future, and the age test only rejected old ones, so
+  the panel showed "Syncing... 26%" for a run that had finished; a block more than a
+  couple of seconds ahead is refused now.
 
 - The reader expands a tilde only where the shell does, and a `LOCAL` that still holds one
   is refused wherever it stands. `~`, `~/...` and a `~user` that exists are expanded,

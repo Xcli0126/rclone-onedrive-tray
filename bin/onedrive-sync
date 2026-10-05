@@ -82,7 +82,25 @@ fi
 # that no reader can match. The doctor parses the field with `date -d` and the
 # tray parses it with strptime, and neither can know which calendar wrote the
 # file, so the writer is the only place this can be settled.
-log_line() { printf '%s %s\n' "$(LC_ALL=C date '+%Y/%m/%d %H:%M:%S')" "$*" >>"$LOG"; }
+# A write to the log can fail while the open succeeded: opening for append allocates
+# nothing, so the pre-flight guard above passes on a full filesystem and every line
+# after it is lost. The run then exited 0 with the tray showing whatever verdict was
+# already in the file - a stale failure, or nothing at all - while each timer tick had
+# in fact synced. Every write is checked now, the first failure says so on stderr where
+# systemd keeps it, and the run ends non-zero so the unit is marked failed rather than
+# successful.
+LOG_WRITE_FAILED=0
+log_write_failed() {  # log_write_failed <what happened>
+    [ "$LOG_WRITE_FAILED" = 1 ] && return 0
+    LOG_WRITE_FAILED=1
+    printf '%s: cannot write to %s: %s\n' "$APP" "$LOG" "$1" >&2
+    printf '%s: the log is the only channel the tray and the doctor read, so a run that\n' "$APP" >&2
+    printf '%s: cannot write it is reported here and with a non-zero status.\n' "$APP" >&2
+}
+log_line() {
+    printf '%s %s\n' "$(LC_ALL=C date '+%Y/%m/%d %H:%M:%S')" "$*" >>"$LOG" 2>/dev/null ||
+        log_write_failed "a write failed (a full filesystem is the usual reason)"
+}
 
 # ---------------------------------------------------------------- result marker
 # One machine-readable line per run, written last, so a reader no longer has to
@@ -611,6 +629,7 @@ if [ -n "$EXCLUDE_FOLDERS_FILE" ] && [ -f "$EXCLUDE_FOLDERS_FILE" ]; then
 fi
 
 resync_wanted=0
+dry_run=0
 for arg in "$@"; do
     case "$arg" in
         --force)
@@ -620,6 +639,7 @@ for arg in "$@"; do
             resync_wanted=1
             ARGS+=("$arg") ;;
         --dry-run)
+            dry_run=1
             ARGS+=("$arg") ;;
         *)
             # verbose_flag, so the short spellings of verbose are accepted here
@@ -834,6 +854,14 @@ PERMANENT_TAGS=" auth access maxdelete oldrclone "
 stopped=0
 
 for i in $(seq 1 "$RETRIES"); do
+    # The guard above runs once, before the lock and the retries, and the tree can
+    # disappear during a run: an unmounted share or a path that was moved leaves the
+    # later attempts handing rclone a root that is not there, which the retry loop then
+    # reports as "[other] see log" instead of the sentence that names the fix.
+    if [ ! -d "$LOCAL" ]; then
+        log_line "ERROR: $LOCAL disappeared during this run, so attempt $i was not started"
+        refuse "$LOCAL does not exist. Create it first:  mkdir -p \"$LOCAL\"  (or point LOCAL at the right directory in $CONFIG_FILE)"
+    fi
     # Again at the top of every attempt: an attempt that was killed leaves its
     # lock behind with a dead owner, and without this the remaining attempts fail
     # on a lock the sweep above would have removed, spending their RETRY_DELAY to
@@ -850,7 +878,21 @@ for i in $(seq 1 "$RETRIES"); do
 
     if [ "$rc" -eq 0 ]; then
         [ "$i" -gt 1 ] && echo "$APP: succeeded on attempt $i"
-        result_line synced none "sync completed"
+        if [ "$LOG_WRITE_FAILED" = 1 ]; then
+            # The sync worked and the log does not say so. Exiting 0 would leave the
+            # only record of the run missing and the unit green, so the status carries
+            # it and systemd shows the service as failed until the log can be written.
+            die "sync completed but the log could not be written; free space on the filesystem holding $LOG"
+        fi
+        if [ "$dry_run" -eq 1 ]; then
+            # A dry run transferred nothing, so it is not a verdict about the pair: the
+            # tray reads the marker as "the last sync succeeded" and showed a green icon
+            # with a fresh time for a preview, and the doctor read the log as healthy.
+            # The run says what it was and leaves the last real verdict alone.
+            log_line "NOTICE: --dry-run finished without transferring anything, so no result line was written"
+        else
+            result_line synced none "sync completed"
+        fi
         exit 0
     fi
 
@@ -883,4 +925,6 @@ if [ "$stopped" -eq 1 ]; then
 else
     result_line error "$hint_tag" "$hint_msg"
 fi
+[ "$LOG_WRITE_FAILED" = 1 ] &&
+    die "the run failed and the log could not be written, so the reason is only on stderr above"
 exit 1

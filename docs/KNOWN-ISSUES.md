@@ -149,8 +149,12 @@ not have to be rediscovered.
   Appending the unit name to three files would have left the config as the real
   obstacle and moved the failure somewhere harder to find.
 - The prose in the shared log is now the fallback rather than the source of truth.
-  Every run ends with one machine-readable line (`ONEDRIVE_RESULT v=1 state=…
-  tag=… when=HH:MM msg=…`), and both the tray and the doctor read that first. The
+  Every run that reaches the sync ends with one machine-readable line
+  (`ONEDRIVE_RESULT v=1 state=… tag=… when=HH:MM msg=…`), and both the tray and the
+  doctor read that first. Three runs carry none, because there is no verdict to carry:
+  one that found another run holding the lock, one that stopped before the log could be
+  opened, and one that ran during a pause. Both READMEs and docs/TROUBLESHOOTING.md
+  name them. The
   English scan stays for two things it is the only answer to: a log written by an
   older version of the wrapper, and a run killed after rclone wrote but before the
   wrapper could. The doctor also keeps its own copy of the pattern table for the

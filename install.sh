@@ -279,8 +279,30 @@ SCRIPTS=(
 # setup.sh writes the config before it hands over, so on the documented first
 # run the config exists by the time this script starts and cannot tell a first
 # install from a re-run. A tray that was not installed before is the other half.
+# Whether the tray was installed before is asked of the things a prefix change does
+# not move: the tray binary at this prefix, or the units at their one shared path. It
+# used to be the binary alone, so an install from another prefix looked like a first
+# install and the autostart entry a user had removed came back.
 TRAY_WAS_INSTALLED=0
-if [ -x "$BIN_DIR/onedrive-tray" ]; then TRAY_WAS_INSTALLED=1; fi
+if [ -x "$BIN_DIR/onedrive-tray" ] || [ -f "$UNIT_DIR/$UNIT_NAME.service" ]; then
+    TRAY_WAS_INSTALLED=1
+fi
+
+# Does a unit or desktop file name an executable, and is it one of ours? A file that
+# names no path at all, or one that is not there, is stale rather than another install's:
+# leaving it behind would keep a login or a timer pointing at something that is gone.
+foreign_exec() {  # foreign_exec <file>: 0 when it runs something that exists elsewhere
+    local value other
+    value="$(sed -n -e 's/^ExecStart=//p' -e 's/^Exec=//p' "$1" | head -1)"
+    [ -n "$value" ] || return 1
+    other="${value%% *}"
+    other="${other%\"}"
+    other="${other#\"}"
+    case "$other" in
+        "$BIN_DIR"/*) return 1 ;;
+    esac
+    [ -x "$other" ]
+}
 
 say "Installing scripts into $BIN_DIR"
 mkdir -p "$BIN_DIR"
@@ -342,11 +364,25 @@ case "$INTERVAL_MIN" in
         } ;;
 esac
 
+# A unit directory is shared by every prefix on the machine, and the unit file holds an
+# absolute ExecStart. Writing it for another prefix silently repoints an install that is
+# already running from the old one, so the existing unit is read first and left alone
+# when it belongs to a different prefix: moving an install is an uninstall and an
+# install, not a second install from elsewhere.
+UNIT_IS_OTHER=0
+if [ -f "$UNIT_DIR/$UNIT_NAME.service" ] &&
+        foreign_exec "$UNIT_DIR/$UNIT_NAME.service"; then
+    UNIT_IS_OTHER=1
+    warn "leaving the systemd units alone: $UNIT_DIR/$UNIT_NAME.service runs a different prefix, not $BIN_DIR"
+    warn "  to move the install, run ./uninstall.sh --prefix <the old prefix> first"
+fi
+if [ "$UNIT_IS_OTHER" = 0 ]; then
 sed -e "s|%SYNC_SCRIPT%|$(sed_replacement "$(systemd_exec_arg "$BIN_DIR/onedrive-sync")")|g" \
     "$SRC_DIR/systemd/onedrive-sync.service.in" > "$UNIT_DIR/$UNIT_NAME.service"
 sed -e "s|%INTERVAL%|$INTERVAL_MIN|g" \
     "$SRC_DIR/systemd/onedrive-sync.timer.in" > "$UNIT_DIR/$UNIT_NAME.timer"
 chmod 0644 "$UNIT_DIR/$UNIT_NAME.service" "$UNIT_DIR/$UNIT_NAME.timer"
+fi
 
 WATCH="$(config_value WATCH)"
 WATCH="${WATCH:-1}"
@@ -366,10 +402,12 @@ watch_on() {  # watch_on <value>
 # The unit is written whether or not WATCH is on: the settings dialog's
 # "Realtime sync" switch enables this unit, and it cannot enable one that was
 # never created. Whether it runs is decided at the enable step below.
+if [ "$UNIT_IS_OTHER" = 0 ]; then
 sed -e "s|%WATCH_SCRIPT%|$(sed_replacement "$(systemd_exec_arg "$BIN_DIR/onedrive-watch")")|g" \
     "$SRC_DIR/systemd/onedrive-watch.service.in" \
     > "$UNIT_DIR/$UNIT_NAME-watch.service"
 chmod 0644 "$UNIT_DIR/$UNIT_NAME-watch.service"
+fi
 
 # The timer is owned by this script, which writes it from INTERVAL_MIN on every
 # run, while the tray's settings dialog writes OnUnitInactiveSec into a drop-in
@@ -469,7 +507,11 @@ desktop_exec_arg() {  # desktop_exec_arg <path> -> the Exec argument
 # entry is written for a first install and refreshed when it is already there;
 # on a re-run where it was removed, it stays removed.
 AUTOSTART_FILE="$AUTOSTART_DIR/rclone-onedrive-tray.desktop"
-if [ "${#tray_missing[@]}" -gt 0 ]; then
+if [ -f "$AUTOSTART_FILE" ] && foreign_exec "$AUTOSTART_FILE"; then
+    # One entry per desktop, and it holds an absolute Exec. Rewriting it here would
+    # repoint a login that starts another prefix's tray.
+    warn "leaving $AUTOSTART_FILE alone: it starts a different prefix, not $BIN_DIR/onedrive-tray"
+elif [ "${#tray_missing[@]}" -gt 0 ]; then
     # An entry left behind by an earlier install would have the desktop try to
     # start a tray whose GTK stack is gone, once per login. Saying nothing about
     # it while leaving it there is the worst of both.
@@ -539,7 +581,12 @@ if [ "$NM_DISPATCHER" -eq 1 ]; then
 fi
 
 # --------------------------------------------------------------- enable
-if systemctl --user daemon-reload 2>/dev/null; then
+if [ "$UNIT_IS_OTHER" = 1 ]; then
+    # The units belong to another prefix, and `enable --now` is not a no-op on one
+    # that was deliberately switched off: it would put that install back on a
+    # schedule its owner took it off. The run says so and leaves the manager alone.
+    warn "nothing enabled: the units at $UNIT_DIR belong to another install"
+elif systemctl --user daemon-reload 2>/dev/null; then
     # The running manager reads its own unit search path, which is not always
     # $UNIT_DIR. Redirect XDG_CONFIG_HOME and the units land somewhere it never
     # looks, while a same-named unit from another install is still visible: an

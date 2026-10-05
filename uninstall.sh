@@ -85,13 +85,76 @@ else
 fi
 
 say "Removing files"
-rm -f "$UNIT_DIR/$UNIT_NAME.service" "$UNIT_DIR/$UNIT_NAME.timer"
-rm -f "$UNIT_DIR/$UNIT_NAME-watch.service"
+# The units, the drop-in and the autostart entry live at paths that do not depend on
+# --prefix: the units carry an absolute ExecStart, and the autostart entry an absolute
+# Exec. Removing them for a scratch prefix therefore tears down whatever install is
+# actually running from them, which is the same hazard the NetworkManager hook below is
+# guarded against. So each file goes only when it names this prefix's scripts.
+# A file is another install's only when it runs an executable that is there and is not
+# ours. One that names nothing, or names a path that is gone, is stale: leaving it behind
+# would keep a timer or a login pointing at something that no longer exists.
+foreign_exec() {  # foreign_exec <file>: 0 when it runs something that exists elsewhere
+    local value other
+    value="$(sed -n -e 's/^ExecStart=//p' -e 's/^Exec=//p' "$1" | head -1)"
+    [ -n "$value" ] || return 1
+    other="${value%% *}"
+    other="${other%\"}"
+    other="${other#\"}"
+    case "$other" in
+        "$BIN_DIR"/*) return 1 ;;
+    esac
+    [ -x "$other" ]
+}
+owns_unit() {  # owns_unit <file> -- is this unit ours to remove?
+    [ -f "$1" ] || return 1
+    foreign_exec "$1" && return 1
+    return 0
+}
+owns_autostart() {  # owns_autostart <file> -- is this entry ours to remove?
+    [ -f "$1" ] || return 1
+    foreign_exec "$1" && return 1
+    return 0
+}
+kept_units=0
+# The service and the timer are one install: the timer names the service and has no
+# ExecStart of its own, so it goes whenever the service does.
+service_file="$UNIT_DIR/$UNIT_NAME.service"
+if [ -f "$service_file" ]; then
+    if owns_unit "$service_file"; then
+        rm -f "$service_file"
+    else
+        warn "leaving $service_file alone: it runs another install's script"
+        kept_units=1
+    fi
+fi
+if [ "$kept_units" = 0 ]; then
+    rm -f "$UNIT_DIR/$UNIT_NAME.timer"
+fi
+watch_file="$UNIT_DIR/$UNIT_NAME-watch.service"
+if [ -f "$watch_file" ]; then
+    if owns_unit "$watch_file"; then
+        rm -f "$watch_file"
+    else
+        warn "leaving $watch_file alone: it runs another install's script"
+        kept_units=1
+    fi
+fi
 # The tray stores the sync interval in a drop-in beside the timer, and install.sh
 # keeps an existing one on purpose. Left behind, it silently hands its interval to
-# the next install of the same unit name, so it goes with the units it overrides.
-rm -rf "$UNIT_DIR/$UNIT_NAME.timer.d"
-rm -f "$AUTOSTART"
+# the next install of the same unit name, so it goes with the units it overrides -
+# and not when those units belong to another install.
+if [ "$kept_units" = 0 ]; then
+    rm -rf "$UNIT_DIR/$UNIT_NAME.timer.d"
+else
+    warn "leaving $UNIT_DIR/$UNIT_NAME.timer.d alone: its units belong to another install"
+fi
+if [ -f "$AUTOSTART" ]; then
+    if owns_autostart "$AUTOSTART"; then
+        rm -f "$AUTOSTART"
+    else
+        warn "leaving $AUTOSTART alone: it starts another install's tray"
+    fi
+fi
 rm -f "$BIN_DIR/onedrive-sync" "$BIN_DIR/onedrive-tray" "$BIN_DIR/onedrive-watch"
 rm -f "$BIN_DIR/onedrive-check"
 rm -f "$BIN_DIR/onedrive-check-access"
