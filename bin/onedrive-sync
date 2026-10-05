@@ -54,6 +54,7 @@ CHECK_ACCESS="${CHECK_ACCESS:-0}"
 CHECK_FILENAME="${CHECK_FILENAME:-}"
 MAX_LOG_BYTES="${MAX_LOG_BYTES:-5242880}"
 RETRIES="${RETRIES:-3}"
+dry_run=0
 RETRY_DELAY="${RETRY_DELAY:-60}"
 
 # ---------------------------------------------------------------- the log
@@ -94,8 +95,9 @@ log_write_failed() {  # log_write_failed <what happened>
     [ "$LOG_WRITE_FAILED" = 1 ] && return 0
     LOG_WRITE_FAILED=1
     printf '%s: cannot write to %s: %s\n' "$APP" "$LOG" "$1" >&2
-    printf '%s: the log is the only channel the tray and the doctor read, so a run that\n' "$APP" >&2
-    printf '%s: cannot write it is reported here and with a non-zero status.\n' "$APP" >&2
+    printf '%s: the log is the only channel the tray and the doctor read. A run that\n' "$APP" >&2
+    printf '%s: synced and could not record it ends with a non-zero status; one that did\n' "$APP" >&2
+    printf '%s: nothing (a pause, a run that found the lock held, a --dry-run) says so here.\n' "$APP" >&2
 }
 log_line() {
     printf '%s %s\n' "$(LC_ALL=C date '+%Y/%m/%d %H:%M:%S')" "$*" >>"$LOG" 2>/dev/null ||
@@ -436,6 +438,15 @@ case " $BISYNC_ARGS " in
         log_line "WARNING: --force is set in BISYNC_ARGS, so the delete cap cannot stop this run" ;;
 esac
 read -r -a BISYNC_OPTS <<<"$BISYNC_ARGS"
+# A preview can also be asked for through BISYNC_ARGS, which is passed to rclone as
+# written: a config holding `--dry-run` made the run write state=synced for a run that
+# transferred nothing, the same false green the wrapper's own flag was fixed for. The
+# flag is what decides, wherever it was written. Only the bare spellings count:
+# `--dry-run=false` is how rclone is told not to preview, so treating it as one would
+# drop the result line of a real run.
+case " ${BISYNC_OPTS[*]-} " in
+    *" --dry-run "*|*" -n "*) dry_run=1 ;;
+esac
 
 # ------------------------------------------------------ what this rclone has
 # The built-in default set passes four flags that arrived in rclone 1.66:
@@ -629,7 +640,6 @@ if [ -n "$EXCLUDE_FOLDERS_FILE" ] && [ -f "$EXCLUDE_FOLDERS_FILE" ]; then
 fi
 
 resync_wanted=0
-dry_run=0
 for arg in "$@"; do
     case "$arg" in
         --force)
@@ -888,13 +898,17 @@ for i in $(seq 1 "$RETRIES"); do
             log_line "NOTICE: --dry-run finished without transferring anything, so no result line was written"
             exit 0
         fi
+        result_line synced none "sync completed"
         if [ "$LOG_WRITE_FAILED" = 1 ]; then
-            # The sync worked and the log does not say so. Exiting 0 would leave the
-            # only record of the run missing and the unit green, so the status carries
-            # it and systemd shows the service as failed until the log can be written.
+            # The sync worked and the log does not say so. The check is after the marker,
+            # because the marker is the write that matters: with it above, a run whose
+            # only failed write was the marker itself still exited 0 with no verdict in
+            # the file - measured on a filesystem whose log tail page held exactly the
+            # bytes before it. Exiting 0 would leave the only record of the run missing
+            # and the unit green, so the status carries it and systemd shows the service
+            # as failed until the log can be written.
             die "sync completed but the log could not be written; free space on the filesystem holding $LOG"
         fi
-        result_line synced none "sync completed"
         exit 0
     fi
 

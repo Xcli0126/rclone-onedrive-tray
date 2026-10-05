@@ -93,13 +93,52 @@ say "Removing files"
 # A file is another install's only when it runs an executable that is there and is not
 # ours. One that names nothing, or names a path that is gone, is stale: leaving it behind
 # would keep a timer or a login pointing at something that no longer exists.
+# The two writers escape the same prefix differently, so undoing it has to know which
+# file it is reading. systemd doubles a `\`, a `%` and a `$` and quotes the word; the
+# desktop entry escapes with backslashes and then doubles those, because the value
+# crosses the key-file reader before the word splitter. Comparing raw text against the
+# path this run would write called another prefix's file ours whenever its path held one
+# of those characters, and the fix for a scratch prefix then removed or repointed the
+# wrong install's files.
+exec_path() {  # exec_path <file> -> the executable it runs, unescaped
+    local line key value other
+    line="$(grep -m1 -e '^ExecStart=' -e '^Exec=' "$1" 2>/dev/null)" || true
+    case "$line" in
+        ExecStart=*) key=systemd; value="${line#ExecStart=}" ;;
+        Exec=*)      key=desktop; value="${line#Exec=}" ;;
+        *)           return 0 ;;
+    esac
+    value="${value#-}"
+    case "$value" in
+        \"*) other="$(printf '%s' "$value" | sed -e 's/^"//' -e 's/\([^\\]\)".*/\1/')" ;;
+        *)   other="${value%% *}" ;;
+    esac
+    case "$key" in
+        systemd)
+            # `\\` is a backslash and `$$` a literal dollar, both doubled by
+            # systemd_exec_arg, and `%%` is a literal `%`.
+            other="$(printf '%s' "$other" | sed -e 's/\\\(.\)/\1/g')"
+            other="${other//\$\$/\$}" ;;
+        desktop)
+            # Two layers to undo: the word splitter's escapes, and then the key-file
+            # reader's doubling of them. One pass left `\\$` as `\$`, a path the file
+            # does not name.
+            other="$(printf '%s' "$other" | sed -e 's/\\\(["\\`$]\)/\1/g')"
+            other="$(printf '%s' "$other" | sed -e 's/\\\(["\\`$]\)/\1/g')" ;;
+    esac
+    # `%%` is a literal `%` in both formats; a `%` left on its own is a systemd
+    # specifier or a desktop field code, which names something this cannot resolve.
+    case "${other//%%/}" in
+        *%*) printf '%s' ""; return 0 ;;
+    esac
+    other="${other//%%/%}"
+    printf '%s' "$other"
+}
+
 foreign_exec() {  # foreign_exec <file>: 0 when it runs something that exists elsewhere
-    local value other
-    value="$(sed -n -e 's/^ExecStart=//p' -e 's/^Exec=//p' "$1" | head -1)"
-    [ -n "$value" ] || return 1
-    other="${value%% *}"
-    other="${other%\"}"
-    other="${other#\"}"
+    local other
+    other="$(exec_path "$1")"
+    [ -n "$other" ] || return 1
     case "$other" in
         "$BIN_DIR"/*) return 1 ;;
     esac

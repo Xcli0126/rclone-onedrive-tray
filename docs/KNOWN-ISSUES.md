@@ -35,6 +35,23 @@ not have to be rediscovered.
   unless a config value spells a `~`; autostart, a systemd unit and a login session all
   set `HOME` anyway.
 
+- The file that serialises config writes stays beside the config as
+  `~/.config/rclone-onedrive-tray/config.lock` and is never removed. Measured through the
+  tray's own writer, on the path the tray itself resolves: the file is created 0600 and
+  empty (0 bytes) next to `config`, the config is what changed, and nothing ever writes to
+  it. It is left behind on purpose. Removing it after
+  a save would mean unlinking the very file two processes are blocked on, and the next
+  writer creates a new one at the same name, so the pair can end up holding two locks on
+  two inodes and write at once. The wait for it is unbounded, because the section it
+  guards is one read and one rename of a file that is a few hundred bytes; the kernel
+  releases the lock when the holder exits, crash included, so a killed tray does not wedge
+  the next save - measured by taking the lock in a child, killing it with SIGKILL, and
+  acquiring the lock in the parent in 0.000 s while the file stayed on disk. A lock file
+  that cannot be created is not fatal either: the write goes ahead unserialised, as the
+  comment in `update_config_file()` says, because refusing to save a setting over a lock
+  file is worse than the race the lock prevents. The lock is not reentrant, and the body
+  it guards calls nothing that would take it again.
+
 - A line that assigns and then runs a command is read as the assignment. `KEY=a true`
   leaves `KEY` unset in the shell that sources the file - the assignment is a prefix of
   the command, not a setting - while the tray reads `a`, which is what it does with any
@@ -151,10 +168,10 @@ not have to be rediscovered.
 - The prose in the shared log is now the fallback rather than the source of truth.
   Every run that reaches the sync ends with one machine-readable line
   (`ONEDRIVE_RESULT v=1 state=… tag=… when=HH:MM msg=…`), and both the tray and the
-  doctor read that first. Three runs carry none, because there is no verdict to carry:
+  doctor read that first. Four runs carry none, because there is no verdict to carry:
   one that found another run holding the lock, one that stopped before the log could be
-  opened, and one that ran during a pause. Both READMEs and docs/TROUBLESHOOTING.md
-  name them. The
+  opened, one that ran during a pause, and one that ran with `--dry-run`. Both READMEs
+  and docs/TROUBLESHOOTING.md name them. The
   English scan stays for two things it is the only answer to: a log written by an
   older version of the wrapper, and a run killed after rclone wrote but before the
   wrapper could. The doctor also keeps its own copy of the pattern table for the

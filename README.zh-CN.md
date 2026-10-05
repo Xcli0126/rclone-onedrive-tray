@@ -52,7 +52,7 @@ Linux 上没有官方 OneDrive 客户端。`rclone bisync` 能承担同步，但
 
 冲突时两份都留。一个文件两边都改过，rclone 会把两个版本都重命名保留，而不是替你选一个赢家，所以不会丢东西。代价是合并要你手动做。
 
-每轮同步都会在日志末尾留一行机读结果，`ONEDRIVE_RESULT v=1 state=<synced|error|stopped> tag=<tag|none> when=HH:MM msg=<句子>`，托盘照这行决定图标、时间和失败原因。`state=stopped` 是再来一次也不会好的失败，`state=error` 是重试次数用完，`tag=` 对应上面那些提示类别。它周围那些英文是旧版本写的，也是托盘和 doctor 在看不到这行时的退路。只有两种情况没有这行：发现已经有同步在跑（胜负归那一轮），以及日志根本打不开（无处可写）。
+每轮同步都会在日志末尾留一行机读结果，`ONEDRIVE_RESULT v=1 state=<synced|error|stopped> tag=<tag|none> when=HH:MM msg=<句子>`，托盘照这行决定图标、时间和失败原因。`state=stopped` 是再来一次也不会好的失败，`state=error` 是重试次数用完，`tag=` 对应上面那些提示类别。它周围那些英文是旧版本写的，也是托盘和 doctor 在看不到这行时的退路。四种情况没有这行：发现已经有同步在跑（胜负归那一轮）、日志根本打不开（无处可写）、自动同步正暂停（这一轮什么都没做）、以及 `--dry-run`（只预演，没有任何结论可写）。`docs/TROUBLESHOOTING.md` 里四种都列了。
 
 日志到 5 MB 轮转，托盘只读它末尾 64 KB。每五分钟一次同步大约每天写 240 KB，对磁盘无所谓，但每三秒调一次 `readlines()` 再跑上一年就不是了。
 
@@ -115,7 +115,8 @@ cd rclone-onedrive-tray
              onedrive-check-access, onedrive-doctor
 ~/.config/rclone-onedrive-tray/config, filters.txt, exclude-folders.txt
              （exclude-folders.txt 由 setup.sh 和托盘的「同步的文件夹」菜单写入，
-             ./install.sh 不建这个文件；文件不存在等于全部同步）
+             ./install.sh 不建这个文件；文件不存在等于全部同步。config 旁边的
+             config.lock 是托盘改写配置时持有的空文件，留在那里没有关系）
 ~/.config/systemd/user/onedrive-sync.{service,timer}
 ~/.config/systemd/user/onedrive-sync-watch.service
 ~/.config/autostart/rclone-onedrive-tray.desktop

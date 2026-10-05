@@ -11,9 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Every run that reaches rclone now ends with one machine-readable line of its own
   (`ONEDRIVE_RESULT v=1 state=<synced|error|stopped> tag=<tag|none> when=HH:MM
-  msg=<sentence>`); three runs carry none because there is no verdict to carry - a run
-  that found the lock held, one that stopped before the log could be opened, and one
-  that ran during a pause. The tray reads it for the icon, the time and the reason it
+  msg=<sentence>`); four runs carry none because there is no verdict to carry - a run
+  that found the lock held, one that stopped before the log could be opened, one that
+  ran during a pause, and one that ran with `--dry-run`. The tray reads it for the icon, the time and the reason it
   gives, and `onedrive-doctor` reads it to classify the log, instead of both of
   them matching English fragments in a file rclone also writes. `state=stopped` is
   a failure class a rerun cannot clear, `state=error` is a run that used up its
@@ -70,15 +70,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   autostart entry the user had turned off. Each file is now removed or rewritten only
   when it names this prefix's scripts, and a run that leaves another install's units
   alone does not enable them either.
-- `--dry-run` writes no success line. It reaches the same exit-0 path as a real run, so
-  the marker said `state=synced` and the tray showed a green icon and a fresh time for a
-  preview that transferred nothing; the run now says what it was in the log and leaves
-  the last real verdict alone.
+- That ownership test reads the `Exec=` line back through the same escaping the writer
+  applied, so a prefix holding a space, a `%` or a `$` no longer decides the wrong way.
+  It compared the raw line against this prefix and then unescaped one layer, while the
+  unit doubles a backslash, a `%` and a `$` and the desktop entry's value crosses the
+  key-file reader before the word splitter: measured through both real writers over
+  eight path shapes, the raw comparison failed 13 of 16 cross-prefix checks and the
+  reader now fails none. `tests/install-flow.sh` installs under a path holding all
+  three characters at once, then runs an uninstall and an install aimed at another
+  prefix and requires the unit, the watch unit and the entry to survive unchanged - 7
+  of those 9 assertions fail against the raw comparison, measured at 527 passed and 7
+  failed there against 534 and 0 here. A `%` with no pair is still a systemd specifier
+  or a desktop field code, and a file naming one counts as naming nothing.
+- `--dry-run` writes no success line, wherever it was asked for. It reaches the same
+  exit-0 path as a real run, so the marker said `state=synced` and the tray showed a
+  green icon and a fresh time for a preview that transferred nothing; it is now noticed
+  on the command line and in `BISYNC_ARGS`, in the bare spelling and as the short `-n`.
+  `--dry-run=false`, which is how rclone is told the opposite, is deliberately not
+  counted: rclone 1.75.1 accepts it and really transfers (measured: `rclone bisync <a>
+  <b> --resync --dry-run=false` created the file), and matching `--dry-run=` instead
+  dropped the verdict of exactly that run - measured at 0 markers with a NOTICE claiming
+  nothing had been transferred. `tests/install-flow.sh` runs both spellings, and the
+  mutation table has a row that drops the detection from `BISYNC_ARGS` (caught: 533
+  passed and 1 failed against it).
+- The pages that count the runs carrying no result line are checked against the reasons
+  themselves. The prose said three of them for a release after `--dry-run` had become the
+  fourth, and nothing compared the sentence with the wrapper. `tests/docs.sh` reads the
+  paragraph that makes the claim on each of the four pages and requires both the numeral
+  and each reason to be named in it; dropping the dry-run clause from README.md fails the
+  run, measured at 114 passed and 1 failed against the page, 115 and 0 with it.
+- The size of the mutation table, which `docs/COMPATIBILITY.md` quotes in two
+  sentences, is read out of the table itself now. Those numbers are hand-written and
+  stood at "113 of the 234 rows" and "89 run the tray suite" while the table grew past
+  both; `tests/docs.sh` compares the sentence with the row counts and fails on the old
+  pair, which is how this entry's own two rows were noticed.
+- The log check sits after the marker on the success path, so the failure of the write
+  that matters is the one reported. With the check above it, a run whose only failed
+  write was the marker itself still exited 0, measured on a filesystem whose log tail
+  page held exactly the bytes before it: the file gained the prose and lost the verdict,
+  and the timer still reported success.
 - Two processes writing the config at the same time no longer lose one change. The
   read-change-write was three steps with nothing holding the file, so the tray's settings
   Save beside `--hide-icon` (or two settings windows) lost one update inside a measured
   1.7 ms window, 12 times out of 12, and the loser still printed its success line. A lock
-  beside the config makes it one step: 0 of 12 under the same probe.
+  beside the config makes it one step: 0 of 12 under the same probe. That lock is an empty
+  0600 file named `config.lock`, it stays beside the config, and both READMEs and
+  docs/KNOWN-ISSUES.md say so, because a file nobody asked for next to a hand-edited
+  config is worth explaining.
 - A `LOCAL` that disappears during a run is refused before the retries use it, with the
   sentence that names the fix, instead of three rclone attempts and a `[other] see log`
   verdict.

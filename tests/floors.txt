@@ -11,14 +11,15 @@
 # install-flow's floor is one below what it reports on this machine, because one of
 # its cases skips on a runner without /etc/NetworkManager/dispatcher.d and a skip is
 # not a pass: measured on both CI runners at e4a4868, 444 passed and 1 skipped there
-# against 445 passed here, and measured again at 1bd8720, 475 and 1 against 476. The
+# against 445 passed here, measured again at 1bd8720, 475 and 1 against 476, and
+# measured again at 5208582 in run 37246624418, 522 and 1 against 523. The
 # floors below are that relation kept up to date as the suite grows, and raising one
 # to the local count turns both runners red, which is how 445 first landed. That is the only skip left in the suite: the other
 # three environmental branches (systemd-analyze absent, a directory whose mode bits
 # do not bind, a pid that is already gone) are now created in the sandbox instead,
 # so they pass everywhere. Every other case must pass everywhere.
 dependency-matrix.sh 88
-install-flow.sh 522
+install-flow.sh 533
 filters.sh 50
-docs.sh 107
+docs.sh 118
 tray.sh 307

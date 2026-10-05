@@ -194,6 +194,96 @@ else
     done <<<"$zh"
 fi
 
+# ------------------------------------- the runs that end without a result line
+# Four runs write no ONEDRIVE_RESULT line, and the pages said three of them for a
+# release after --dry-run had become the fourth: the wrapper grew the case, the
+# sentences kept their old count, and nothing compared the two. Each page that
+# counts them now has to name the reasons it counts, in the paragraph that makes
+# the claim rather than anywhere on the page. CHANGELOG.md is left out, like the
+# suite count above: it is a record of past releases and quotes old numbers.
+title "the runs that leave no machine-readable result line"
+no_line_count=4
+check_no_line_paragraph() {  # check_no_line_paragraph <file> <numeral> <reasons...>
+    local f="$1" numeral="$2" reason pattern claim missing
+    shift 2
+    claim="$(awk '
+        !printing && /carry no |carry none|没有这行/ { printing = 1 }
+        printing { print }
+        printing && /^[[:space:]]*$/ { exit }
+    ' "$f")"
+    if [ -z "$claim" ]; then
+        bad "$f never says which runs leave no result line"
+        return
+    fi
+    if printf '%s' "$claim" | grep -q -- "$numeral"; then
+        ok "$f counts them as $numeral"
+    else
+        bad "$f names the runs that leave no line without saying $numeral"
+    fi
+    missing=0
+    for reason in "$@"; do
+        case "$reason" in
+            lock) pattern=lock ;;
+            log) pattern=log ;;
+            pause) pattern=paus ;;
+            dry-run) pattern=dry-run ;;
+            *) pattern="$reason" ;;
+        esac
+        printf '%s' "$claim" | grep -q -- "$pattern" || {
+            bad "$f counts $no_line_count runs and never names the $reason one"
+            missing=1
+        }
+    done
+    [ "$missing" -eq 0 ] && ok "$f names all $no_line_count reasons"
+}
+check_no_line_paragraph README.md Four lock log pause dry-run
+check_no_line_paragraph docs/TROUBLESHOOTING.md Four lock log pause dry-run
+check_no_line_paragraph docs/KNOWN-ISSUES.md Four lock log pause dry-run
+check_no_line_paragraph README.zh-CN.md 四种 跑 日志 暂停 dry-run
+
+# ------------------------------------------------------- the mutation table's size
+# "113 of the 234 rows run install-flow" and "89 run the tray suite" are hand-written
+# counts of a table that grows whenever a behaviour gains a row, and they sat
+# unchanged while it did. Same class as the suite count above, so it is checked the
+# same way: the numbers in the sentence against the table itself.
+title "the mutation row counts the compatibility notes quote"
+if [ -f tests/lib/mutations.txt ] && [ -f docs/COMPATIBILITY.md ]; then
+    table_rows=0
+    while IFS=$'\t' read -r id _ _ suite; do
+        case "$id" in ''|'#'*) continue ;; esac
+        table_rows=$((table_rows + 1))
+        case "$suite" in
+            install-flow) table_flow=$((${table_flow:-0} + 1)) ;;
+            tray) table_tray=$((${table_tray:-0} + 1)) ;;
+        esac
+    done < tests/lib/mutations.txt
+    claim="$(grep -oE '[0-9]+ of the [0-9]+ rows run' docs/COMPATIBILITY.md | head -1)"
+    if [ -z "$claim" ]; then
+        skip "docs/COMPATIBILITY.md no longer says how many rows run install-flow"
+    else
+        stated_flow="${claim%% *}"
+        stated_total="$(printf '%s' "$claim" | grep -oE 'the [0-9]+ rows' | grep -oE '[0-9]+')"
+        if [ "$stated_flow" = "${table_flow:-0}" ]; then
+            ok "it says $stated_flow rows run install-flow, and $table_flow do"
+        else
+            bad "it says $stated_flow install-flow rows, the table has ${table_flow:-0}"
+        fi
+        if [ "$stated_total" = "$table_rows" ]; then
+            ok "and it says the table has $stated_total rows, and it has $table_rows"
+        else
+            bad "it says $stated_total rows, the table has $table_rows"
+        fi
+    fi
+    claim="$(grep -oE '[0-9]+ run the tray suite' docs/COMPATIBILITY.md | head -1)"
+    if [ -z "$claim" ]; then
+        skip "docs/COMPATIBILITY.md no longer says how many rows run the tray suite"
+    elif [ "${claim%% *}" = "${table_tray:-0}" ]; then
+        ok "and ${claim%% *} run the tray suite, which is the table's count too"
+    else
+        bad "it says ${claim%% *} tray rows, the table has ${table_tray:-0}"
+    fi
+fi
+
 # ------------------------------------------------- the failure tags cross a line
 # onedrive-sync writes its failure hints into the log as "[tag] message", and the
 # tray renders them by looking the tag up as a translation key, through a

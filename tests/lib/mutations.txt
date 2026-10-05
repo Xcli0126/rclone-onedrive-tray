@@ -400,3 +400,13 @@ setup-carry-assign-keeps-broken-line	setup.sh	s|^        line=""$|        :|	ins
 # command.
 setup-watch-not-validated	setup.sh	s#^        1|true|yes|on|enabled) WATCH=1 ;;$#        *) WATCH=1 ;;#	install-flow
 setup-interval-not-validated	setup.sh	s#^        ''|\*\[!0-9\]\*) warn "INTERVAL_MIN#        '') warn "INTERVAL_MIN#	install-flow
+# The preview can be asked for through BISYNC_ARGS as well, and the wrapper passes
+# that through as written. Dropping the detection leaves state=synced in the log of
+# a run that transferred nothing, the false green the flag exists to prevent.
+sync-dryrun-bisync-args-dropped	bin/onedrive-sync	s#^    \*" --dry-run "\*|\*" -n "\*) dry_run=1 ;;#    *) : ;;#	install-flow
+# Two rows because the two scripts carry the same reader: reading an Exec= line with
+# the systemd rules undoes one layer instead of two, so an autostart entry whose
+# prefix holds a space, a % or a $ is called ours and removed (uninstall) or
+# repointed (install).
+install-exec-path-desktop-as-systemd	install.sh	s|^        Exec=\*)      key=desktop;|        Exec=*)      key=systemd;|	install-flow
+uninstall-exec-path-desktop-as-systemd	uninstall.sh	s|^        Exec=\*)      key=desktop;|        Exec=*)      key=systemd;|	install-flow

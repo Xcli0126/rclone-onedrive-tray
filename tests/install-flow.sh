@@ -2855,6 +2855,30 @@ else
     bad "a failed dry run: $(grep 'ONEDRIVE_RESULT' "$CAP/sync.log" | tail -1)"
 fi
 
+# The preview can also be asked for through BISYNC_ARGS, which the wrapper passes to
+# rclone as written, so the flag decides wherever it was written and not just on the
+# wrapper's own command line. The other spelling matters for the same reason: rclone
+# reads `--dry-run=false` as a real run, so a match on any `--dry-run=` would drop the
+# verdict of a run that transferred files.
+cap_config 'BISYNC_ARGS="--dry-run --stats 2s"'
+: > "$CAP/sync.log"; : > "$WORK/cap-args"
+cap_env CAP_STDERR= CAP_RC=0 "$HOME/.local/bin/onedrive-sync" >/dev/null 2>&1 || true
+if [ "$(result_count "$CAP/sync.log")" = 0 ] &&
+        grep -q -- '--dry-run finished without transferring anything' "$CAP/sync.log"; then
+    ok "a dry run written into BISYNC_ARGS writes no verdict either"
+else
+    bad "a BISYNC_ARGS dry run: $(grep -c 'ONEDRIVE_RESULT' "$CAP/sync.log") marker(s), $(tail -1 "$CAP/sync.log")"
+fi
+cap_config 'BISYNC_ARGS="--dry-run=false --stats 2s"'
+: > "$CAP/sync.log"; : > "$WORK/cap-args"
+cap_env CAP_STDERR= CAP_RC=0 "$HOME/.local/bin/onedrive-sync" >/dev/null 2>&1 || true
+if [ "$(result_count "$CAP/sync.log")" = 1 ] &&
+        [ "$(result_field "$CAP/sync.log" state)" = synced ]; then
+    ok "and --dry-run=false, which rclone reads as a real run, keeps its verdict"
+else
+    bad "a --dry-run=false run: $(grep -c 'ONEDRIVE_RESULT' "$CAP/sync.log") marker(s), $(tail -1 "$CAP/sync.log")"
+fi
+
 # A refusal ends the run before rclone is invoked, and it used to leave no trace
 # beyond a line on stderr, which systemd puts in the journal. The log stayed
 # empty, so onedrive-doctor reported that nothing had ever run through the
@@ -4340,5 +4364,61 @@ else
 fi
 check "and that hook is still on disk" test -f "$NM_HOOK"
 check_absent "and sudo was not asked to remove it" "$NM_SUDO_CALLS"
+
+# The unit files and the autostart entry live at paths that do not depend on
+# --prefix and hold absolute paths, so an install or an uninstall aimed at another
+# prefix used to take this one's files with it. The guard decides by reading the
+# Exec line back, and the two writers escape a path differently (systemd doubles a
+# backslash, a `%` and a `$`; the entry escapes with backslashes and doubles those,
+# because the value crosses the key-file reader before the word splitter), so the
+# prefix here holds a space, a `%` and a `$` at once. Reading the raw text instead
+# of unescaping it called this install's own files foreign in one direction and
+# another install's files ours in the other, which is measured in the mutation
+# table's exec-path row.
+ODD_HOME="$WORK/odd-home"
+ODD_ROOT="$WORK/odd home%\$x"
+ODD_PFX="$ODD_ROOT/.local"
+ODD_OTHER="$WORK/odd-other/.local"
+ODD_UNIT_DIR="$ODD_HOME/.config/systemd/user"
+ODD_ENTRY="$ODD_HOME/.config/autostart/rclone-onedrive-tray.desktop"
+rm -rf "$ODD_HOME" "$ODD_ROOT" "$WORK/odd-other"; mkdir -p "$ODD_HOME"
+# The unit name comes from the config, so the sandbox needs one of its own. The
+# suite's is gone by the time this runs (the --purge case above removes it), and a
+# default-named unit would make the assertions below look in the wrong place.
+mkdir -p "$ODD_HOME/.config/rclone-onedrive-tray"
+printf 'REMOTE="%s"\nLOCAL="%s"\nUNIT_NAME="%s"\n' \
+    "$REMOTE" "$LOCAL_DIR" "$UNIT" > "$ODD_HOME/.config/rclone-onedrive-tray/config"
+odd() {  # odd <script> <prefix> <outfile> [args...]
+    local script="$1" prefix="$2" out="$3"
+    shift 3
+    env HOME="$ODD_HOME" XDG_CONFIG_HOME="$ODD_HOME/.config" \
+        XDG_CACHE_HOME="$ODD_HOME/.cache" XDG_DATA_HOME="$ODD_HOME/.data" \
+        bash "$SRC_DIR/$script" --prefix "$prefix" "$@" >"$out" 2>&1
+}
+# uninstall.sh has no --no-start, and an unknown option is exit 2 before it removes
+# anything, which leaves every file in place and looks exactly like a working guard.
+odd install.sh "$ODD_PFX" "$WORK/odd-install.txt" --no-start
+check "an install under a prefix holding a space, % and \$ writes its unit" \
+    test -f "$ODD_UNIT_DIR/$UNIT.service"
+check "and the entry its desktop reads" test -f "$ODD_ENTRY"
+
+ODD_UNIT_BEFORE="$(cat "$ODD_UNIT_DIR/$UNIT.service")"
+ODD_ENTRY_BEFORE="$(cat "$ODD_ENTRY")"
+odd uninstall.sh "$ODD_OTHER" "$WORK/odd-uninstall.txt"
+check "an uninstall for another prefix leaves that install's unit alone" \
+    test -f "$ODD_UNIT_DIR/$UNIT.service"
+check "and its watch unit" test -f "$ODD_UNIT_DIR/$UNIT-watch.service"
+check "and its autostart entry" test -f "$ODD_ENTRY"
+check "and says which file it left alone" \
+    grep -qF "leaving $ODD_UNIT_DIR/$UNIT.service alone: it runs another install's script" \
+    "$WORK/odd-uninstall.txt"
+
+odd install.sh "$ODD_OTHER" "$WORK/odd-reinstall.txt" --no-start
+check "and an install for another prefix does not repoint that unit" \
+    test "$ODD_UNIT_BEFORE" = "$(cat "$ODD_UNIT_DIR/$UNIT.service")"
+check "and does not rewrite that entry" \
+    test "$ODD_ENTRY_BEFORE" = "$(cat "$ODD_ENTRY")"
+check "and says the units belong to another prefix" \
+    grep -qF "belongs to another prefix" "$WORK/odd-reinstall.txt"
 
 summary
